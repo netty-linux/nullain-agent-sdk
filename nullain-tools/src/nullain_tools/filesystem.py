@@ -53,7 +53,18 @@ def create_filesystem_tools(workspace_root: str | Path) -> list[RegisteredTool]:
             return f"Error: Invalid regex pattern '{pattern}': {err}"
 
         matches: list[str] = []
+        ignored_dirs = {
+            ".git",
+            ".venv",
+            "node_modules",
+            ".pytest_cache",
+            ".ruff_cache",
+            "__pycache__",
+            ".hypothesis",
+        }
         for file_path in search_dir.rglob("*"):
+            if any(part in ignored_dirs for part in file_path.parts):
+                continue
             if file_path.is_file() and not file_path.name.startswith("."):
                 with contextlib.suppress(Exception):
                     rel = file_path.relative_to(root)

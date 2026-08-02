@@ -66,3 +66,21 @@ def test_prompt_assembler_security_isolation(tmp_path: Path) -> None:
     # Verify PermissionPolicy itself remains intact and denying restricted commands
     policy = PermissionPolicy(workspace_root=str(tmp_path))
     assert policy.evaluate_command(["rm", "-rf", "/"]) == PermissionLevel.DENY
+
+
+def test_conversation_fold_compaction_system_message() -> None:
+    from nullain.events import CompactionEvent, Conversation, UserMessageEvent
+
+    ev1 = UserMessageEvent(session_id="s1", id="ev1", content="First prompt")
+    comp_ev = CompactionEvent(
+        session_id="s1", summary="Compacted 1 events.", compacted_event_ids=("ev1",)
+    )
+    ev2 = UserMessageEvent(session_id="s1", id="ev2", content="Second prompt")
+
+    state = Conversation.fold("s1", [ev1, comp_ev, ev2])
+    assert state.compaction_summary == "Compacted 1 events."
+    assert len(state.messages) == 2
+    assert state.messages[0].role == "system"
+    assert state.messages[0].content is not None and "SUMMARY OF PRIOR CONVERSATION" in state.messages[0].content
+    assert state.messages[1].role == "user"
+    assert state.messages[1].content == "Second prompt"

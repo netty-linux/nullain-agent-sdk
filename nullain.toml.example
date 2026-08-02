@@ -1,0 +1,17 @@
+# Nullain Agent SDK Configuration Example
+
+[router]
+fallback_chain = ["deep", "balanced", "fast"]
+classifier_model = "gpt-oss:20b"
+
+[router.tiers.fast]
+models = ["gpt-oss:20b"]
+max_context = 32000
+
+[router.tiers.balanced]
+models = ["qwen3-coder:480b-cloud", "gpt-oss:120b"]
+max_context = 128000
+
+[router.tiers.deep]
+models = ["deepseek-v4-pro"]
+max_context = 128000

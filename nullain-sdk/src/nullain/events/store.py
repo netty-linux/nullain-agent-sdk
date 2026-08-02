@@ -1,7 +1,6 @@
 """Nullain Agent SDK — SQLite Async Event Store for Local Persistence."""
 
 from pathlib import Path
-from typing import Any
 
 import aiosqlite
 
@@ -17,7 +16,7 @@ from nullain.events.types import (
     UserMessageEvent,
 )
 
-EVENT_CLASS_MAP: dict[str, Any] = {
+EVENT_CLASS_MAP: dict[str, type[BaseEvent]] = {
     "user_message": UserMessageEvent,
     "model_response": ModelResponseEvent,
     "tool_call": ToolCallEvent,
@@ -66,7 +65,9 @@ class EventStore:
         """Persist an event to SQLite."""
         if self._conn is None:
             await self.initialize()
-        assert self._conn is not None
+
+        if self._conn is None:
+            raise RuntimeError("Failed to initialize EventStore database connection")
 
         payload = event.model_dump_json()
         query = (
@@ -83,7 +84,9 @@ class EventStore:
         """Fetch all events for a given session sorted by timestamp."""
         if self._conn is None:
             await self.initialize()
-        assert self._conn is not None
+
+        if self._conn is None:
+            raise RuntimeError("Failed to initialize EventStore database connection")
 
         query = (
             "SELECT event_type, payload FROM events WHERE session_id = ? "

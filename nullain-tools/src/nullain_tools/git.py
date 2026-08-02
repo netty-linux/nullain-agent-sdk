@@ -18,9 +18,10 @@ def create_git_tools(workspace_root: str | Path) -> list[RegisteredTool]:
         _, output = await execute_subprocess(["git", "diff"], cwd=root)
         return output or "No uncommitted changes."
 
-    @tool(name="git_commit", description="Stage changes and create a git commit.")
-    async def git_commit(message: str) -> str:
-        await execute_subprocess(["git", "add", "."], cwd=root)
+    @tool(name="git_commit", description="Stage specified or all changes and create a git commit.")
+    async def git_commit(message: str, files: list[str] | None = None) -> str:
+        add_args = ["git", "add"] + (files if files else ["."])
+        await execute_subprocess(add_args, cwd=root)
         ret, commit_output = await execute_subprocess(["git", "commit", "-m", message], cwd=root)
         if ret != 0:
             return f"Git commit failed: {commit_output}"

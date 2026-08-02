@@ -72,6 +72,16 @@ class Conversation:
                     )
                 )
 
+        # Prepend compaction summary as a system message if present
+        if state.compaction_summary:
+            state.messages.insert(
+                0,
+                ChatMessage(
+                    role="system",
+                    content=f"[SUMMARY OF PRIOR CONVERSATION]\n{state.compaction_summary}",
+                ),
+            )
+
         return state
 
 

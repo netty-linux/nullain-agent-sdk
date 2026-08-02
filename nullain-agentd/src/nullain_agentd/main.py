@@ -3,19 +3,25 @@
 import asyncio
 import json
 import sys
+from pathlib import Path
 from typing import Any, cast
 
 from nullain.agent import AgentLoop
+from nullain.config import load_settings
 from nullain.events import BaseEvent, EventBus
 from nullain.llm import OllamaCloudProvider
 from nullain.protocol import AgentEventPayload, ProtocolEnvelope
-from nullain.tools import ToolRegistry
+from nullain.tools import PermissionPolicy, ToolRegistry
 from nullain_tools import register_default_tools
 
 
 async def run_agentd() -> None:
     """Async main loop reading NDJSON from stdin and writing responses to stdout."""
-    registry: ToolRegistry | None = None
+    settings = load_settings()
+    ws_root = "."
+    policy = PermissionPolicy(workspace_root=ws_root)
+    registry: ToolRegistry = ToolRegistry(permission_policy=policy)
+    register_default_tools(registry, ws_root)
     event_bus = EventBus()
 
     async def emit_agent_event(ev: BaseEvent) -> None:
@@ -63,7 +69,8 @@ async def run_agentd() -> None:
 
         if env.type == "session.start":
             ws_root = str(env.payload.get("workspace_root", "."))
-            registry = ToolRegistry()
+            policy = PermissionPolicy(workspace_root=ws_root)
+            registry = ToolRegistry(permission_policy=policy)
             register_default_tools(registry, ws_root)
 
             resp_env = ProtocolEnvelope(
@@ -78,15 +85,16 @@ async def run_agentd() -> None:
         elif env.type == "user.message":
             prompt = str(env.payload.get("prompt", ""))
             sess_id = str(env.payload.get("session_id", "s1"))
-            if registry is None:
-                registry = ToolRegistry()
-                register_default_tools(registry, ".")
 
-            provider = OllamaCloudProvider()
+            provider = OllamaCloudProvider(
+                api_key=settings.ollama_api_key,
+                base_url=settings.ollama_base_url,
+            )
             agent = AgentLoop(
                 provider=provider,
                 tools=registry,
                 event_bus=event_bus,
+                workspace_root=Path(ws_root),
             )
 
             try:

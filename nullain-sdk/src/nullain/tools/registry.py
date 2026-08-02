@@ -41,15 +41,37 @@ class ToolRegistry:
         """
         registered = self.get_tool(name)
 
-        if self.permission_policy is not None and name == "bash" and "command_args" in arguments:
-            raw_args = arguments["command_args"]
-            if isinstance(raw_args, list):
-                cmd_args = [str(x) for x in cast(list[Any], raw_args)]
-                level = self.permission_policy.evaluate_command(cmd_args)
-                if level == PermissionLevel.DENY:
-                    raise ToolPermissionError(
-                        f"Execution of command args {cmd_args} denied by policy"
-                    )
+        if self.permission_policy is not None:
+            if name == "bash" and "command_args" in arguments:
+                raw_args = arguments["command_args"]
+                if isinstance(raw_args, list):
+                    cmd_args = [str(x) for x in cast(list[Any], raw_args)]
+                    level = self.permission_policy.evaluate_command(cmd_args)
+                    if level == PermissionLevel.DENY:
+                        raise ToolPermissionError(
+                            f"Execution of command args {cmd_args} denied by policy"
+                        )
+            elif name in ("write_file", "edit_file"):
+                target_path = str(
+                    arguments.get("file_path")
+                    or arguments.get("target_file")
+                    or arguments.get("path")
+                    or ""
+                )
+                if target_path:
+                    level = self.permission_policy.evaluate_file_access(target_path, is_write=True)
+                    if level == PermissionLevel.DENY:
+                        raise ToolPermissionError(
+                            f"Write access to '{target_path}' denied by permission policy"
+                        )
+            elif name == "read_file":
+                target_path = str(arguments.get("file_path") or arguments.get("path") or "")
+                if target_path:
+                    level = self.permission_policy.evaluate_file_access(target_path, is_write=False)
+                    if level == PermissionLevel.DENY:
+                        raise ToolPermissionError(
+                            f"Read access to '{target_path}' denied by permission policy"
+                        )
 
         res = await registered.execute(arguments)
         return str(res)

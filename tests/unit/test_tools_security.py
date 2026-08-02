@@ -95,3 +95,21 @@ def test_hypothesis_path_safety(subpath: str, tmp_path: Path) -> None:
             assert res.is_relative_to(workspace)
         except ToolPermissionError:
             pass
+
+
+@pytest.mark.asyncio
+async def test_tool_registry_file_permission_enforcement(tmp_path: Path) -> None:
+    from nullain.tools import ToolRegistry
+    from nullain_tools import create_filesystem_tools
+
+    policy = PermissionPolicy(workspace_root=str(tmp_path))
+    registry = ToolRegistry(permission_policy=policy)
+    for t in create_filesystem_tools(tmp_path):
+        registry.register(t)
+
+    # Accessing .env should be denied by policy
+    with pytest.raises(ToolPermissionError, match="denied by permission policy"):
+        await registry.execute("write_file", {"path": ".env", "content": "SECRET=123"})
+
+    with pytest.raises(ToolPermissionError, match="denied by permission policy"):
+        await registry.execute("read_file", {"path": ".env"})

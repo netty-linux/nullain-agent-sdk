@@ -45,7 +45,10 @@ class SpecValidator:
         failed_criteria: list[str] = []
         for criterion in spec.acceptance_criteria:
             crit_lower = criterion.lower()
-            if "error" in crit_lower and "error" in execution_output.lower():
+            has_fail_crit = "error" in crit_lower or "fail" in crit_lower
+            out_lower = execution_output.lower()
+            has_fail_out = any(kw in out_lower for kw in ("error", "failed", "exception"))
+            if has_fail_crit and has_fail_out:
                 failed_criteria.append(criterion)
 
         if failed_criteria:
