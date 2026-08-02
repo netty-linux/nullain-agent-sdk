@@ -13,7 +13,7 @@ from nullain.config import load_settings
 from nullain.events import BaseEvent, EventBus, EventStore
 from nullain.hooks import HookManager
 from nullain.llm import OllamaCloudProvider
-from nullain.memory import EpisodicMemory
+from nullain.memory import EpisodicMemory, PersistentMemory
 from nullain.protocol import (
     AgentEventPayload,
     AskUserRequestPayload,
@@ -140,6 +140,7 @@ async def run_agentd() -> None:
         permission_policy=policy,
         permission_callback=permission_callback,
     )
+    persistent_memory: PersistentMemory | None = None
     register_default_tools(registry, ws_root, ask_user_callback=ask_user_callback)
 
     try:
@@ -171,7 +172,13 @@ async def run_agentd() -> None:
                     permission_policy=policy,
                     permission_callback=permission_callback,
                 )
-                register_default_tools(registry, ws_root, ask_user_callback=ask_user_callback)
+                persistent_memory = PersistentMemory(workspace_root=ws_root)
+                register_default_tools(
+                    registry,
+                    ws_root,
+                    ask_user_callback=ask_user_callback,
+                    persistent_memory=persistent_memory,
+                )
 
                 resp_env = ProtocolEnvelope(
                     v=1,
@@ -196,6 +203,7 @@ async def run_agentd() -> None:
                     router=router,
                     episodic_memory=episodic_memory,
                     hooks=hook_manager,
+                    persistent_memory=persistent_memory,
                     workspace_root=Path(ws_root),
                 )
 

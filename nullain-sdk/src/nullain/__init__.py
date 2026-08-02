@@ -48,7 +48,13 @@ from nullain.llm import (
     ToolCall,
     ToolSpec,
 )
-from nullain.memory import EpisodicMemory, TrajectoryRecord
+from nullain.memory import (
+    EpisodicMemory,
+    MemoryEntry,
+    MemoryType,
+    PersistentMemory,
+    TrajectoryRecord,
+)
 from nullain.ports import Clock, SystemClock
 from nullain.protocol import (
     AgentEventPayload,
@@ -94,6 +100,8 @@ __all__ = [
     "IntentParser",
     "IntentResult",
     "LLMProvider",
+    "MemoryEntry",
+    "MemoryType",
     "ModelResponseEvent",
     "ModelRouter",
     "NoModelAvailableError",
@@ -102,6 +110,7 @@ __all__ = [
     "OllamaCloudProvider",
     "PermissionRequestPayload",
     "PermissionResponsePayload",
+    "PersistentMemory",
     "PromptAssembler",
     "ProtocolEnvelope",
     "ProviderAuthenticationError",

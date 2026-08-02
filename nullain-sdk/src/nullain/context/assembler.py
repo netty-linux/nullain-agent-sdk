@@ -50,6 +50,7 @@ class PromptAssembler:
         self,
         skills_summary: str | None = None,
         episodic_memory: str | None = None,
+        memory_index: str | None = None,
     ) -> str:
         """Assemble complete system prompt layers in order."""
         layers: list[str] = [
@@ -66,6 +67,9 @@ class PromptAssembler:
 
         if episodic_memory:
             layers.append(f"# EPISODIC MEMORY (RELEVANT PAST TRAJECTORIES)\n{episodic_memory}\n")
+
+        if memory_index:
+            layers.append(memory_index)
 
         return "\n\n".join(layers)
 

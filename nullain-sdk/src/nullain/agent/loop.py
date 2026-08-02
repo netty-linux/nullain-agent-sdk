@@ -42,7 +42,7 @@ from nullain.llm import (
     TokenUsage,
     ToolCall,
 )
-from nullain.memory import EpisodicMemory, TrajectoryRecord
+from nullain.memory import EpisodicMemory, PersistentMemory, TrajectoryRecord
 from nullain.ports.clock import Clock, SystemClock
 from nullain.router import Complexity, IntentParser, ModelRouter
 from nullain.telemetry import get_cost_tracker, get_logger
@@ -97,6 +97,7 @@ class AgentLoop:
         episodic_memory: EpisodicMemory | None = None,
         clock: Clock | None = None,
         hooks: HookManager | HooksConfig | None = None,
+        persistent_memory: PersistentMemory | None = None,
         workspace_root: str | Path = ".",
         max_steps: int = 25,
         max_tokens: int | None = 100_000,
@@ -122,6 +123,9 @@ class AgentLoop:
             clock: Injectable clock for deterministic testing.
             hooks: Lifecycle hook manager (or raw HooksConfig) for pre_tool,
                 post_tool, stop, and pre_compact command hooks.
+            persistent_memory: Optional file-backed persistent memory whose
+                index is re-injected into the system prompt (survives
+                compaction). When None, no persistent memory is used.
             workspace_root: Workspace root directory path.
             max_steps: Maximum ReAct loop iterations.
             max_tokens: Token budget ceiling.
@@ -147,6 +151,8 @@ class AgentLoop:
             self.hooks: HookManager = hooks or HookManager()
         else:
             self.hooks = HookManager(hooks)
+        self.persistent_memory = persistent_memory
+        self._episodic_few_shot: str | None = None
         self.max_steps = max_steps
         self.max_tokens = max_tokens
         self.timeout = timeout
@@ -163,6 +169,19 @@ class AgentLoop:
         await self.event_bus.publish(event)
         if self.event_store is not None:
             await self.event_store.append(event)
+
+    def _assemble_system_prompt(self) -> str:
+        """Re-assemble the layered system prompt from current on-disk state.
+
+        Re-reads AGENTS.md/SOUL and the persistent-memory index each call so
+        that facts written mid-run (and project conventions) are picked up
+        fresh — in particular they survive context compaction, mirroring
+        Claude Code re-injecting CLAUDE.md / memory after a compaction event.
+        """
+        return self.prompt_assembler.assemble(
+            episodic_memory=self._episodic_few_shot,
+            memory_index=self.persistent_memory.to_context() if self.persistent_memory else None,
+        )
 
     async def _generate_spec(self, prompt: str, model: str, system_prompt: str) -> TaskSpec:
         """Ask the LLM to generate a structured TaskSpec for the task.
@@ -751,12 +770,11 @@ class AgentLoop:
 
         # 2. Few-Shot Memory Retrieval
         few_shot_str = await self._retrieve_few_shot(intent_res.intent_type, sess_id)
+        self._episodic_few_shot = few_shot_str
 
-        # Assemble Layered System Prompt
-        system_prompt = self.prompt_assembler.assemble(
-            skills_summary=None,
-            episodic_memory=few_shot_str,
-        )
+        # Assemble Layered System Prompt (re-assembled each step so persistent
+        # memory / AGENTS.md survive compaction — see _assemble_system_prompt).
+        system_prompt = self._assemble_system_prompt()
 
         # 3. Plan Phase — LLM generates spec for MEDIUM/HIGH tasks
         active_spec: TaskSpec | None = None
@@ -811,6 +829,10 @@ class AgentLoop:
                 )
 
                 step += 1
+                # Re-assemble the system prompt so persistent memory and
+                # AGENTS.md are re-injected after compaction (and stay fresh
+                # if memory was written earlier this step).
+                system_prompt = self._assemble_system_prompt()
                 messages = self._build_messages(sess_id, accumulated_events, system_prompt, step)
 
                 tool_specs = self.tools.list_specs()
