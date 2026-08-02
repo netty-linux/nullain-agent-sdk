@@ -46,6 +46,17 @@ from nullain.llm import (
     ToolCall,
     ToolSpec,
 )
+from nullain.memory import EpisodicMemory, TrajectoryRecord
+from nullain.protocol import (
+    AgentEventPayload,
+    PermissionRequestPayload,
+    PermissionResponsePayload,
+    ProtocolEnvelope,
+    SessionEndPayload,
+    SessionStartPayload,
+    UserMessagePayload,
+    export_schema,
+)
 from nullain.router import CircuitBreaker, Complexity, IntentParser, IntentResult, ModelRouter
 from nullain.telemetry import configure_telemetry, get_logger
 
@@ -53,6 +64,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "HARNESS_RULES",
+    "AgentEventPayload",
     "AgentLoop",
     "BaseEvent",
     "BudgetExceededError",
@@ -66,6 +78,7 @@ __all__ = [
     "ContextManager",
     "Conversation",
     "ConversationState",
+    "EpisodicMemory",
     "ErrorEvent",
     "EventBus",
     "EventStore",
@@ -79,7 +92,10 @@ __all__ = [
     "NullainError",
     "NullainSettings",
     "OllamaCloudProvider",
+    "PermissionRequestPayload",
+    "PermissionResponsePayload",
     "PromptAssembler",
+    "ProtocolEnvelope",
     "ProviderAuthenticationError",
     "ProviderError",
     "ProviderRateLimitError",
@@ -87,6 +103,8 @@ __all__ = [
     "Role",
     "RouterConfig",
     "RouterError",
+    "SessionEndPayload",
+    "SessionStartPayload",
     "SpecCreatedEvent",
     "SpecValidationError",
     "SpecValidator",
@@ -102,8 +120,11 @@ __all__ = [
     "ToolPermissionError",
     "ToolResultEvent",
     "ToolSpec",
+    "TrajectoryRecord",
     "UserMessageEvent",
+    "UserMessagePayload",
     "configure_telemetry",
+    "export_schema",
     "get_logger",
     "load_settings",
 ]
