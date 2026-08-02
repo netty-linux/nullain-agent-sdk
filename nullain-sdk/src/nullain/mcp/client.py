@@ -18,7 +18,10 @@ cannot be inferred from its arguments, each wrapper carries a fixed
 
 from __future__ import annotations
 
-from typing import Any, cast
+import json
+from typing import Any
+
+from pydantic import ValidationError
 
 from nullain.errors import MCPProtocolError
 from nullain.llm.types import FunctionSpec, ToolSpec
@@ -30,6 +33,7 @@ from nullain.mcp.protocol import (
     METHOD_TOOLS_LIST,
     JSONRPCNotification,
     JSONRPCRequest,
+    JSONRPCResponse,
     MCPToolDefinition,
 )
 from nullain.mcp.transport import MCPTransport
@@ -141,11 +145,19 @@ class MCPClient:
 def _parse_jsonrpc_result(raw: str, request_id: int | str) -> Any:
     """Parse a JSON-RPC response line and return its ``result`` field.
 
-    Raises :class:`MCPProtocolError` for error responses, missing fields, or
-    malformed JSON.
-    """
-    import json
+    The envelope is validated through :class:`JSONRPCResponse` — MCP server
+    output is untrusted, so it goes through Pydantic at the boundary exactly
+    like LLM output (AGENTS.md rule 3). Raises :class:`MCPProtocolError` for
+    error responses, id mismatches, or malformed JSON.
 
+    Args:
+        raw: The raw response line from the transport.
+        request_id: The id of the request this response corresponds to.
+
+    Returns:
+        The validated ``result`` payload (may be ``None`` for an explicit
+        ``"result": null``).
+    """
     try:
         obj = json.loads(raw)
     except json.JSONDecodeError as err:
@@ -153,27 +165,31 @@ def _parse_jsonrpc_result(raw: str, request_id: int | str) -> Any:
             f"MCP server returned non-JSON response: {raw[:200]}",
             details={"raw": raw[:500]},
         ) from err
-    if not isinstance(obj, dict):
-        raise MCPProtocolError("MCP response is not a JSON object", details={"raw": raw[:500]})
-    data = cast(dict[str, Any], obj)
-    if data.get("id") != request_id:
+    try:
+        response = JSONRPCResponse.model_validate(obj)
+    except ValidationError as err:
+        raise MCPProtocolError(
+            "MCP response is not a valid JSON-RPC response object",
+            details={"raw": raw[:500]},
+        ) from err
+    if response.id != request_id:
         raise MCPProtocolError(
             "MCP response id does not match request id",
-            details={"expected": request_id, "got": data.get("id")},
+            details={"expected": request_id, "got": response.id},
         )
-    if data.get("error") is not None:
-        from nullain.mcp.protocol import JSONRPCError
-
-        err = JSONRPCError.model_validate(data["error"])
+    if response.error is not None:
         raise MCPProtocolError(
-            f"MCP server error (code {err.code}): {err.message}",
-            details={"code": err.code, "message": err.message},
+            f"MCP server error (code {response.error.code}): {response.error.message}",
+            details={"code": response.error.code, "message": response.error.message},
         )
-    if "result" not in data:
+    # ``result: Any | None = None`` cannot distinguish an explicit ``null`` from
+    # a missing key, so check the raw object to reject envelopes carrying neither
+    # ``result`` nor ``error`` (malformed per JSON-RPC 2.0).
+    if "result" not in (obj if isinstance(obj, dict) else {}):
         raise MCPProtocolError(
             "MCP response has neither result nor error", details={"raw": raw[:500]}
         )
-    return data["result"]
+    return response.result
 
 
 def _namespaced_tool_name(server: str, tool: MCPToolDefinition) -> str:
