@@ -1,5 +1,6 @@
 """Nullain Agent SDK — Production Agentic Framework for Python."""
 
+from nullain.agent import AgentLoop
 from nullain.errors import (
     BudgetExceededError,
     ContextError,
@@ -48,6 +49,7 @@ from nullain.telemetry import configure_telemetry, get_logger
 __version__ = "0.1.0"
 
 __all__ = [
+    "AgentLoop",
     "BaseEvent",
     "BudgetExceededError",
     "ChatMessage",
