@@ -104,19 +104,22 @@ async def test_agent_loop_infinite_loop_prevention(tmp_path: Path) -> None:
     registry = ToolRegistry()
     register_default_tools(registry, tmp_path)
 
-    # Endless tool calls response
-    endless_chunk = CompletionChunk(
-        tool_calls=[
-            ToolCall(
-                id="endless_1",
-                name="read_file",
-                arguments={"path": "non_existent.txt"},
-            )
-        ]
-    )
+    # Endless but VARYING tool calls — distinct paths each step so loop detection
+    # does not fire and the max_steps guard is what stops the loop.
+    varying_chunks = [
+        CompletionChunk(
+            tool_calls=[
+                ToolCall(
+                    id=f"call_{i}",
+                    name="read_file",
+                    arguments={"path": f"non_existent_{i}.txt"},
+                )
+            ]
+        )
+        for i in range(10)
+    ]
 
-    # Infinite sequence provider
-    fake_provider = FakeSequenceProvider([endless_chunk] * 10)
+    fake_provider = FakeSequenceProvider(varying_chunks)
     bus = EventBus()
     events_log: list[BaseEvent] = []
 
@@ -138,6 +141,100 @@ async def test_agent_loop_infinite_loop_prevention(tmp_path: Path) -> None:
     error_events = [e for e in events_log if isinstance(e, ErrorEvent)]
     assert len(error_events) == 1
     assert "maximum step count" in error_events[0].message
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_detection_repeated_calls(tmp_path: Path) -> None:
+    """Repeating the exact same tool call for ``loop_detection_threshold``
+    consecutive steps is detected as a stuck loop: the run returns a
+    ``loop_detected`` RunResult and emits a LoopDetected error event."""
+    from nullain.agent import RunResult
+
+    registry = ToolRegistry()
+    register_default_tools(registry, tmp_path)
+
+    # Identical tool call every step
+    stuck_chunk = CompletionChunk(
+        tool_calls=[
+            ToolCall(
+                id="stuck_1",
+                name="read_file",
+                arguments={"path": "missing.txt"},
+            )
+        ]
+    )
+    fake_provider = FakeSequenceProvider([stuck_chunk] * 10)
+    bus = EventBus()
+    events_log: list[BaseEvent] = []
+
+    async def track_events(ev: BaseEvent) -> None:
+        events_log.append(ev)
+
+    bus.subscribe("*", track_events)
+
+    agent = AgentLoop(
+        provider=fake_provider,
+        tools=registry,
+        event_bus=bus,
+        max_steps=25,
+        loop_detection_threshold=3,
+    )
+
+    result = await agent.run_result("Do something stuck")
+    assert isinstance(result, RunResult)
+    assert result.status == "loop_detected"
+    assert not result.success
+
+    loop_errors = [
+        e for e in events_log if isinstance(e, ErrorEvent) and e.error_type == "LoopDetected"
+    ]
+    assert len(loop_errors) == 1
+    # Self-correction reflection injected
+    user_msgs = [e for e in events_log if e.event_type == "user_message"]
+    assert any("[SELF-CORRECTION]" in getattr(m, "content", "") for m in user_msgs)
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_spawn_subagent_returns_text(tmp_path: Path) -> None:
+    """spawn runs a child AgentLoop with fresh context and returns only its
+    final text. The parent's event bus is NOT polluted by the child's
+    internal tool/model events."""
+    registry = ToolRegistry()
+    register_default_tools(registry, tmp_path)
+
+    # Child provider: a spec chunk (LOW complexity path skipped by using
+    # explicit model + a trivial prompt) then a final answer.
+    spec_chunk = CompletionChunk(
+        delta_text=(
+            '{"objective": "Subtask", "steps": ["reply"], '
+            '"target_files": [], "acceptance_criteria": []}'
+        )
+    )
+    final_chunk = CompletionChunk(delta_text="Sub-agent result: 42")
+
+    # We need two distinct providers: parent and child. Parent just spawns
+    # and returns the child's text — so the parent's own run is bypassed by
+    # calling spawn directly.
+    child_provider = FakeSequenceProvider([spec_chunk, final_chunk])
+
+    parent = AgentLoop(
+        provider=child_provider,  # shared; spawn reuses it for the child
+        tools=registry,
+        event_bus=EventBus(),
+        model="sub-model",
+    )
+
+    parent_events: list[BaseEvent] = []
+
+    async def track_parent(ev: BaseEvent) -> None:
+        parent_events.append(ev)
+
+    parent.event_bus.subscribe("*", track_parent)
+
+    text = await parent.spawn("Do the subtask", model="sub-model")
+    assert text == "Sub-agent result: 42"
+    # Parent bus stays clean: child's internal events were isolated.
+    assert parent_events == []
 
 
 @pytest.mark.asyncio
@@ -311,6 +408,10 @@ async def test_agent_loop_context_window_exhausted_thrash(tmp_path: Path) -> Non
         context_manager=cm,
         max_steps=15,
         max_compaction_attempts=3,
+        # Disable loop detection here: this test exercises compaction thrash
+        # specifically, which requires the same call to repeat past the point
+        # loop detection would otherwise stop it.
+        loop_detection_threshold=100,
     )
 
     with pytest.raises(ContextWindowExhaustedError):

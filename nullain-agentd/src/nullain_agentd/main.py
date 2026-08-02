@@ -14,6 +14,7 @@ from nullain.llm import OllamaCloudProvider
 from nullain.memory import EpisodicMemory
 from nullain.protocol import (
     AgentEventPayload,
+    AskUserRequestPayload,
     PermissionRequestPayload,
     ProtocolEnvelope,
 )
@@ -105,13 +106,40 @@ async def run_agentd() -> None:
             return False
         return bool(resp_env.payload.get("granted", False))
 
+    async def ask_user_callback(question: str) -> str:
+        """Emit an ask_user.request and await the matching ask_user.response.
+
+        Fail-closed on EOF/parse error: returns an error string the agent can
+        react to rather than hanging on a closed stdin.
+        """
+        request_id = str(uuid.uuid4())
+        req_payload = AskUserRequestPayload(request_id=request_id, question=question)
+        req_env = ProtocolEnvelope(
+            v=1,
+            type="ask_user.request",
+            payload=json.loads(req_payload.model_dump_json()),
+        )
+        write_envelope(req_env)
+
+        line_bytes = await reader.readline()
+        if not line_bytes:
+            return "Error: user interaction channel closed (no answer)."
+        try:
+            raw = cast(dict[str, Any], json.loads(line_bytes.decode("utf-8").strip()))
+            resp_env = ProtocolEnvelope.model_validate(raw)
+        except Exception:
+            return "Error: unparseable response to ask_user."
+        if resp_env.type != "ask_user.response":
+            return "Error: expected ask_user.response."
+        return str(resp_env.payload.get("answer", ""))
+
     ws_root = "."
     policy = PermissionPolicy(workspace_root=ws_root)
     registry: ToolRegistry = ToolRegistry(
         permission_policy=policy,
         permission_callback=permission_callback,
     )
-    register_default_tools(registry, ws_root)
+    register_default_tools(registry, ws_root, ask_user_callback=ask_user_callback)
 
     try:
         while True:
@@ -142,7 +170,7 @@ async def run_agentd() -> None:
                     permission_policy=policy,
                     permission_callback=permission_callback,
                 )
-                register_default_tools(registry, ws_root)
+                register_default_tools(registry, ws_root, ask_user_callback=ask_user_callback)
 
                 resp_env = ProtocolEnvelope(
                     v=1,

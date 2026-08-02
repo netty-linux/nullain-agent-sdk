@@ -12,6 +12,7 @@ dependencies = [
     "nullain-sdk",
     "pydantic>=2.7.0",
     "anyio>=4.3.0",
+    "httpx>=0.27.0",
 ]
 
 [tool.hatch.build.targets.wheel]

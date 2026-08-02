@@ -31,6 +31,15 @@ class ToolRegistry:
         """Register a RegisteredTool instance."""
         self._tools[tool_obj.name] = tool_obj
 
+    def is_read_only(self, name: str) -> bool:
+        """Whether a registered tool is marked side-effect-free (read-only).
+
+        Unknown tools are treated as NOT read-only (fail-safe: a write tool
+        must never accidentally be dispatched concurrently).
+        """
+        tool = self._tools.get(name)
+        return bool(tool and tool.read_only)
+
     def get_tool(self, name: str) -> RegisteredTool:
         """Retrieve tool by name.
 

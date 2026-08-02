@@ -16,12 +16,17 @@ class RegisteredTool:
         description: str,
         spec: ToolSpec,
         func: Callable[..., Any],
+        read_only: bool = False,
     ) -> None:
         self.name = name
         self.description = description
         self.spec = spec
         self.func = func
         self.is_async = inspect.iscoroutinefunction(func)
+        # Read-only tools (no side effects: read_file, grep, glob, ...) can be
+        # dispatched concurrently when the model requests several at once. The
+        # Act loop uses this to run a batch of read-only calls via gather.
+        self.read_only = read_only
 
     async def execute(self, kwargs: dict[str, Any]) -> Any:
         """Execute tool function handling both sync and async functions."""
@@ -31,9 +36,18 @@ class RegisteredTool:
 
 
 def tool(
-    name: str | None = None, description: str | None = None
+    name: str | None = None,
+    description: str | None = None,
+    read_only: bool = False,
 ) -> Callable[[Callable[..., Any]], RegisteredTool]:
-    """Decorator to register a python function as an agent Tool with JSON Schema auto-derivation."""
+    """Decorator to register a python function as an agent Tool with JSON Schema auto-derivation.
+
+    Args:
+        name: Override tool name (defaults to the function name).
+        description: Override tool description (defaults to the docstring).
+        read_only: Mark the tool as side-effect-free so the Act loop may
+            dispatch it concurrently with other read-only tool calls.
+    """
 
     def decorator(func: Callable[..., Any]) -> RegisteredTool:
         tool_name = name or func.__name__
@@ -70,6 +84,7 @@ def tool(
             description=tool_doc,
             spec=tool_spec,
             func=func,
+            read_only=read_only,
         )
 
     return decorator

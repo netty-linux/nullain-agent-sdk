@@ -53,6 +53,24 @@ class PermissionResponsePayload(BaseModel):
     granted: bool
 
 
+class AskUserRequestPayload(BaseModel):
+    """Payload for ask_user.request message.
+
+    The daemon emits this when the agent invokes the ``ask_user`` tool; the
+    client responds with an ``ask_user.response`` carrying the user's answer.
+    """
+
+    request_id: str
+    question: str
+
+
+class AskUserResponsePayload(BaseModel):
+    """Payload for ask_user.response message."""
+
+    request_id: str
+    answer: str
+
+
 class SessionEndPayload(BaseModel):
     """Payload for session.end message."""
 
@@ -62,6 +80,8 @@ class SessionEndPayload(BaseModel):
 
 __all__ = [
     "AgentEventPayload",
+    "AskUserRequestPayload",
+    "AskUserResponsePayload",
     "PermissionRequestPayload",
     "PermissionResponsePayload",
     "ProtocolEnvelope",

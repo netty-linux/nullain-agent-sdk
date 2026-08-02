@@ -3,6 +3,8 @@
 from nullain.protocol.exporter import export_schema
 from nullain.protocol.types import (
     AgentEventPayload,
+    AskUserRequestPayload,
+    AskUserResponsePayload,
     PermissionRequestPayload,
     PermissionResponsePayload,
     ProtocolEnvelope,
@@ -13,6 +15,8 @@ from nullain.protocol.types import (
 
 __all__ = [
     "AgentEventPayload",
+    "AskUserRequestPayload",
+    "AskUserResponsePayload",
     "PermissionRequestPayload",
     "PermissionResponsePayload",
     "ProtocolEnvelope",

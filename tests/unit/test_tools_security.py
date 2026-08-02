@@ -87,6 +87,18 @@ def test_hypothesis_path_safety(subpath: str, tmp_path: Path) -> None:
     if "\x00" in subpath or any(c in subpath for c in '<>:"|?*'):
         return
 
+    # Filter Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9):
+    # resolving paths over them is pathologically slow on Windows and they are
+    # not valid workspace subpaths.
+    upper = subpath.upper().split(".")[0].split("\\")[0].split("/")[0]
+    reserved = (
+        {"CON", "PRN", "AUX", "NUL"}
+        | {f"COM{i}" for i in range(1, 10)}
+        | {f"LPT{i}" for i in range(1, 10)}
+    )
+    if upper in reserved:
+        return
+
     clean = subpath.replace("\\", "/").lstrip("/")
     resolved = workspace / clean
     if resolved.is_relative_to(workspace):

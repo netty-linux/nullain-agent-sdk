@@ -1,11 +1,13 @@
 """Nullain Agent SDK — AgentLoop ReAct and Plan/Act Orchestrated Execution Engine."""
 
+import asyncio
 import json as _json
 import uuid
 from pathlib import Path
 
 from pydantic import ValidationError
 
+from nullain.agent.result import RunResult, RunStatus
 from nullain.agent.spec import BASH_NONZERO_PREFIX, SpecValidator, TaskSpec
 from nullain.context.assembler import PromptAssembler
 from nullain.context.manager import ContextManager
@@ -53,6 +55,21 @@ ERROR_OUTPUT_PREFIXES: tuple[str, ...] = (
 )
 
 
+def _step_signature(tool_calls: list[ToolCall]) -> str:
+    """Build a stable signature for one step's requested tool calls.
+
+    Used by loop detection: two steps with identical (tool_name, arguments)
+    produce the same signature regardless of argument dict ordering or
+    ``id`` fields, so genuinely-identical retries are detected while benign
+    re-issues with changed arguments are not.
+    """
+    parts: list[str] = []
+    for tc in tool_calls:
+        args_json = _json.dumps(tc.arguments, sort_keys=True, default=str)
+        parts.append(f"{tc.name}:{args_json}")
+    return "|".join(parts)
+
+
 class AgentLoop:
     """Orchestrated Agent Execution Engine with Plan/Act/Verify, Routing & Memory."""
 
@@ -76,6 +93,7 @@ class AgentLoop:
         timeout: float = 300.0,
         self_correction_max: int = 3,
         max_compaction_attempts: int = 3,
+        loop_detection_threshold: int = 3,
     ) -> None:
         """Initialize AgentLoop with integrated engine collaborators.
 
@@ -118,6 +136,10 @@ class AgentLoop:
         self.timeout = timeout
         self.self_correction_max = self_correction_max
         self.max_compaction_attempts = max_compaction_attempts
+        # Consecutive identical step signatures (by tool_name + arguments) at
+        # which the loop is considered stuck and is broken out of. Mirrors the
+        # loop-detection Gemini CLI uses to escape thrash.
+        self.loop_detection_threshold = loop_detection_threshold
         self._compaction_attempts = 0
 
     async def _emit(self, event: BaseEvent) -> None:
@@ -201,6 +223,38 @@ class AgentLoop:
             )
         return None
 
+    async def _run_tool_call(
+        self,
+        tc: ToolCall,
+        sess_id: str,
+    ) -> tuple[str, bool, str | None]:
+        """Execute one tool call, returning (output, is_error, error_type).
+
+        Exceptions are normalized into error output strings so callers can
+        dispatch a batch concurrently without ``gather`` short-circuiting.
+        ``error_type`` is set when the failure warranted an ErrorEvent.
+        """
+        try:
+            res_output = await self.tools.execute(tc.name, tc.arguments)
+            is_err = any(res_output.startswith(prefix) for prefix in ERROR_OUTPUT_PREFIXES)
+            return res_output, is_err, None
+        except ToolError as err:
+            logger.warning(
+                "tool_execution_failed",
+                session_id=sess_id,
+                tool=tc.name,
+                error=str(err),
+            )
+            return f"Tool Execution Error ({tc.name}): {err}", True, "ToolExecutionError"
+        except Exception as err:
+            logger.error(
+                "unexpected_tool_error",
+                session_id=sess_id,
+                tool=tc.name,
+                error=str(err),
+            )
+            return f"Unexpected Error ({tc.name}): {err}", True, "UnexpectedToolError"
+
     async def _execute_tools(
         self,
         tool_calls: list[ToolCall],
@@ -210,10 +264,16 @@ class AgentLoop:
     ) -> tuple[str, int]:
         """Execute tool calls with self-correction injection on errors.
 
+        Dispatch policy: when every call in the batch targets a read-only
+        tool (and there is more than one), the calls run concurrently via
+        ``asyncio.gather``. Mixed or side-effecting batches run sequentially
+        to preserve ordering and avoid races on shared filesystem state.
+
         Returns:
             Tuple of (last_output, remaining_correction_budget).
         """
-        last_output = ""
+        # Emit all ToolCallEvents up front, in submission order, so the
+        # trajectory records the model's requested batch before any results.
         for tc in tool_calls:
             tc_ev = ToolCallEvent(
                 session_id=sess_id,
@@ -224,39 +284,26 @@ class AgentLoop:
             await self._emit(tc_ev)
             accumulated_events.append(tc_ev)
 
-            try:
-                res_output = await self.tools.execute(tc.name, tc.arguments)
-                is_err = any(res_output.startswith(prefix) for prefix in ERROR_OUTPUT_PREFIXES)
-            except ToolError as err:
-                logger.warning(
-                    "tool_execution_failed",
-                    session_id=sess_id,
-                    tool=tc.name,
-                    error=str(err),
-                )
-                res_output = f"Tool Execution Error ({tc.name}): {err}"
-                is_err = True
+        all_read_only = len(tool_calls) > 1 and all(
+            self.tools.is_read_only(tc.name) for tc in tool_calls
+        )
+        if all_read_only:
+            outcomes = await asyncio.gather(
+                *(self._run_tool_call(tc, sess_id) for tc in tool_calls)
+            )
+        else:
+            outcomes = [await self._run_tool_call(tc, sess_id) for tc in tool_calls]
+
+        last_output = ""
+        for tc, (res_output, is_err, error_type) in zip(tool_calls, outcomes, strict=True):
+            if error_type is not None:
                 err_ev = ErrorEvent(
                     session_id=sess_id,
-                    error_type="ToolExecutionError",
+                    error_type=error_type,
                     message=res_output,
                 )
                 await self._emit(err_ev)
-            except Exception as err:
-                logger.error(
-                    "unexpected_tool_error",
-                    session_id=sess_id,
-                    tool=tc.name,
-                    error=str(err),
-                )
-                res_output = f"Unexpected Error ({tc.name}): {err}"
-                is_err = True
-                err_ev = ErrorEvent(
-                    session_id=sess_id,
-                    error_type="UnexpectedToolError",
-                    message=res_output,
-                )
-                await self._emit(err_ev)
+                accumulated_events.append(err_ev)
 
             res_ev = ToolResultEvent(
                 session_id=sess_id,
@@ -487,10 +534,14 @@ class AgentLoop:
         session_id: str | None = None,
         events_history: list[BaseEvent] | None = None,
         streaming: bool = False,
-    ) -> str:
+    ) -> RunResult:
         """Run orchestrated agent execution pipeline.
 
         Pipeline: Intent → Route → Plan → Act → Verify → Memory.
+
+        Returns a structured ``RunResult``. Terminal-resource failures
+        (budget, timeout, context exhaustion) are captured as statuses rather
+        than raised, so structured callers can branch on outcome.
         """
         sess_id = session_id or str(uuid.uuid4())
         start_time = self.clock.now()
@@ -547,85 +598,140 @@ class AgentLoop:
         final_text = ""
         last_output = ""
         completed = False  # True only when the model returned a final answer (no tool calls)
+        terminal_status: RunStatus | None = None
+        terminal_error: str | None = None
+        loop_detected = False
+        last_step_signature: str | None = None
+        repeat_count = 0
 
-        while step < self.max_steps:
-            # Timeout check
-            elapsed = self.clock.now() - start_time
-            if elapsed > self.timeout:
-                err_ev = ErrorEvent(
-                    session_id=sess_id,
-                    error_type="TimeoutError",
-                    message=f"Agent loop timed out after {self.timeout} seconds",
+        try:
+            while step < self.max_steps:
+                # Timeout check
+                elapsed = self.clock.now() - start_time
+                if elapsed > self.timeout:
+                    err_ev = ErrorEvent(
+                        session_id=sess_id,
+                        error_type="TimeoutError",
+                        message=f"Agent loop timed out after {self.timeout} seconds",
+                    )
+                    await self._emit(err_ev)
+                    raise NullainError(f"Agent loop timed out after {self.timeout} seconds")
+
+                # Budget & compaction
+                await self._check_budget_and_compact(
+                    sess_id,
+                    accumulated_events,
+                    total_tokens,
+                    active_spec,
+                    system_prompt,
+                    active_model,
                 )
-                await self._emit(err_ev)
-                raise NullainError(f"Agent loop timed out after {self.timeout} seconds")
 
-            # Budget & compaction
-            await self._check_budget_and_compact(
-                sess_id,
-                accumulated_events,
-                total_tokens,
-                active_spec,
-                system_prompt,
-                active_model,
-            )
+                step += 1
+                messages = self._build_messages(sess_id, accumulated_events, system_prompt, step)
 
-            step += 1
-            messages = self._build_messages(sess_id, accumulated_events, system_prompt, step)
+                tool_specs = self.tools.list_specs()
+                req = CompletionRequest(
+                    model=active_model,
+                    messages=messages,
+                    tools=tool_specs if tool_specs else None,
+                    stream=streaming,
+                )
 
-            tool_specs = self.tools.list_specs()
-            req = CompletionRequest(
-                model=active_model,
-                messages=messages,
-                tools=tool_specs if tool_specs else None,
-                stream=streaming,
-            )
+                step_text, tool_calls, usage = await self._generate_step_response(
+                    req=req,
+                    active_model=active_model,
+                    sess_id=sess_id,
+                    streaming=streaming,
+                )
 
-            step_text, tool_calls, usage = await self._generate_step_response(
-                req=req,
-                active_model=active_model,
-                sess_id=sess_id,
-                streaming=streaming,
-            )
+                if usage:
+                    total_tokens += usage.total_tokens
 
-            if usage:
-                total_tokens += usage.total_tokens
+                model_ev = ModelResponseEvent(
+                    session_id=sess_id,
+                    model=active_model,
+                    content=step_text or None,
+                    tool_calls=(tuple(tool_calls) if tool_calls else None),
+                    usage=usage,
+                )
+                await self._emit(model_ev)
+                accumulated_events.append(model_ev)
 
-            model_ev = ModelResponseEvent(
-                session_id=sess_id,
-                model=active_model,
-                content=step_text or None,
-                tool_calls=(tuple(tool_calls) if tool_calls else None),
-                usage=usage,
-            )
-            await self._emit(model_ev)
-            accumulated_events.append(model_ev)
+                # No tool calls = final answer
+                if not tool_calls:
+                    final_text = step_text
+                    last_output = final_text
+                    completed = True
+                    break
 
-            # No tool calls = final answer
-            if not tool_calls:
-                final_text = step_text
-                last_output = final_text
-                completed = True
-                break
+                # Loop detection: hash the requested tool calls (name + args) for
+                # this step. If the same signature repeats for
+                # ``loop_detection_threshold`` consecutive steps, the agent is
+                # stuck; inject a strong self-correction and stop the loop
+                # rather than burning the remaining step budget.
+                step_signature = _step_signature(tool_calls)
+                if step_signature == last_step_signature:
+                    repeat_count += 1
+                else:
+                    last_step_signature = step_signature
+                    repeat_count = 1
 
-            # Execute tools with self-correction
-            last_output, correction_budget = await self._execute_tools(
-                tool_calls,
-                sess_id,
-                accumulated_events,
-                correction_budget,
-            )
+                if repeat_count >= self.loop_detection_threshold:
+                    loop_detected = True
+                    err_ev = ErrorEvent(
+                        session_id=sess_id,
+                        error_type="LoopDetected",
+                        message=(
+                            f"Agent loop repeated the same tool calls for "
+                            f"{repeat_count} consecutive steps; stopping to avoid thrash."
+                        ),
+                    )
+                    await self._emit(err_ev)
+                    accumulated_events.append(err_ev)
+                    reflection = UserMessageEvent(
+                        session_id=sess_id,
+                        content=(
+                            "[SELF-CORRECTION] You have repeated the same tool calls "
+                            f"{repeat_count} times in a row with no progress. "
+                            "Stop repeating. Either produce a final answer, or choose a "
+                            "different approach with different tool arguments."
+                        ),
+                    )
+                    await self._emit(reflection)
+                    accumulated_events.append(reflection)
+                    break
 
-        # 5. Verify Phase
-        is_success = True
-        if active_spec:
+                # Execute tools with self-correction
+                last_output, correction_budget = await self._execute_tools(
+                    tool_calls,
+                    sess_id,
+                    accumulated_events,
+                    correction_budget,
+                )
+        except BudgetExceededError as err:
+            terminal_status = "budget"
+            terminal_error = str(err)
+        except ContextWindowExhaustedError as err:
+            terminal_status = "context_exhausted"
+            terminal_error = str(err)
+        except NullainError as err:
+            # Timeout (raised as a plain NullainError) and any other domain
+            # failure surfaced from the act phase.
+            terminal_status = "timeout"
+            terminal_error = str(err)
+
+        # 5. Verify Phase — only when the loop produced a final answer
+        feedback: str | None = None
+        verify_failed = False
+        if completed and active_spec:
             verified, feedback = await self.spec_validator.verify(
                 active_spec,
                 last_output,
                 workspace_root=self.workspace_root,
                 tools=self.tools,
             )
-            is_success = verified
+            verify_failed = not verified
             verify_ev = SpecVerifiedEvent(
                 session_id=sess_id,
                 spec_id=active_spec.spec_id,
@@ -635,17 +741,28 @@ class AgentLoop:
             await self._emit(verify_ev)
             accumulated_events.append(verify_ev)
 
-        # Only flag MaxStepsExceeded when the loop exited by hitting the step
-        # cap WITHOUT producing a final answer. A final answer returned on the
-        # last allowed step (completed=True, step==max_steps) is a success.
-        if not completed and step >= self.max_steps:
-            is_success = False
+        # Resolve final status. Terminal-resource failures win; otherwise a
+        # completed run is "success" unless verification failed, a detected
+        # loop is "loop_detected", and an incomplete run (hit the step cap)
+        # is "max_steps".
+        if terminal_status is not None:
+            status: RunStatus = terminal_status
+        elif loop_detected:
+            status = "loop_detected"
+        elif not completed and step >= self.max_steps:
+            status = "max_steps"
             err_ev = ErrorEvent(
                 session_id=sess_id,
                 error_type="MaxStepsExceeded",
                 message=f"Agent loop reached maximum step count ({self.max_steps})",
             )
             await self._emit(err_ev)
+        elif verify_failed:
+            status = "verification_failed"
+        else:
+            status = "success"
+
+        is_success = status == "success"
 
         # 6. Episodic Memory Recording
         await self._record_trajectory(
@@ -657,7 +774,17 @@ class AgentLoop:
             prompt,
         )
 
-        return final_text
+        return RunResult(
+            session_id=sess_id,
+            status=status,
+            success=is_success,
+            final_text=final_text,
+            steps=step,
+            model=active_model,
+            intent=intent_res.intent_type,
+            feedback=feedback,
+            error=terminal_error,
+        )
 
     async def run(
         self,
@@ -668,13 +795,20 @@ class AgentLoop:
         """Run orchestrated agent execution loop (non-streaming).
 
         Pipeline: Intent → Route → Plan → Act → Verify → Memory.
+
+        Returns the model's final answer text. Terminal-resource failures
+        (budget / timeout / context exhaustion) are re-raised as exceptions for
+        backwards compatibility; use ``run_result`` for a structured outcome
+        that never raises.
         """
-        return await self._run_pipeline(
+        result = await self.run_result(
             prompt=prompt,
             session_id=session_id,
             events_history=events_history,
             streaming=False,
         )
+        self._raise_terminal(result)
+        return result.final_text
 
     async def run_streaming(
         self,
@@ -685,14 +819,102 @@ class AgentLoop:
         """Run agent loop with streaming token output.
 
         Emits StreamDeltaEvent for each token chunk during generation.
-        Returns the final accumulated text.
+        Returns the final accumulated text. Terminal failures are re-raised.
         """
-        return await self._run_pipeline(
+        result = await self.run_result(
             prompt=prompt,
             session_id=session_id,
             events_history=events_history,
             streaming=True,
         )
+        self._raise_terminal(result)
+        return result.final_text
+
+    async def run_result(
+        self,
+        prompt: str,
+        session_id: str | None = None,
+        events_history: list[BaseEvent] | None = None,
+        streaming: bool = False,
+    ) -> RunResult:
+        """Run the agent loop and return a structured ``RunResult``.
+
+        Unlike ``run`` / ``run_streaming``, this never raises for
+        terminal-resource failures — they are reported via ``status`` and
+        ``error``. Unexpected non-domain exceptions still propagate.
+        """
+        return await self._run_pipeline(
+            prompt=prompt,
+            session_id=session_id,
+            events_history=events_history,
+            streaming=streaming,
+        )
+
+    @staticmethod
+    def _raise_terminal(result: RunResult) -> None:
+        """Re-raise the domain exception corresponding to a terminal status.
+
+        Keeps ``run`` / ``run_streaming`` backwards-compatible with callers
+        that catch ``BudgetExceededError`` / ``ContextWindowExhaustedError`` /
+        ``NullainError`` (timeout). No-op for non-terminal statuses.
+        """
+        if result.status == "budget":
+            raise BudgetExceededError(result.error or "Token budget exceeded")
+        if result.status == "context_exhausted":
+            raise ContextWindowExhaustedError(result.error or "Context window exhausted")
+        if result.status == "timeout":
+            raise NullainError(result.error or "Agent loop timed out")
+
+    async def spawn(
+        self,
+        prompt: str,
+        tools: ToolRegistry | None = None,
+        model: str | None = None,
+        max_steps: int | None = None,
+    ) -> str:
+        """Run a sub-agent with fresh context and return its final answer text.
+
+        The sub-agent shares this loop's provider and workspace but runs with
+        an isolated event bus and a fresh context window (no inherited
+        conversation history). Use ``spawn`` for focused subtasks: the parent
+        receives only the sub-agent's final text, so a long-running
+        investigation does not blow out the parent's context.
+
+        Args:
+            prompt: The subtask prompt for the sub-agent.
+            tools: Scoped tool registry for the sub-agent. When None, the
+                sub-agent inherits the parent's tool registry.
+            model: Explicit model for the sub-agent (bypasses routing). When
+                None, the sub-agent routes by intent like a normal run.
+            max_steps: Step cap for the sub-agent. When None, inherits the
+                parent's ``max_steps``.
+
+        Returns:
+            The sub-agent's final answer text.
+
+        Note:
+            v1 is synchronous-in-place: the parent blocks until the sub-agent
+            finishes. Background worktrees / concurrent sub-agents are deferred
+            to a later milestone.
+        """
+        child = AgentLoop(
+            provider=self.provider,
+            tools=tools or self.tools,
+            model=model,
+            workspace_root=self.workspace_root,
+            max_steps=max_steps or self.max_steps,
+            max_tokens=self.max_tokens,
+            timeout=self.timeout,
+            loop_detection_threshold=self.loop_detection_threshold,
+            context_manager=ContextManager(),
+            prompt_assembler=self.prompt_assembler,
+            episodic_memory=None,  # isolated; the parent records the trajectory
+            # Fresh event bus: sub-agent internal events do not pollute the
+            # parent's trajectory. The parent only sees the returned text.
+            event_bus=EventBus(),
+        )
+        result = await child.run_result(prompt=prompt)
+        return result.final_text
 
 
 __all__ = ["AgentLoop"]
