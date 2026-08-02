@@ -4,6 +4,7 @@ import asyncio
 import json as _json
 import uuid
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -11,7 +12,13 @@ from nullain.agent.result import RunResult, RunStatus
 from nullain.agent.spec import BASH_NONZERO_PREFIX, SpecValidator, TaskSpec
 from nullain.context.assembler import PromptAssembler
 from nullain.context.manager import ContextManager
-from nullain.errors import BudgetExceededError, ContextWindowExhaustedError, NullainError, ToolError
+from nullain.errors import (
+    BudgetExceededError,
+    ContextWindowExhaustedError,
+    NullainError,
+    ToolError,
+    ToolPermissionError,
+)
 from nullain.events import (
     BaseEvent,
     Conversation,
@@ -37,7 +44,8 @@ from nullain.llm import (
 from nullain.memory import EpisodicMemory, TrajectoryRecord
 from nullain.ports.clock import Clock, SystemClock
 from nullain.router import Complexity, IntentParser, ModelRouter
-from nullain.telemetry import get_logger
+from nullain.telemetry import get_cost_tracker, get_logger
+from nullain.telemetry import span as telemetry_span
 from nullain.tools import ToolRegistry
 
 logger = get_logger(__name__)
@@ -233,27 +241,42 @@ class AgentLoop:
         Exceptions are normalized into error output strings so callers can
         dispatch a batch concurrently without ``gather`` short-circuiting.
         ``error_type`` is set when the failure warranted an ErrorEvent.
+        Emits a ``tool`` telemetry span tagged with the outcome, including
+        ``tool.blocked`` when execution was denied by the permission policy.
         """
-        try:
-            res_output = await self.tools.execute(tc.name, tc.arguments)
-            is_err = any(res_output.startswith(prefix) for prefix in ERROR_OUTPUT_PREFIXES)
-            return res_output, is_err, None
-        except ToolError as err:
-            logger.warning(
-                "tool_execution_failed",
-                session_id=sess_id,
-                tool=tc.name,
-                error=str(err),
-            )
-            return f"Tool Execution Error ({tc.name}): {err}", True, "ToolExecutionError"
-        except Exception as err:
-            logger.error(
-                "unexpected_tool_error",
-                session_id=sess_id,
-                tool=tc.name,
-                error=str(err),
-            )
-            return f"Unexpected Error ({tc.name}): {err}", True, "UnexpectedToolError"
+        with telemetry_span("tool", **{"tool.name": tc.name}) as tool_span:
+            try:
+                res_output = await self.tools.execute(tc.name, tc.arguments)
+                is_err = any(res_output.startswith(prefix) for prefix in ERROR_OUTPUT_PREFIXES)
+                tool_span.set_attributes({"tool.is_error": is_err, "tool.blocked": False})
+                return res_output, is_err, None
+            except ToolPermissionError as err:
+                logger.warning(
+                    "tool_permission_denied",
+                    session_id=sess_id,
+                    tool=tc.name,
+                    error=str(err),
+                )
+                tool_span.set_attributes({"tool.is_error": True, "tool.blocked": True})
+                return f"Tool Execution Error ({tc.name}): {err}", True, "ToolExecutionError"
+            except ToolError as err:
+                logger.warning(
+                    "tool_execution_failed",
+                    session_id=sess_id,
+                    tool=tc.name,
+                    error=str(err),
+                )
+                tool_span.set_attributes({"tool.is_error": True, "tool.blocked": False})
+                return f"Tool Execution Error ({tc.name}): {err}", True, "ToolExecutionError"
+            except Exception as err:
+                logger.error(
+                    "unexpected_tool_error",
+                    session_id=sess_id,
+                    tool=tc.name,
+                    error=str(err),
+                )
+                tool_span.set_attributes({"tool.is_error": True, "tool.blocked": False})
+                return f"Unexpected Error ({tc.name}): {err}", True, "UnexpectedToolError"
 
     async def _execute_tools(
         self,
@@ -487,46 +510,98 @@ class AgentLoop:
         sess_id: str,
         streaming: bool,
     ) -> tuple[str, list[ToolCall], TokenUsage | None]:
-        """Generate response chunk either via streaming or direct generate."""
-        if streaming:
-            full_text = ""
-            all_tool_calls: list[ToolCall] = []
-            usage: TokenUsage | None = None
-            try:
-                async for chunk in self.provider.stream(req):
-                    if chunk.delta_text:
-                        full_text += chunk.delta_text
-                        delta_ev = StreamDeltaEvent(
-                            session_id=sess_id,
-                            delta=chunk.delta_text,
-                            model=active_model,
-                        )
-                        await self._emit(delta_ev)
-                    if chunk.tool_calls:
-                        all_tool_calls.extend(chunk.tool_calls)
-                    if chunk.usage:
-                        usage = chunk.usage
-                self.router.circuit_breaker.record_success(active_model)
-                return full_text, all_tool_calls, usage
-            except Exception as err:
-                self.router.circuit_breaker.record_failure(active_model)
-                logger.error(
-                    "model_stream_failed",
-                    session_id=sess_id,
-                    model=active_model,
-                    error=str(err),
+        """Generate response chunk either via streaming or direct generate.
+
+        Emits an ``llm_request`` telemetry span with model, token usage,
+        time-to-first-token (streaming) or latency (non-streaming), and the
+        computed cost from the cost tracker.
+        """
+        tracker = get_cost_tracker()
+        with telemetry_span(
+            "llm_request", **{"llm.model": active_model, "llm.stream": streaming}
+        ) as llm_span:
+            start = self.clock.now()
+            if streaming:
+                full_text = ""
+                all_tool_calls: list[ToolCall] = []
+                usage: TokenUsage | None = None
+                ttft: float | None = None
+                try:
+                    async for chunk in self.provider.stream(req):
+                        if ttft is None:
+                            ttft = (self.clock.now() - start) * 1000.0
+                        if chunk.delta_text:
+                            full_text += chunk.delta_text
+                            delta_ev = StreamDeltaEvent(
+                                session_id=sess_id,
+                                delta=chunk.delta_text,
+                                model=active_model,
+                            )
+                            await self._emit(delta_ev)
+                        if chunk.tool_calls:
+                            all_tool_calls.extend(chunk.tool_calls)
+                        if chunk.usage:
+                            usage = chunk.usage
+                    self.router.circuit_breaker.record_success(active_model)
+                    latency_ms = (self.clock.now() - start) * 1000.0
+                    self._record_llm_telemetry(
+                        llm_span, tracker, active_model, sess_id, usage, ttft, latency_ms
+                    )
+                    return full_text, all_tool_calls, usage
+                except Exception as err:
+                    self.router.circuit_breaker.record_failure(active_model)
+                    logger.error(
+                        "model_stream_failed",
+                        session_id=sess_id,
+                        model=active_model,
+                        error=str(err),
+                    )
+                    err_ev = ErrorEvent(
+                        session_id=sess_id,
+                        error_type="ModelStreamError",
+                        message=f"Stream failed on model {active_model}: {err}",
+                    )
+                    await self._emit(err_ev)
+                    raise
+            else:
+                response = await self._call_provider(req, active_model, sess_id)
+                tool_calls = list(response.tool_calls) if response.tool_calls else []
+                latency_ms = (self.clock.now() - start) * 1000.0
+                self._record_llm_telemetry(
+                    llm_span, tracker, active_model, sess_id, response.usage, latency_ms, latency_ms
                 )
-                err_ev = ErrorEvent(
-                    session_id=sess_id,
-                    error_type="ModelStreamError",
-                    message=f"Stream failed on model {active_model}: {err}",
-                )
-                await self._emit(err_ev)
-                raise
-        else:
-            response = await self._call_provider(req, active_model, sess_id)
-            tool_calls = list(response.tool_calls) if response.tool_calls else []
-            return response.delta_text or "", tool_calls, response.usage
+                return response.delta_text or "", tool_calls, response.usage
+
+    @staticmethod
+    def _record_llm_telemetry(
+        llm_span: Any,
+        tracker: Any,
+        model: str,
+        sess_id: str,
+        usage: TokenUsage | None,
+        ttft_ms: float | None,
+        latency_ms: float,
+    ) -> None:
+        """Record token usage + cost attributes on an llm_request span."""
+        prompt_tokens = usage.prompt_tokens if usage else 0
+        completion_tokens = usage.completion_tokens if usage else 0
+        total_tokens = usage.total_tokens if usage else 0
+        cost = tracker.record(
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            agent=sess_id,
+        )
+        llm_span.set_attributes(
+            {
+                "llm.prompt_tokens": prompt_tokens,
+                "llm.completion_tokens": completion_tokens,
+                "llm.total_tokens": total_tokens,
+                "llm.ttft_ms": ttft_ms if ttft_ms is not None else latency_ms,
+                "llm.latency_ms": latency_ms,
+                "llm.cost_usd": cost,
+            }
+        )
 
     async def _run_pipeline(
         self,
@@ -534,6 +609,25 @@ class AgentLoop:
         session_id: str | None = None,
         events_history: list[BaseEvent] | None = None,
         streaming: bool = False,
+    ) -> RunResult:
+        """Run orchestrated agent execution pipeline (telemetry root span).
+
+        Wraps the pipeline body in an ``agent.run`` span so the full
+        interaction (intent → route → plan → act → verify → memory) is
+        recorded as one trace, with child ``llm_request`` / ``tool`` spans.
+        """
+        with telemetry_span("agent.run") as root_span:
+            return await self._run_pipeline_body(
+                prompt, session_id, events_history, streaming, root_span
+            )
+
+    async def _run_pipeline_body(
+        self,
+        prompt: str,
+        session_id: str | None,
+        events_history: list[BaseEvent] | None,
+        streaming: bool,
+        root_span: Any,
     ) -> RunResult:
         """Run orchestrated agent execution pipeline.
 
@@ -544,6 +638,7 @@ class AgentLoop:
         than raised, so structured callers can branch on outcome.
         """
         sess_id = session_id or str(uuid.uuid4())
+        root_span.set_attribute("session.id", sess_id)
         start_time = self.clock.now()
         accumulated_events: list[BaseEvent] = list(events_history or [])
         correction_budget = self.self_correction_max
@@ -560,6 +655,7 @@ class AgentLoop:
             model=active_model,
             streaming=streaming,
         )
+        root_span.set_attributes({"llm.model": active_model, "task.intent": intent_res.intent_type})
 
         # Emit initial UserMessageEvent
         user_ev = UserMessageEvent(session_id=sess_id, content=prompt)
@@ -773,6 +869,8 @@ class AgentLoop:
             is_success,
             prompt,
         )
+
+        root_span.set_attributes({"run.status": status, "run.steps": step})
 
         return RunResult(
             session_id=sess_id,

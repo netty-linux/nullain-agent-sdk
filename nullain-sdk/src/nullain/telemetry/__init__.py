@@ -84,9 +84,22 @@ def clear_context() -> None:
     structlog.contextvars.clear_contextvars()  # type: ignore[reportUnknownMemberType]  # structlog public API lacks complete type stubs
 
 
+from nullain.telemetry.tracing import (  # noqa: E402  (deferred: tracing imports get_logger from this package)
+    CostTracker,
+    configure_tracing,
+    get_cost_tracker,
+    get_tracer,
+    span,
+)
+
 __all__ = [
+    "CostTracker",
     "bind_context",
     "clear_context",
     "configure_telemetry",
+    "configure_tracing",
+    "get_cost_tracker",
     "get_logger",
+    "get_tracer",
+    "span",
 ]
