@@ -32,10 +32,27 @@ class EventBus:
             self._handlers[event_type].remove(handler)
 
     async def publish(self, event: BaseEvent) -> None:
-        """Publish an event to all subscribed handlers asynchronously."""
+        """Publish an event to all subscribed handlers concurrently."""
+        import asyncio
+
+        import structlog
+
+        logger = structlog.get_logger("nullain.events.bus")
+
         handlers = list(self._handlers.get(event.event_type, [])) + list(self._wildcard_handlers)
-        for handler in handlers:
-            await handler(event)
+        if handlers:
+            results = await asyncio.gather(
+                *(handler(event) for handler in handlers),
+                return_exceptions=True,
+            )
+            for res in results:
+                if isinstance(res, BaseException):
+                    logger.error(
+                        "event_handler_failed",
+                        event_type=event.event_type,
+                        error=str(res),
+                        exc_info=res,
+                    )
 
 
 __all__ = ["EventBus", "EventHandler"]

@@ -1,24 +1,40 @@
 """Nullain Agent SDK — CLI Helper Utility."""
 
-import typer
+import argparse
+import sys
 
 from nullain import __version__
 
-app = typer.Typer(name="nullain", help="Nullain Agent SDK CLI Helper")
 
-
-@app.command()
-def version() -> None:
+def cmd_version() -> None:
     """Print Nullain Agent SDK version."""
-    typer.echo(f"Nullain Agent SDK v{__version__}")
+    print(f"Nullain Agent SDK v{__version__}")
 
 
-@app.command()
-def doctor() -> None:
+def cmd_doctor() -> None:
     """Run environment and health checks for Nullain SDK."""
-    typer.echo("Checking Nullain SDK Environment...")
-    typer.echo("✅ Python environment OK")
-    typer.echo(f"✅ Nullain SDK v{__version__} OK")
+    print("Checking Nullain SDK Environment...")
+    print(f"  Python {sys.version_info.major}.{sys.version_info.minor} OK")
+    print(f"  Nullain SDK v{__version__} OK")
+
+
+def app() -> None:
+    """CLI entry point."""
+    parser = argparse.ArgumentParser(
+        prog="nullain",
+        description="Nullain Agent SDK CLI Helper",
+    )
+    sub = parser.add_subparsers(dest="command")
+    sub.add_parser("version", help="Print SDK version")
+    sub.add_parser("doctor", help="Run health checks")
+
+    args = parser.parse_args()
+    if args.command == "version":
+        cmd_version()
+    elif args.command == "doctor":
+        cmd_doctor()
+    else:
+        parser.print_help()
 
 
 if __name__ == "__main__":

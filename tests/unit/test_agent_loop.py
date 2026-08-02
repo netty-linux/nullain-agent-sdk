@@ -48,6 +48,16 @@ async def test_agent_loop_e2e_create_facts_file(tmp_path: Path) -> None:
     registry = ToolRegistry()
     register_default_tools(registry, workspace)
 
+    # Step 0: Spec generation response for Plan phase
+    spec_chunk = CompletionChunk(
+        delta_text=(
+            '{"objective": "Create FACTS.txt file", '
+            '"steps": ["Write 3 facts"], '
+            '"target_files": ["FACTS.txt"], '
+            '"acceptance_criteria": ["FACTS.txt exists"]}'
+        )
+    )
+
     # Step 1: Model calls write_file
     chunk1 = CompletionChunk(
         tool_calls=[
@@ -66,7 +76,7 @@ async def test_agent_loop_e2e_create_facts_file(tmp_path: Path) -> None:
         usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
     )
 
-    fake_provider = FakeSequenceProvider([chunk1, chunk2])
+    fake_provider = FakeSequenceProvider([spec_chunk, chunk1, chunk2])
     bus = EventBus()
     events_log: list[BaseEvent] = []
 
@@ -156,3 +166,119 @@ async def test_agent_loop_token_budget_exceeded(tmp_path: Path) -> None:
 
     with pytest.raises(BudgetExceededError):
         await agent.run("Run budget test")
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_streaming(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    register_default_tools(registry, tmp_path)
+
+    spec_chunk = CompletionChunk(
+        delta_text=(
+            '{"objective": "Stream test", '
+            '"steps": ["Stream reply"], '
+            '"target_files": [], '
+            '"acceptance_criteria": []}'
+        )
+    )
+    stream_chunk1 = CompletionChunk(delta_text="Hello ")
+    stream_chunk2 = CompletionChunk(delta_text="world!")
+
+    fake_provider = FakeSequenceProvider([spec_chunk, stream_chunk1, stream_chunk2])
+    bus = EventBus()
+    events_log: list[BaseEvent] = []
+
+    async def track_events(ev: BaseEvent) -> None:
+        events_log.append(ev)
+
+    bus.subscribe("*", track_events)
+
+    agent = AgentLoop(
+        provider=fake_provider,
+        tools=registry,
+        event_bus=bus,
+        max_steps=5,
+    )
+
+    result = await agent.run_streaming("Stream test")
+    assert "Hello world!" in result or "Hello" in result
+    stream_deltas = [e for e in events_log if e.event_type == "stream_delta"]
+    assert len(stream_deltas) >= 1
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_clock_timeout(tmp_path: Path) -> None:
+    from nullain.errors import NullainError
+    from nullain.ports.clock import Clock
+
+    class AdvancingClock(Clock):
+        def __init__(self) -> None:
+            self._time = 1000.0
+
+        def now(self) -> float:
+            self._time += 500.0  # advance by 500s on every call
+            return self._time
+
+    registry = ToolRegistry()
+    register_default_tools(registry, tmp_path)
+
+    fake_provider = FakeSequenceProvider([CompletionChunk(delta_text="Thinking")])
+    agent = AgentLoop(
+        provider=fake_provider,
+        tools=registry,
+        clock=AdvancingClock(),
+        timeout=10.0,
+    )
+
+    with pytest.raises(NullainError, match="timed out"):
+        await agent.run("Timeout test")
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_self_correction(tmp_path: Path) -> None:
+    registry = ToolRegistry()
+    register_default_tools(registry, tmp_path)
+
+    spec_chunk = CompletionChunk(
+        delta_text=(
+            '{"objective": "Test recovery", '
+            '"steps": ["Try read", "Recover"], '
+            '"target_files": [], '
+            '"acceptance_criteria": []}'
+        )
+    )
+
+    # Tool call that fails (reading non-existent file)
+    fail_chunk = CompletionChunk(
+        tool_calls=[
+            ToolCall(
+                id="call_fail",
+                name="read_file",
+                arguments={"path": "does_not_exist_123.txt"},
+            )
+        ]
+    )
+    recover_chunk = CompletionChunk(delta_text="Recovered from missing file")
+
+    fake_provider = FakeSequenceProvider([spec_chunk, fail_chunk, recover_chunk])
+    bus = EventBus()
+    events_log: list[BaseEvent] = []
+
+    async def track_events(ev: BaseEvent) -> None:
+        events_log.append(ev)
+
+    bus.subscribe("*", track_events)
+
+    agent = AgentLoop(
+        provider=fake_provider,
+        tools=registry,
+        event_bus=bus,
+        model="gpt-4o",  # explicit model to bypass spec generation
+        self_correction_max=2,
+    )
+
+    result = await agent.run("Test recovery")
+    assert result == "Recovered from missing file"
+    # Check that self-correction prompt was injected as a UserMessageEvent
+    user_msgs = [e for e in events_log if e.event_type == "user_message"]
+    assert any("[SELF-CORRECTION]" in getattr(m, "content", "") for m in user_msgs)

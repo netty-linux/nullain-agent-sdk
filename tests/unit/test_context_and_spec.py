@@ -52,6 +52,43 @@ async def test_spec_validator_verify_phase() -> None:
     assert "verified" in msg_ok.lower()
 
 
+@pytest.mark.asyncio
+async def test_spec_validator_target_files_and_commands(tmp_path: Path) -> None:
+    validator = SpecValidator()
+    spec = TaskSpec(
+        objective="Create file.txt",
+        steps=["write file"],
+        target_files=["file.txt"],
+        verification_commands=["echo ok"],
+    )
+
+    # Fails if target file does not exist
+    success, msg = await validator.verify(spec, "Done", workspace_root=tmp_path)
+    assert not success
+    assert "Target file 'file.txt' was not created" in msg
+
+    # Passes when target file exists
+    (tmp_path / "file.txt").write_text("Hello")
+    success, msg = await validator.verify(spec, "Done", workspace_root=tmp_path)
+    assert success
+
+
+@pytest.mark.asyncio
+async def test_event_bus_handler_error_logged(caplog: pytest.LogCaptureFixture) -> None:
+    from nullain.events import BaseEvent, EventBus, UserMessageEvent
+
+    bus = EventBus()
+
+    async def failing_handler(ev: BaseEvent) -> None:
+        raise RuntimeError("Subscriber crashed!")
+
+    bus.subscribe("user_message", failing_handler)
+
+    # Publishing does not throw but handles exception gracefully
+    ev = UserMessageEvent(session_id="s1", content="hello")
+    await bus.publish(ev)
+
+
 def test_prompt_assembler_security_isolation(tmp_path: Path) -> None:
     # Malicious AGENTS.md in workspace attempting to override security policy
     agents_md = tmp_path / "AGENTS.md"
@@ -81,6 +118,8 @@ def test_conversation_fold_compaction_system_message() -> None:
     assert state.compaction_summary == "Compacted 1 events."
     assert len(state.messages) == 2
     assert state.messages[0].role == "system"
-    assert state.messages[0].content is not None and "SUMMARY OF PRIOR CONVERSATION" in state.messages[0].content
+    content_0 = state.messages[0].content
+    assert content_0 is not None
+    assert "SUMMARY OF PRIOR CONVERSATION" in content_0
     assert state.messages[1].role == "user"
     assert state.messages[1].content == "Second prompt"

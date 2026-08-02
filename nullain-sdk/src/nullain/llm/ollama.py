@@ -20,6 +20,7 @@ from nullain.errors import (
     ProviderTimeoutError,
 )
 from nullain.llm.provider import LLMProvider
+from nullain.llm.response_models import OllamaNativeResponse, OpenAIResponse
 from nullain.llm.types import (
     CompletionChunk,
     CompletionRequest,
@@ -127,81 +128,88 @@ class OllamaCloudProvider(LLMProvider):
 
         if self.endpoint_type == "native":
             # Ollama native API /api/chat
-            message = cast(dict[str, Any], data.get("message") or {})
-            delta_text = str(message.get("content") or "")
-            finish_reason = "stop" if data.get("done") else None
+            response_native = OllamaNativeResponse.model_validate(data)
 
-            raw_tcs = cast(list[dict[str, Any]] | None, message.get("tool_calls"))
-            if raw_tcs:
-                tool_calls = []
-                for idx, tc in enumerate(raw_tcs):
-                    fn = cast(dict[str, Any], tc.get("function") or {})
-                    tc_id = str(tc.get("id") or f"call_{idx}")
-                    raw_args: Any = fn.get("arguments", {})
-                    parsed_args: dict[str, Any] = {}
-                    if isinstance(raw_args, dict):
-                        parsed_args = cast(dict[str, Any], raw_args)
-                    elif isinstance(raw_args, str) and raw_args.strip():
-                        try:
-                            parsed_args = cast(dict[str, Any], json.loads(raw_args))
-                        except json.JSONDecodeError:
-                            parsed_args = {}
+            if response_native.message:
+                delta_text = response_native.message.content
+                if response_native.message.tool_calls:
+                    tool_calls = []
+                    for idx, tc in enumerate(response_native.message.tool_calls):
+                        tc_id = tc.id or f"call_{idx}"
+                        parsed_args: dict[str, object] = {}
+                        if isinstance(tc.function.arguments, dict):
+                            parsed_args = tc.function.arguments
+                        elif tc.function.arguments.strip():
+                            try:
+                                parsed: object = json.loads(tc.function.arguments)
+                                if isinstance(parsed, dict):
+                                    parsed_dict = cast(dict[str, object], parsed)
+                                    parsed_args = {str(k): v for k, v in parsed_dict.items()}
+                            except json.JSONDecodeError:
+                                pass
 
-                    tool_calls.append(
-                        ToolCall(
-                            id=tc_id,
-                            name=str(fn.get("name") or ""),
-                            arguments=parsed_args,
+                        tool_calls.append(
+                            ToolCall(
+                                id=tc_id,
+                                name=tc.function.name,
+                                arguments=parsed_args,
+                            )
                         )
-                    )
 
-            if data.get("prompt_eval_count") is not None or data.get("eval_count") is not None:
-                p_tokens = int(data.get("prompt_eval_count") or 0)
-                c_tokens = int(data.get("eval_count") or 0)
+            if response_native.done:
+                finish_reason = "stop"
+
+            has_eval = (
+                response_native.prompt_eval_count is not None
+                or response_native.eval_count is not None
+            )
+            if has_eval:
+                p_tokens = response_native.prompt_eval_count or 0
+                c_tokens = response_native.eval_count or 0
                 usage = TokenUsage(
                     prompt_tokens=p_tokens,
                     completion_tokens=c_tokens,
                     total_tokens=p_tokens + c_tokens,
                 )
-
         else:
             # OpenAI compatible API /v1/chat/completions
-            choices = cast(list[dict[str, Any]], data.get("choices") or [])
-            if choices:
-                choice = choices[0]
-                finish_reason = cast(str | None, choice.get("finish_reason"))
-                delta = cast(dict[str, Any], choice.get("delta") or choice.get("message") or {})
-                delta_text = str(delta.get("content") or "")
+            response_openai = OpenAIResponse.model_validate(data)
 
-                raw_tcs = cast(list[dict[str, Any]] | None, delta.get("tool_calls"))
-                if raw_tcs:
-                    tool_calls = []
-                    for idx, tc in enumerate(raw_tcs):
-                        fn = cast(dict[str, Any], tc.get("function") or {})
-                        raw_args_v1: Any = fn.get("arguments", {})
-                        parsed_args_v1: dict[str, Any] = {}
-                        if isinstance(raw_args_v1, dict):
-                            parsed_args_v1 = cast(dict[str, Any], raw_args_v1)
-                        elif isinstance(raw_args_v1, str) and raw_args_v1.strip():
-                            try:
-                                parsed_args_v1 = cast(dict[str, Any], json.loads(raw_args_v1))
-                            except json.JSONDecodeError:
-                                parsed_args_v1 = {}
+            if response_openai.choices:
+                choice = response_openai.choices[0]
+                finish_reason = choice.finish_reason
+                delta = choice.delta or choice.message
+                if delta:
+                    delta_text = delta.content or ""
+                    if delta.tool_calls:
+                        tool_calls = []
+                        for idx, tc in enumerate(delta.tool_calls):
+                            tc_id = tc.id or f"call_{idx}"
+                            parsed_args: dict[str, object] = {}
+                            if isinstance(tc.function.arguments, dict):
+                                parsed_args = tc.function.arguments
+                            elif tc.function.arguments.strip():
+                                try:
+                                    parsed: object = json.loads(tc.function.arguments)
+                                    if isinstance(parsed, dict):
+                                        parsed_dict = cast(dict[str, object], parsed)
+                                        parsed_args = {str(k): v for k, v in parsed_dict.items()}
+                                except json.JSONDecodeError:
+                                    pass
 
-                        tool_calls.append(
-                            ToolCall(
-                                id=str(tc.get("id") or f"call_{idx}"),
-                                name=str(fn.get("name") or ""),
-                                arguments=parsed_args_v1,
+                            tool_calls.append(
+                                ToolCall(
+                                    id=tc_id,
+                                    name=tc.function.name,
+                                    arguments=parsed_args,
+                                )
                             )
-                        )
 
-            raw_usage = cast(dict[str, int] | None, data.get("usage"))
-            if raw_usage:
+            if response_openai.usage:
                 usage = TokenUsage(
-                    prompt_tokens=raw_usage.get("prompt_tokens", 0),
-                    completion_tokens=raw_usage.get("completion_tokens", 0),
-                    total_tokens=raw_usage.get("total_tokens", 0),
+                    prompt_tokens=response_openai.usage.prompt_tokens,
+                    completion_tokens=response_openai.usage.completion_tokens,
+                    total_tokens=response_openai.usage.total_tokens,
                 )
 
         return CompletionChunk(
@@ -262,7 +270,10 @@ class OllamaCloudProvider(LLMProvider):
         except TransientHttpError as err:
             raise ProviderError(f"Transient retries exhausted: {err}") from err
 
-        raise ProviderError("Failed to complete request")
+        # Unreachable: AsyncRetrying(reraise=True) either returns from the loop
+        # body above or raises. This guard only exists to satisfy the type
+        # checker that all code paths return a CompletionChunk.
+        raise ProviderError("generate: retries exhausted without producing a result")
 
     async def stream(self, request: CompletionRequest) -> AsyncGenerator[CompletionChunk, None]:
         """Stream completion chunks sequentially."""

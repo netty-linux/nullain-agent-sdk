@@ -2,6 +2,14 @@
 
 from nullain.llm.ollama import OllamaCloudProvider
 from nullain.llm.provider import LLMProvider
+from nullain.llm.response_models import (
+    FunctionCall,
+    OllamaMessage,
+    OllamaNativeResponse,
+    OpenAIMessage,
+    OpenAIResponse,
+    ToolCallData,
+)
 from nullain.llm.types import (
     ChatMessage,
     CompletionChunk,
@@ -17,11 +25,17 @@ __all__ = [
     "ChatMessage",
     "CompletionChunk",
     "CompletionRequest",
+    "FunctionCall",
     "FunctionSpec",
     "LLMProvider",
     "OllamaCloudProvider",
+    "OllamaMessage",
+    "OllamaNativeResponse",
+    "OpenAIMessage",
+    "OpenAIResponse",
     "Role",
     "TokenUsage",
     "ToolCall",
+    "ToolCallData",
     "ToolSpec",
 ]

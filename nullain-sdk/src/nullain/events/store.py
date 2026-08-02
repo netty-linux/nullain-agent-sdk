@@ -11,11 +11,15 @@ from nullain.events.types import (
     ModelResponseEvent,
     SpecCreatedEvent,
     SpecVerifiedEvent,
+    StreamDeltaEvent,
     ToolCallEvent,
     ToolResultEvent,
     UserMessageEvent,
 )
 
+# NOTE: StreamDeltaEvent is intentionally included for round-trip fidelity, but
+# streaming deltas are high-volume and typically not worth persisting. Callers
+# that want to exclude them can filter before EventStore.append.
 EVENT_CLASS_MAP: dict[str, type[BaseEvent]] = {
     "user_message": UserMessageEvent,
     "model_response": ModelResponseEvent,
@@ -25,6 +29,7 @@ EVENT_CLASS_MAP: dict[str, type[BaseEvent]] = {
     "error": ErrorEvent,
     "spec_created": SpecCreatedEvent,
     "spec_verified": SpecVerifiedEvent,
+    "stream_delta": StreamDeltaEvent,
 }
 
 

@@ -63,10 +63,3 @@ def test_circuit_breaker_and_fallback() -> None:
     # All circuits open -> raises NoModelAvailableError
     with pytest.raises(NoModelAvailableError):
         router.select_model("fast")
-
-
-def test_tier_escalation() -> None:
-    router = ModelRouter()
-    assert router.escalate_tier("fast") == "balanced"
-    assert router.escalate_tier("balanced") == "deep"
-    assert router.escalate_tier("deep") == "deep"

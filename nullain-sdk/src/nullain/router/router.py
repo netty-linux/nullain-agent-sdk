@@ -1,25 +1,27 @@
 """Nullain Agent SDK — Model Router and Fallback Circuit Breaker."""
 
-import time
-
 from nullain.config.settings import RouterConfig
 from nullain.errors import NoModelAvailableError
+from nullain.ports.clock import Clock, SystemClock
 from nullain.router.intent import IntentResult
 
 
 class CircuitBreaker:
     """Circuit breaker tracking model failure rates."""
 
-    def __init__(self, failure_threshold: int = 3, recovery_time: float = 60.0) -> None:
+    def __init__(
+        self, failure_threshold: int = 3, recovery_time: float = 60.0, clock: Clock | None = None
+    ) -> None:
         self.failure_threshold = failure_threshold
         self.recovery_time = recovery_time
+        self.clock = clock or SystemClock()
         self.failures: dict[str, int] = {}
         self.opened_at: dict[str, float] = {}
 
     def is_open(self, model: str) -> bool:
         """Check if circuit is open (model disabled due to failures)."""
         if model in self.opened_at:
-            if (time.time() - self.opened_at[model]) > self.recovery_time:
+            if (self.clock.now() - self.opened_at[model]) > self.recovery_time:
                 # Reset circuit after recovery time
                 del self.opened_at[model]
                 self.failures[model] = 0
@@ -32,7 +34,7 @@ class CircuitBreaker:
         count = self.failures.get(model, 0) + 1
         self.failures[model] = count
         if count >= self.failure_threshold:
-            self.opened_at[model] = time.time()
+            self.opened_at[model] = self.clock.now()
 
     def record_success(self, model: str) -> None:
         """Record a successful model call and reset failure counters."""
@@ -67,15 +69,6 @@ class ModelRouter:
                     return model
 
         raise NoModelAvailableError(f"No available model found for tier '{tier}' or fallback chain")
-
-    def escalate_tier(self, current_tier: str) -> str:
-        """Escalate model tier (e.g. fast -> balanced -> deep) after failures."""
-        escalation_map = {
-            "fast": "balanced",
-            "balanced": "deep",
-            "deep": "deep",
-        }
-        return escalation_map.get(current_tier, "deep")
 
     def route_intent(self, intent: IntentResult) -> str:
         """Route an IntentResult to an active model name."""

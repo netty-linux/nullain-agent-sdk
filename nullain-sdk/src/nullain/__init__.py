@@ -30,6 +30,7 @@ from nullain.events import (
     ModelResponseEvent,
     SpecCreatedEvent,
     SpecVerifiedEvent,
+    StreamDeltaEvent,
     ToolCallEvent,
     ToolResultEvent,
     UserMessageEvent,
@@ -47,6 +48,7 @@ from nullain.llm import (
     ToolSpec,
 )
 from nullain.memory import EpisodicMemory, TrajectoryRecord
+from nullain.ports import Clock, SystemClock
 from nullain.protocol import (
     AgentEventPayload,
     PermissionRequestPayload,
@@ -70,6 +72,7 @@ __all__ = [
     "BudgetExceededError",
     "ChatMessage",
     "CircuitBreaker",
+    "Clock",
     "CompactionEvent",
     "CompletionChunk",
     "CompletionRequest",
@@ -109,6 +112,8 @@ __all__ = [
     "SpecValidationError",
     "SpecValidator",
     "SpecVerifiedEvent",
+    "StreamDeltaEvent",
+    "SystemClock",
     "TaskSpec",
     "TierConfig",
     "TokenUsage",

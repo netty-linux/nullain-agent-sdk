@@ -1,5 +1,7 @@
 # Nullain Agent SDK Configuration Example
 
+ollama_base_url = "https://ollama.com"
+
 [router]
 fallback_chain = ["deep", "balanced", "fast"]
 classifier_model = "gpt-oss:20b"
@@ -15,3 +17,4 @@ max_context = 128000
 [router.tiers.deep]
 models = ["deepseek-v4-pro"]
 max_context = 128000
+

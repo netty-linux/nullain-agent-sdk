@@ -89,6 +89,14 @@ class SpecVerifiedEvent(BaseEvent, frozen=True):
     feedback: str
 
 
+class StreamDeltaEvent(BaseEvent, frozen=True):
+    """Event emitted for each streamed token delta during streaming execution."""
+
+    event_type: Literal["stream_delta"] = "stream_delta"
+    delta: str
+    model: str
+
+
 EventUnion = (
     UserMessageEvent
     | ModelResponseEvent
@@ -98,6 +106,7 @@ EventUnion = (
     | ErrorEvent
     | SpecCreatedEvent
     | SpecVerifiedEvent
+    | StreamDeltaEvent
 )
 
 
@@ -109,6 +118,7 @@ __all__ = [
     "ModelResponseEvent",
     "SpecCreatedEvent",
     "SpecVerifiedEvent",
+    "StreamDeltaEvent",
     "ToolCallEvent",
     "ToolResultEvent",
     "UserMessageEvent",

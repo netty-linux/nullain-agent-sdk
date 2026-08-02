@@ -24,6 +24,17 @@ class ContextManager:
         """Estimate token count for a text snippet (approx 4 chars per token)."""
         return max(1, len(text) // 4)
 
+    def estimate_context_tokens(self, messages: list[ChatMessage]) -> int:
+        """Estimate total token count for current context window messages."""
+        total = 0
+        for msg in messages:
+            if msg.content:
+                total += self.estimate_tokens(msg.content)
+            if msg.tool_calls:
+                for tc in msg.tool_calls:
+                    total += self.estimate_tokens(str(tc.arguments))
+        return total
+
     def should_compact(self, current_tokens: int) -> bool:
         """Check if current token usage exceeds the compaction threshold."""
         return current_tokens >= int(self.max_window_tokens * self.compaction_threshold)
