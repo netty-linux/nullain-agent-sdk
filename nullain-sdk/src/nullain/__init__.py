@@ -1,6 +1,7 @@
 """Nullain Agent SDK — Production Agentic Framework for Python."""
 
 from nullain.agent import AgentLoop
+from nullain.config import NullainSettings, RouterConfig, TierConfig, load_settings
 from nullain.errors import (
     BudgetExceededError,
     ContextError,
@@ -44,6 +45,7 @@ from nullain.llm import (
     ToolCall,
     ToolSpec,
 )
+from nullain.router import CircuitBreaker, Complexity, IntentParser, IntentResult, ModelRouter
 from nullain.telemetry import configure_telemetry, get_logger
 
 __version__ = "0.1.0"
@@ -53,9 +55,11 @@ __all__ = [
     "BaseEvent",
     "BudgetExceededError",
     "ChatMessage",
+    "CircuitBreaker",
     "CompactionEvent",
     "CompletionChunk",
     "CompletionRequest",
+    "Complexity",
     "ContextError",
     "Conversation",
     "ConversationState",
@@ -63,20 +67,26 @@ __all__ = [
     "EventBus",
     "EventStore",
     "FunctionSpec",
+    "IntentParser",
+    "IntentResult",
     "LLMProvider",
     "ModelResponseEvent",
+    "ModelRouter",
     "NoModelAvailableError",
     "NullainError",
+    "NullainSettings",
     "OllamaCloudProvider",
     "ProviderAuthenticationError",
     "ProviderError",
     "ProviderRateLimitError",
     "ProviderTimeoutError",
     "Role",
+    "RouterConfig",
     "RouterError",
     "SpecCreatedEvent",
     "SpecValidationError",
     "SpecVerifiedEvent",
+    "TierConfig",
     "TokenUsage",
     "ToolCall",
     "ToolCallEvent",
@@ -89,4 +99,5 @@ __all__ = [
     "UserMessageEvent",
     "configure_telemetry",
     "get_logger",
+    "load_settings",
 ]
