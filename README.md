@@ -114,6 +114,7 @@ from nullain.llm import OllamaCloudProvider
 from nullain.tools import ToolRegistry
 from nullain_tools import register_default_tools
 
+
 async def main():
     # Initialize tools & provider
     registry = ToolRegistry()
@@ -126,9 +127,10 @@ async def main():
     # Run agent task
     output = await agent.run(
         prompt="Audit pyproject.toml and ensure all dependencies are up to date",
-        session_id="session-001"
+        session_id="session-001",
     )
     print("Agent Execution Result:", output)
+
 
 if __name__ == "__main__":
     asyncio.run(main())
