@@ -125,6 +125,40 @@ async def test_spec_validator_target_files_and_commands(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_spec_validator_fails_when_verification_command_exits_nonzero(
+    tmp_path: Path,
+) -> None:
+    """Regression (P1.8): verification_commands are executed via the bash tool,
+    and a command whose subprocess exits non-zero (output prefixed with the bash
+    non-zero-exit marker) fails the spec. This is the 'command output is truth'
+    path the old keyword-coincidence verifier never exercised. A fake bash tool
+    keeps the test offline and cross-platform (no real subprocess)."""
+    from nullain.agent.spec import BASH_NONZERO_PREFIX
+    from nullain.tools import ToolRegistry
+    from nullain.tools.decorator import tool
+
+    @tool(name="bash", description="fake bash for verify", read_only=False)
+    async def fake_bash(command_args: list[str]) -> str:
+        # Simulate a verification command that exits non-zero.
+        return f"{BASH_NONZERO_PREFIX} 1\nmake: *** No rule for target 'check'. Stop."
+
+    registry = ToolRegistry()
+    registry.register(fake_bash)
+
+    validator = SpecValidator()
+    spec = TaskSpec(
+        objective="Ship it",
+        steps=["run checks"],
+        target_files=[],
+        verification_commands=["make check"],
+    )
+    success, msg = await validator.verify(spec, "Done", workspace_root=tmp_path, tools=registry)
+    assert not success
+    assert "make check" in msg
+    assert "Verification command" in msg
+
+
+@pytest.mark.asyncio
 async def test_spec_validator_heuristic_fails_on_error_output_regardless_of_criterion() -> None:
     """Regression: the old keyword-coincidence logic let benign criteria pass
     even when the output contained errors. The conservative heuristic now fails
