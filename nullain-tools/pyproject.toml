@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nullain-tools"
+version = "0.1.0"
+description = "Built-in tools and sandbox for Nullain Agent SDK"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "nullain-sdk",
+    "pydantic>=2.7.0",
+    "anyio>=4.3.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nullain_tools"]

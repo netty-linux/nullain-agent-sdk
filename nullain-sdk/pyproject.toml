@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nullain-sdk"
+version = "0.1.0"
+description = "Core Nullain Agent SDK"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.2.0",
+    "httpx>=0.27.0",
+    "tenacity>=8.3.0",
+    "structlog>=24.1.0",
+    "anyio>=4.3.0",
+    "aiosqlite>=0.20.0",
+    "typer>=0.12.0",
+]
+
+[project.scripts]
+nullain = "nullain.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nullain"]
