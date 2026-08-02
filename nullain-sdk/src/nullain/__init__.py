@@ -35,6 +35,7 @@ from nullain.events import (
     ToolResultEvent,
     UserMessageEvent,
 )
+from nullain.hooks import HookLifecycle, HookManager, HookOutcome, HooksConfig
 from nullain.llm import (
     ChatMessage,
     CompletionChunk,
@@ -86,6 +87,10 @@ __all__ = [
     "EventBus",
     "EventStore",
     "FunctionSpec",
+    "HookLifecycle",
+    "HookManager",
+    "HookOutcome",
+    "HooksConfig",
     "IntentParser",
     "IntentResult",
     "LLMProvider",

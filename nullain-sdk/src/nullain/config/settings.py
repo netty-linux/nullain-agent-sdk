@@ -5,6 +5,8 @@ from pathlib import Path
 from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from nullain.hooks import HooksConfig
+
 
 class TierConfig(BaseModel):
     """Configuration for a specific model tier."""
@@ -38,6 +40,7 @@ class NullainSettings(BaseSettings):
     )
 
     router: RouterConfig = Field(default_factory=RouterConfig)
+    hooks: HooksConfig = Field(default_factory=HooksConfig)
     ollama_api_key: str | None = None
     ollama_base_url: str = "https://ollama.com"
 

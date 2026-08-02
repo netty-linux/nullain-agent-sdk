@@ -33,6 +33,7 @@ from nullain.events import (
     ToolResultEvent,
     UserMessageEvent,
 )
+from nullain.hooks import HookLifecycle, HookManager, HooksConfig
 from nullain.llm import (
     ChatMessage,
     CompletionChunk,
@@ -95,6 +96,7 @@ class AgentLoop:
         prompt_assembler: PromptAssembler | None = None,
         episodic_memory: EpisodicMemory | None = None,
         clock: Clock | None = None,
+        hooks: HookManager | HooksConfig | None = None,
         workspace_root: str | Path = ".",
         max_steps: int = 25,
         max_tokens: int | None = 100_000,
@@ -118,6 +120,8 @@ class AgentLoop:
             prompt_assembler: Layered system prompt assembler.
             episodic_memory: SQLite-backed episodic memory.
             clock: Injectable clock for deterministic testing.
+            hooks: Lifecycle hook manager (or raw HooksConfig) for pre_tool,
+                post_tool, stop, and pre_compact command hooks.
             workspace_root: Workspace root directory path.
             max_steps: Maximum ReAct loop iterations.
             max_tokens: Token budget ceiling.
@@ -139,6 +143,10 @@ class AgentLoop:
         )
         self.episodic_memory = episodic_memory
         self.clock = clock or SystemClock()
+        if hooks is None or isinstance(hooks, HookManager):
+            self.hooks: HookManager = hooks or HookManager()
+        else:
+            self.hooks = HookManager(hooks)
         self.max_steps = max_steps
         self.max_tokens = max_tokens
         self.timeout = timeout
@@ -242,14 +250,44 @@ class AgentLoop:
         dispatch a batch concurrently without ``gather`` short-circuiting.
         ``error_type`` is set when the failure warranted an ErrorEvent.
         Emits a ``tool`` telemetry span tagged with the outcome, including
-        ``tool.blocked`` when execution was denied by the permission policy.
+        ``tool.blocked`` when execution was denied by the permission policy
+        or vetoed by a ``pre_tool`` hook.
         """
         with telemetry_span("tool", **{"tool.name": tc.name}) as tool_span:
+            # pre_tool hooks: exit 2 vetoes the call before it runs.
+            if self.hooks.enabled:
+                pre_outcomes = await self.hooks.run(
+                    HookLifecycle.PRE_TOOL,
+                    {
+                        "session_id": sess_id,
+                        "call_id": tc.id,
+                        "tool_name": tc.name,
+                        "arguments": tc.arguments,
+                    },
+                )
+                if any(o.blocked for o in pre_outcomes):
+                    reason = next(
+                        (o.stdout.strip() for o in pre_outcomes if o.blocked and o.stdout.strip()),
+                        "",
+                    )
+                    msg = f"Tool '{tc.name}' blocked by pre_tool hook"
+                    if reason:
+                        msg = f"{msg}: {reason}"
+                    logger.info(
+                        "tool_blocked_by_hook",
+                        session_id=sess_id,
+                        tool=tc.name,
+                    )
+                    tool_span.set_attributes(
+                        {"tool.is_error": True, "tool.blocked": True, "tool.hook_blocked": True}
+                    )
+                    return msg, True, "HookBlocked"
+
             try:
                 res_output = await self.tools.execute(tc.name, tc.arguments)
                 is_err = any(res_output.startswith(prefix) for prefix in ERROR_OUTPUT_PREFIXES)
                 tool_span.set_attributes({"tool.is_error": is_err, "tool.blocked": False})
-                return res_output, is_err, None
+                result: tuple[str, bool, str | None] = (res_output, is_err, None)
             except ToolPermissionError as err:
                 logger.warning(
                     "tool_permission_denied",
@@ -258,7 +296,11 @@ class AgentLoop:
                     error=str(err),
                 )
                 tool_span.set_attributes({"tool.is_error": True, "tool.blocked": True})
-                return f"Tool Execution Error ({tc.name}): {err}", True, "ToolExecutionError"
+                result = (
+                    f"Tool Execution Error ({tc.name}): {err}",
+                    True,
+                    "ToolExecutionError",
+                )
             except ToolError as err:
                 logger.warning(
                     "tool_execution_failed",
@@ -267,7 +309,11 @@ class AgentLoop:
                     error=str(err),
                 )
                 tool_span.set_attributes({"tool.is_error": True, "tool.blocked": False})
-                return f"Tool Execution Error ({tc.name}): {err}", True, "ToolExecutionError"
+                result = (
+                    f"Tool Execution Error ({tc.name}): {err}",
+                    True,
+                    "ToolExecutionError",
+                )
             except Exception as err:
                 logger.error(
                     "unexpected_tool_error",
@@ -276,7 +322,26 @@ class AgentLoop:
                     error=str(err),
                 )
                 tool_span.set_attributes({"tool.is_error": True, "tool.blocked": False})
-                return f"Unexpected Error ({tc.name}): {err}", True, "UnexpectedToolError"
+                result = (
+                    f"Unexpected Error ({tc.name}): {err}",
+                    True,
+                    "UnexpectedToolError",
+                )
+
+            # post_tool hooks: notification only (no block semantics).
+            if self.hooks.enabled:
+                await self.hooks.run(
+                    HookLifecycle.POST_TOOL,
+                    {
+                        "session_id": sess_id,
+                        "call_id": tc.id,
+                        "tool_name": tc.name,
+                        "arguments": tc.arguments,
+                        "output": result[0],
+                        "is_error": result[1],
+                    },
+                )
+            return result
 
     async def _execute_tools(
         self,
@@ -456,6 +521,28 @@ class AgentLoop:
             raise ContextWindowExhaustedError(
                 f"Context window exhausted after {self.max_compaction_attempts} compaction attempts"
             )
+
+        # pre_compact hooks: exit 2 vetoes compaction for this step. The
+        # thrash counter has already been incremented; we skip the compaction
+        # itself and let the next step re-evaluate. Context will keep growing
+        # and may hit the hard budget — that is the honest consequence of a
+        # user-configured veto.
+        if self.hooks.enabled:
+            pre_outcomes = await self.hooks.run(
+                HookLifecycle.PRE_COMPACT,
+                {
+                    "session_id": sess_id,
+                    "current_tokens": ctx_tokens,
+                    "event_count": len(accumulated_events),
+                },
+            )
+            if any(o.blocked for o in pre_outcomes):
+                logger.info(
+                    "compaction_blocked_by_hook",
+                    session_id=sess_id,
+                    current_tokens=ctx_tokens,
+                )
+                return
 
         compact_ev = await self.context_manager.compact(
             session_id=sess_id,
@@ -869,6 +956,23 @@ class AgentLoop:
             is_success,
             prompt,
         )
+
+        # 7. stop hooks: notification that the run finished. A blocking outcome
+        # (exit 2) is logged but, in this MVP, cannot retroactively resume the
+        # loop — the run has already terminated. The contract is honored for
+        # pre_tool/pre_compact, where a veto is actionable mid-flight.
+        if self.hooks.enabled:
+            stop_outcomes = await self.hooks.run(
+                HookLifecycle.STOP,
+                {
+                    "session_id": sess_id,
+                    "status": status,
+                    "steps": step,
+                    "success": is_success,
+                },
+            )
+            if any(o.blocked for o in stop_outcomes):
+                logger.info("stop_hook_blocked", session_id=sess_id, status=status)
 
         root_span.set_attributes({"run.status": status, "run.steps": step})
 

@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -10,6 +11,7 @@ from typing import Any, cast
 from nullain.agent import AgentLoop
 from nullain.config import load_settings
 from nullain.events import BaseEvent, EventBus, EventStore
+from nullain.hooks import HookManager
 from nullain.llm import OllamaCloudProvider
 from nullain.memory import EpisodicMemory
 from nullain.protocol import (
@@ -29,8 +31,6 @@ async def run_agentd() -> None:
     configure_telemetry(log_level="INFO", json_format=True)
 
     # Resolve config path: explicit env override, else cwd nullain.toml if present.
-    import os
-
     config_path = os.environ.get("NULLAIN_CONFIG")
     if config_path is None and Path("nullain.toml").exists():
         config_path = "nullain.toml"
@@ -42,6 +42,7 @@ async def run_agentd() -> None:
         base_url=settings.ollama_base_url,
     )
     router = ModelRouter(config=settings.router)
+    hook_manager = HookManager(settings.hooks)
     event_store = EventStore()
     await event_store.initialize()
     episodic_memory = EpisodicMemory()
@@ -194,6 +195,7 @@ async def run_agentd() -> None:
                     event_store=event_store,
                     router=router,
                     episodic_memory=episodic_memory,
+                    hooks=hook_manager,
                     workspace_root=Path(ws_root),
                 )
 

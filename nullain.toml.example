@@ -17,3 +17,21 @@ max_context = 128000
 models = ["deepseek-v4-pro"]
 max_context = 128000
 
+# Lifecycle hooks. Each entry runs a command (argv list, no shell) and pipes
+# the event payload as JSON on stdin. Exit codes:
+#   0 = success (stdout attached as additional context)
+#   2 = block  (pre_tool skips the tool, pre_compact skips compaction)
+#   other = non-blocking failure (logged, execution continues)
+# [[hooks.pre_tool]]
+# command = ["./hooks/pre_tool.sh"]
+# timeout = 30.0
+#
+# [[hooks.post_tool]]
+# command = ["./hooks/post_tool.sh"]
+#
+# [[hooks.pre_compact]]
+# command = ["./hooks/pre_compact.sh"]
+#
+# [[hooks.stop]]
+# command = ["./hooks/stop.sh"]
+
