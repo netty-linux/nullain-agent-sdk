@@ -1,14 +1,43 @@
 """Nullain Agent SDK — ContextManager for Context Window Compaction and Defenses."""
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from nullain.agent.spec import TaskSpec
-from nullain.events import BaseEvent, CompactionEvent, UserMessageEvent
-from nullain.llm.types import ChatMessage
+from nullain.events import (
+    BaseEvent,
+    CompactionEvent,
+    ModelResponseEvent,
+    ToolResultEvent,
+    UserMessageEvent,
+)
+from nullain.llm.provider import LLMProvider
+from nullain.llm.types import ChatMessage, CompletionRequest
+from nullain.telemetry import get_logger
+
+if TYPE_CHECKING:
+    pass
+
+logger = get_logger(__name__)
+
+# Number of recent events kept verbatim (not summarized) during compaction.
+_RECENT_KEEP = 4
 
 
 class ContextManager:
-    """Manages LLM context window, compaction, and instruction centrifugation."""
+    """Manages LLM context window, compaction, and instruction centrifugation.
+
+    Compaction produces a ``CompactionEvent`` whose ``summary`` recapitulates
+    the compacted trajectory. Two modes:
+
+    - **Structural** (default, no provider): a bookkeeping summary that lists
+      the active spec objective and the user prompts verbatim. Honest about
+      being structural — it does NOT claim to semantically summarize.
+    - **LLM summarization** (provider + model passed to ``compact``): asks the
+      model to recap the compacted events concisely, preserving key decisions,
+      file changes and outstanding work. Falls back to the structural summary
+      if the provider call fails.
+    """
 
     def __init__(
         self,
@@ -39,36 +68,110 @@ class ContextManager:
         """Check if current token usage exceeds the compaction threshold."""
         return current_tokens >= int(self.max_window_tokens * self.compaction_threshold)
 
-    def compact(
-        self,
-        session_id: str,
-        events: Sequence[BaseEvent],
-        active_spec: TaskSpec | None = None,
-    ) -> CompactionEvent:
-        """Perform trajectory compaction, creating a CompactionEvent.
-
-        Summarizes earlier events while preserving active spec and recent interactions.
-        """
+    @staticmethod
+    def _collect_compacted(events: Sequence[BaseEvent]) -> tuple[list[str], list[str], str]:
+        """Split events into (compacted_ids, user_prompts, compacted_text)."""
         compacted_ids: list[str] = []
         user_prompts: list[str] = []
+        text_parts: list[str] = []
 
-        # Keep recent events (last 4) intact, compact earlier ones
-        compact_candidates: Sequence[BaseEvent] = events[:-4] if len(events) > 4 else []
+        compact_candidates: Sequence[BaseEvent] = (
+            events[:-_RECENT_KEEP] if len(events) > _RECENT_KEEP else []
+        )
         for ev in compact_candidates:
             compacted_ids.append(ev.id)
             if isinstance(ev, UserMessageEvent):
                 user_prompts.append(ev.content)
+                text_parts.append(f"User: {ev.content}")
+            elif isinstance(ev, ModelResponseEvent):
+                if ev.content:
+                    text_parts.append(f"Assistant: {ev.content}")
+            elif isinstance(ev, ToolResultEvent):
+                text_parts.append(f"Tool({ev.tool_name}): {ev.output}")
+        return compacted_ids, user_prompts, "\n".join(text_parts)
 
-        summary_parts = [f"Compacted {len(compacted_ids)} trajectory events."]
+    def _structural_summary(
+        self,
+        compacted_count: int,
+        user_prompts: list[str],
+        active_spec: TaskSpec | None,
+    ) -> str:
+        """Build the fallback bookkeeping summary (no LLM call)."""
+        parts = [f"[Compacted {compacted_count} trajectory events (structural summary)]"]
         if active_spec:
-            summary_parts.append(
+            parts.append(
                 f"Active Spec Objective: {active_spec.objective} "
                 f"(Steps: {', '.join(active_spec.steps)})"
             )
         if user_prompts:
-            summary_parts.append(f"User Prompts Summary: {' | '.join(user_prompts)}")
+            parts.append(f"User Prompts: {' | '.join(user_prompts)}")
+        return "\n".join(parts)
 
-        summary = "\n".join(summary_parts)
+    async def _llm_summarize(
+        self,
+        provider: LLMProvider,
+        model: str,
+        compacted_text: str,
+        active_spec: TaskSpec | None,
+    ) -> str:
+        """Ask the LLM to summarize the compacted trajectory text."""
+        spec_context = ""
+        if active_spec:
+            spec_context = (
+                f"\nActive task objective: {active_spec.objective}\n"
+                f"Planned steps: {', '.join(active_spec.steps)}\n"
+            )
+        prompt = (
+            "Summarize the following earlier conversation trajectory concisely. "
+            "Preserve key decisions, file changes, errors encountered, and "
+            "outstanding work so the agent can continue without losing context. "
+            f"{spec_context}\n"
+            f"Trajectory:\n{compacted_text}"
+        )
+        req = CompletionRequest(
+            model=model,
+            messages=[
+                ChatMessage(
+                    role="system",
+                    content="You are a conversation summarizer. Be concise and factual.",
+                ),
+                ChatMessage(role="user", content=prompt),
+            ],
+            stream=False,
+        )
+        response = await provider.generate(req)
+        text = (response.delta_text or "").strip()
+        if not text:
+            raise ValueError("empty summary from provider")
+        return text
+
+    async def compact(
+        self,
+        session_id: str,
+        events: Sequence[BaseEvent],
+        active_spec: TaskSpec | None = None,
+        provider: LLMProvider | None = None,
+        model: str | None = None,
+    ) -> CompactionEvent:
+        """Perform trajectory compaction, creating a CompactionEvent.
+
+        When ``provider`` and ``model`` are supplied, the compacted events are
+        summarized by the LLM (real summarization). Otherwise, or on provider
+        failure, a structural bookkeeping summary is produced.
+        """
+        compacted_ids, user_prompts, compacted_text = self._collect_compacted(events)
+        structural = self._structural_summary(len(compacted_ids), user_prompts, active_spec)
+
+        summary = structural
+        if provider is not None and model and compacted_text:
+            try:
+                llm_summary = await self._llm_summarize(
+                    provider, model, compacted_text, active_spec
+                )
+                summary = f"[Compacted {len(compacted_ids)} trajectory events]\n{llm_summary}"
+            except Exception as err:
+                logger.warning("context_llm_summarize_failed", error=str(err))
+                summary = structural  # honest fallback
 
         return CompactionEvent(
             session_id=session_id,

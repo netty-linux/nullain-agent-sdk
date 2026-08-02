@@ -282,3 +282,36 @@ async def test_agent_loop_self_correction(tmp_path: Path) -> None:
     # Check that self-correction prompt was injected as a UserMessageEvent
     user_msgs = [e for e in events_log if e.event_type == "user_message"]
     assert any("[SELF-CORRECTION]" in getattr(m, "content", "") for m in user_msgs)
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_context_window_exhausted_thrash(tmp_path: Path) -> None:
+    """Thrashing protection: when compaction cannot bring the window under
+    threshold for more than max_compaction_attempts consecutive steps, the loop
+    raises ContextWindowExhaustedError instead of looping forever."""
+    from nullain.context import ContextManager
+    from nullain.errors import ContextWindowExhaustedError
+
+    registry = ToolRegistry()
+    register_default_tools(registry, tmp_path)
+
+    # Provider that always requests a (no-op) tool call so the loop keeps going.
+    tool_chunk = CompletionChunk(
+        tool_calls=[ToolCall(id="c1", name="read_file", arguments={"path": "x.txt"})]
+    )
+    fake_provider = FakeSequenceProvider([tool_chunk] * 20)
+
+    # Tiny window + low threshold -> compaction required every step, and the
+    # system prompt alone keeps the window over threshold after compacting.
+    cm = ContextManager(max_window_tokens=100, compaction_threshold=0.5)
+
+    agent = AgentLoop(
+        provider=fake_provider,
+        tools=registry,
+        context_manager=cm,
+        max_steps=15,
+        max_compaction_attempts=3,
+    )
+
+    with pytest.raises(ContextWindowExhaustedError):
+        await agent.run("Thrash test")

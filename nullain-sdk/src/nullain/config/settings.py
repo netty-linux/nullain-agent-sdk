@@ -26,7 +26,6 @@ class RouterConfig(BaseModel):
         }
     )
     fallback_chain: list[str] = Field(default_factory=lambda: ["deep", "balanced", "fast"])
-    classifier_model: str = "fast"
 
 
 class NullainSettings(BaseSettings):

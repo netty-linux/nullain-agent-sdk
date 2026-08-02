@@ -92,6 +92,16 @@ class ContextError(NullainError):
     pass
 
 
+class ContextWindowExhaustedError(ContextError):
+    """Raised when compaction cannot bring the context window under threshold.
+
+    Indicates thrashing: repeated compaction does not free enough tokens, so
+    continuing would loop indefinitely. Fail loudly instead of degrading.
+    """
+
+    pass
+
+
 class SpecValidationError(NullainError):
     """Raised when Plan/Act task specification fails validation."""
 
@@ -101,6 +111,7 @@ class SpecValidationError(NullainError):
 __all__ = [
     "BudgetExceededError",
     "ContextError",
+    "ContextWindowExhaustedError",
     "NoModelAvailableError",
     "NullainError",
     "ProviderAuthenticationError",

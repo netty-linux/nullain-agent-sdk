@@ -4,7 +4,6 @@ ollama_base_url = "https://ollama.com"
 
 [router]
 fallback_chain = ["deep", "balanced", "fast"]
-classifier_model = "gpt-oss:20b"
 
 [router.tiers.fast]
 models = ["gpt-oss:20b"]

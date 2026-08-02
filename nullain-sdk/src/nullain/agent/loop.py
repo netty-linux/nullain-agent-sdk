@@ -6,10 +6,10 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
-from nullain.agent.spec import SpecValidator, TaskSpec
+from nullain.agent.spec import BASH_NONZERO_PREFIX, SpecValidator, TaskSpec
 from nullain.context.assembler import PromptAssembler
 from nullain.context.manager import ContextManager
-from nullain.errors import BudgetExceededError, NullainError, ToolError
+from nullain.errors import BudgetExceededError, ContextWindowExhaustedError, NullainError, ToolError
 from nullain.events import (
     BaseEvent,
     Conversation,
@@ -40,6 +40,18 @@ from nullain.tools import ToolRegistry
 
 logger = get_logger(__name__)
 
+# Output prefixes that mark a tool execution as failed. Mirrors the contracts
+# of the bundled tools: filesystem returns "Error: ...", bash prefixes non-zero
+# exits with BASH_NONZERO_PREFIX ("Command exit code:"), and git_commit emits
+# "Git commit failed: ...". Detection must cover all of these so the Act loop
+# flags genuine failures instead of silently swallowing them as success.
+ERROR_OUTPUT_PREFIXES: tuple[str, ...] = (
+    "Error:",
+    "Error ",
+    BASH_NONZERO_PREFIX,
+    "Git commit failed:",
+)
+
 
 class AgentLoop:
     """Orchestrated Agent Execution Engine with Plan/Act/Verify, Routing & Memory."""
@@ -63,6 +75,7 @@ class AgentLoop:
         max_tokens: int | None = 100_000,
         timeout: float = 300.0,
         self_correction_max: int = 3,
+        max_compaction_attempts: int = 3,
     ) -> None:
         """Initialize AgentLoop with integrated engine collaborators.
 
@@ -104,6 +117,8 @@ class AgentLoop:
         self.max_tokens = max_tokens
         self.timeout = timeout
         self.self_correction_max = self_correction_max
+        self.max_compaction_attempts = max_compaction_attempts
+        self._compaction_attempts = 0
 
     async def _emit(self, event: BaseEvent) -> None:
         """Emit event to bus and persist to store if configured."""
@@ -211,7 +226,7 @@ class AgentLoop:
 
             try:
                 res_output = await self.tools.execute(tc.name, tc.arguments)
-                is_err = res_output.startswith("Error:") or res_output.startswith("Error ")
+                is_err = any(res_output.startswith(prefix) for prefix in ERROR_OUTPUT_PREFIXES)
             except ToolError as err:
                 logger.warning(
                     "tool_execution_failed",
@@ -306,11 +321,18 @@ class AgentLoop:
         system_prompt: str,
         step: int,
     ) -> list[ChatMessage]:
-        """Fold events into messages with system prompt and centrifugation."""
+        """Fold events into messages with system prompt and centrifugation.
+
+        The immutable rules system prompt is ALWAYS re-injected as the first
+        message. After compaction, ``Conversation.fold`` places a compaction
+        summary as a system message at index 0; the rules must precede it so
+        persistent operational rules survive compaction (mirrors Claude Code
+        re-injecting CLAUDE.md after compaction) rather than being replaced by
+        the recap.
+        """
         state = Conversation.fold(sess_id, accumulated_events)
         messages = state.messages
-        if not messages or messages[0].role != "system":
-            messages.insert(0, ChatMessage(role="system", content=system_prompt))
+        messages.insert(0, ChatMessage(role="system", content=system_prompt))
         return self.context_manager.reinject_instructions(messages, step)
 
     async def _check_budget_and_compact(
@@ -320,8 +342,17 @@ class AgentLoop:
         total_tokens: int,
         active_spec: TaskSpec | None,
         system_prompt: str,
+        active_model: str,
     ) -> None:
-        """Check token budget and compact context if needed."""
+        """Check token budget and compact context if needed.
+
+        Thrashing protection: if compaction is required on more than
+        ``max_compaction_attempts`` consecutive steps (i.e. compacting did not
+        free enough tokens to get back under threshold), raise
+        ``ContextWindowExhaustedError`` instead of looping forever — a single
+        huge tool output that refills the window immediately after each
+        compaction would otherwise spin indefinitely.
+        """
         if self.max_tokens is not None and total_tokens >= self.max_tokens:
             err_ev = ErrorEvent(
                 session_id=sess_id,
@@ -334,17 +365,37 @@ class AgentLoop:
         # Compact based on actual context size, not cumulative
         state = Conversation.fold(sess_id, accumulated_events)
         messages = state.messages
-        if not messages or messages[0].role != "system":
-            messages.insert(0, ChatMessage(role="system", content=system_prompt))
+        messages.insert(0, ChatMessage(role="system", content=system_prompt))
         ctx_tokens = self.context_manager.estimate_context_tokens(messages)
-        if self.context_manager.should_compact(ctx_tokens):
-            compact_ev = self.context_manager.compact(
+        if not self.context_manager.should_compact(ctx_tokens):
+            # Context is under control again; reset the thrash counter.
+            self._compaction_attempts = 0
+            return
+
+        self._compaction_attempts += 1
+        if self._compaction_attempts > self.max_compaction_attempts:
+            err_ev = ErrorEvent(
                 session_id=sess_id,
-                events=accumulated_events,
-                active_spec=active_spec,
+                error_type="ContextWindowExhausted",
+                message=(
+                    f"Context window exhausted: compaction attempted "
+                    f"{self.max_compaction_attempts} times without convergence"
+                ),
             )
-            await self._emit(compact_ev)
-            accumulated_events.append(compact_ev)
+            await self._emit(err_ev)
+            raise ContextWindowExhaustedError(
+                f"Context window exhausted after {self.max_compaction_attempts} compaction attempts"
+            )
+
+        compact_ev = await self.context_manager.compact(
+            session_id=sess_id,
+            events=accumulated_events,
+            active_spec=active_spec,
+            provider=self.provider,
+            model=active_model,
+        )
+        await self._emit(compact_ev)
+        accumulated_events.append(compact_ev)
 
     async def _record_trajectory(
         self,
@@ -445,6 +496,7 @@ class AgentLoop:
         start_time = self.clock.now()
         accumulated_events: list[BaseEvent] = list(events_history or [])
         correction_budget = self.self_correction_max
+        self._compaction_attempts = 0
 
         # 1. Intent Parsing & Model Routing
         intent_res = self.intent_parser.parse(prompt)
@@ -515,6 +567,7 @@ class AgentLoop:
                 total_tokens,
                 active_spec,
                 system_prompt,
+                active_model,
             )
 
             step += 1
