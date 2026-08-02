@@ -1,11 +1,21 @@
 """Nullain Agent SDK — Production Agentic Framework for Python."""
 
 from nullain.agent import AgentLoop, SpecValidator, TaskSpec
-from nullain.config import NullainSettings, RouterConfig, TierConfig, load_settings
+from nullain.config import (
+    MCPConfig,
+    MCPServerConfig,
+    NullainSettings,
+    RouterConfig,
+    TierConfig,
+    load_settings,
+)
 from nullain.context import HARNESS_RULES, ContextManager, PromptAssembler
 from nullain.errors import (
     BudgetExceededError,
     ContextError,
+    MCPError,
+    MCPProtocolError,
+    MCPTransportError,
     NoModelAvailableError,
     NullainError,
     ProviderAuthenticationError,
@@ -47,6 +57,13 @@ from nullain.llm import (
     TokenUsage,
     ToolCall,
     ToolSpec,
+)
+from nullain.mcp import (
+    MCPClient,
+    MCPToolDefinition,
+    MCPTransport,
+    StdioTransport,
+    register_mcp_tools,
 )
 from nullain.memory import (
     EpisodicMemory,
@@ -100,6 +117,14 @@ __all__ = [
     "IntentParser",
     "IntentResult",
     "LLMProvider",
+    "MCPClient",
+    "MCPConfig",
+    "MCPError",
+    "MCPProtocolError",
+    "MCPServerConfig",
+    "MCPToolDefinition",
+    "MCPTransport",
+    "MCPTransportError",
     "MemoryEntry",
     "MemoryType",
     "ModelResponseEvent",
@@ -126,6 +151,7 @@ __all__ = [
     "SpecValidationError",
     "SpecValidator",
     "SpecVerifiedEvent",
+    "StdioTransport",
     "StreamDeltaEvent",
     "SystemClock",
     "TaskSpec",
@@ -146,4 +172,5 @@ __all__ = [
     "export_schema",
     "get_logger",
     "load_settings",
+    "register_mcp_tools",
 ]

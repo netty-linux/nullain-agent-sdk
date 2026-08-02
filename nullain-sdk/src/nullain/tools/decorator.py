@@ -5,6 +5,7 @@ from collections.abc import Callable
 from typing import Any
 
 from nullain.llm.types import FunctionSpec, ToolSpec
+from nullain.tools.permissions import PermissionLevel
 
 
 class RegisteredTool:
@@ -17,6 +18,7 @@ class RegisteredTool:
         spec: ToolSpec,
         func: Callable[..., Any],
         read_only: bool = False,
+        permission_level: PermissionLevel | None = None,
     ) -> None:
         self.name = name
         self.description = description
@@ -27,6 +29,12 @@ class RegisteredTool:
         # dispatched concurrently when the model requests several at once. The
         # Act loop uses this to run a batch of read-only calls via gather.
         self.read_only = read_only
+        # Optional fixed permission level that overrides the registry's
+        # heuristic policy resolution. Used by MCP-backed tools, whose
+        # side-effects cannot be introspected from arguments: a server is
+        # either trusted (ALLOW) or gated behind the human approval loop (ASK).
+        # None means "use the registry's per-tool policy logic".
+        self.permission_level = permission_level
 
     async def execute(self, kwargs: dict[str, Any]) -> Any:
         """Execute tool function handling both sync and async functions."""
@@ -39,6 +47,7 @@ def tool(
     name: str | None = None,
     description: str | None = None,
     read_only: bool = False,
+    permission_level: PermissionLevel | None = None,
 ) -> Callable[[Callable[..., Any]], RegisteredTool]:
     """Decorator to register a python function as an agent Tool with JSON Schema auto-derivation.
 
@@ -47,6 +56,8 @@ def tool(
         description: Override tool description (defaults to the docstring).
         read_only: Mark the tool as side-effect-free so the Act loop may
             dispatch it concurrently with other read-only tool calls.
+        permission_level: Optional fixed permission level overriding the
+            registry's policy heuristics (used for MCP-backed tools).
     """
 
     def decorator(func: Callable[..., Any]) -> RegisteredTool:
@@ -85,6 +96,7 @@ def tool(
             spec=tool_spec,
             func=func,
             read_only=read_only,
+            permission_level=permission_level,
         )
 
     return decorator

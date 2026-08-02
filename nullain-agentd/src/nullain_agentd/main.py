@@ -1,18 +1,20 @@
 """Nullain Agent Daemon — Stdio NDJSON Daemon process."""
 
 import asyncio
+import contextlib
 import json
 import os
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TextIO, cast
 
 from nullain.agent import AgentLoop
-from nullain.config import load_settings
+from nullain.config import NullainSettings, load_settings
 from nullain.events import BaseEvent, EventBus, EventStore
 from nullain.hooks import HookManager
-from nullain.llm import OllamaCloudProvider
+from nullain.llm import LLMProvider, OllamaCloudProvider
+from nullain.mcp import MCPClient, StdioTransport, register_mcp_tools
 from nullain.memory import EpisodicMemory, PersistentMemory
 from nullain.protocol import (
     AgentEventPayload,
@@ -21,33 +23,96 @@ from nullain.protocol import (
     ProtocolEnvelope,
 )
 from nullain.router import ModelRouter
-from nullain.telemetry import configure_telemetry
+from nullain.telemetry import configure_telemetry, get_logger
 from nullain.tools import PermissionPolicy, ToolRegistry
 from nullain_tools import register_default_tools
 
+logger = get_logger(__name__)
 
-async def run_agentd() -> None:
-    """Async main loop reading NDJSON from stdin and writing responses to stdout."""
+
+async def _load_mcp_clients(settings: NullainSettings) -> list[MCPClient]:
+    """Start the MCP servers declared in settings and return their clients.
+
+    A server that fails to initialize is logged and skipped — one unavailable
+    external tool server must not prevent the daemon from serving the rest of
+    its tools. The error is surfaced as a structured log (AGENTS.md rule 5).
+    """
+    clients: list[MCPClient] = []
+    for name, server_cfg in settings.mcp.servers.items():
+        if not server_cfg.enabled:
+            continue
+        transport = StdioTransport(
+            command=server_cfg.command,
+            args=server_cfg.args,
+            env=server_cfg.env,
+        )
+        client = MCPClient(transport=transport, name=name)
+        try:
+            await client.initialize()
+            clients.append(client)
+        except Exception as err:
+            logger.warning(
+                "mcp_server_init_failed",
+                server=name,
+                command=server_cfg.command,
+                error=str(err),
+            )
+            with contextlib.suppress(Exception):
+                await transport.close()
+    return clients
+
+
+async def run_agentd(
+    *,
+    provider: LLMProvider | None = None,
+    input_reader: asyncio.StreamReader | None = None,
+    output: TextIO | None = None,
+    settings: NullainSettings | None = None,
+    mcp_clients: list[MCPClient] | None = None,
+    episodic_memory: EpisodicMemory | None = None,
+    event_store: EventStore | None = None,
+) -> None:
+    """Async main loop reading NDJSON from stdin and writing responses to stdout.
+
+    Keyword-only injection points exist for testability: ``provider``,
+    ``input_reader``, ``output``, ``settings``, ``mcp_clients``,
+    ``episodic_memory`` and ``event_store`` can be supplied to drive the daemon
+    in-process without spawning a real Ollama client, MCP subprocesses, or
+    touching the user's home-directory SQLite stores. In production all default
+    to their real values.
+    """
     configure_telemetry(log_level="INFO", json_format=True)
 
-    # Resolve config path: explicit env override, else cwd nullain.toml if present.
-    config_path = os.environ.get("NULLAIN_CONFIG")
-    if config_path is None and Path("nullain.toml").exists():
-        config_path = "nullain.toml"
-    settings = load_settings(config_path)
+    # Settings: injected (tests) or resolved from NULLAIN_CONFIG / cwd toml.
+    if settings is None:
+        config_path = os.environ.get("NULLAIN_CONFIG")
+        if config_path is None and Path("nullain.toml").exists():
+            config_path = "nullain.toml"
+        settings = load_settings(config_path)
 
-    # Shared components (initialized once, reused across sessions)
-    provider = OllamaCloudProvider(
-        api_key=settings.ollama_api_key,
-        base_url=settings.ollama_base_url,
-    )
+    # Provider: injected (tests) or built from settings (production).
+    if provider is None:
+        provider = OllamaCloudProvider(
+            api_key=settings.ollama_api_key,
+            base_url=settings.ollama_base_url,
+        )
+
+    # MCP clients: injected (tests) or started from settings. Shared across
+    # sessions — the subprocesses are expensive to spawn and persist.
+    if mcp_clients is None:
+        mcp_clients = await _load_mcp_clients(settings)
+
     router = ModelRouter(config=settings.router)
     hook_manager = HookManager(settings.hooks)
-    event_store = EventStore()
+    if event_store is None:
+        event_store = EventStore()
     await event_store.initialize()
-    episodic_memory = EpisodicMemory()
+    if episodic_memory is None:
+        episodic_memory = EpisodicMemory()
     await episodic_memory.initialize()
     event_bus = EventBus()
+
+    out: TextIO = output or sys.stdout
 
     async def emit_agent_event(ev: BaseEvent) -> None:
         """Forward agent events to stdout as NDJSON."""
@@ -61,19 +126,22 @@ async def run_agentd() -> None:
             type="agent.event",
             payload=json.loads(payload.model_dump_json()),
         )
-        sys.stdout.write(env.model_dump_json() + "\n")
-        sys.stdout.flush()
+        out.write(env.model_dump_json() + "\n")
+        out.flush()
 
     event_bus.subscribe("*", emit_agent_event)
 
-    loop = asyncio.get_running_loop()
-    reader = asyncio.StreamReader()
-    protocol = asyncio.StreamReaderProtocol(reader)
-    await loop.connect_read_pipe(lambda: protocol, sys.stdin)
+    if input_reader is not None:
+        reader = input_reader
+    else:
+        loop = asyncio.get_running_loop()
+        reader = asyncio.StreamReader()
+        protocol = asyncio.StreamReaderProtocol(reader)
+        await loop.connect_read_pipe(lambda: protocol, sys.stdin)
 
     def write_envelope(env: ProtocolEnvelope) -> None:
-        sys.stdout.write(env.model_dump_json() + "\n")
-        sys.stdout.flush()
+        out.write(env.model_dump_json() + "\n")
+        out.flush()
 
     async def permission_callback(tool_name: str, description: str) -> bool:
         """Emit a permission.request and await the matching permission.response.
@@ -179,6 +247,20 @@ async def run_agentd() -> None:
                     ask_user_callback=ask_user_callback,
                     persistent_memory=persistent_memory,
                 )
+                # Register each MCP server's tools into the fresh per-session
+                # registry. The shared client/subprocess persists across
+                # sessions; only the lightweight wrappers are re-created.
+                for client in mcp_clients:
+                    server_cfg = settings.mcp.servers.get(client.name)
+                    auto_approve = bool(server_cfg and server_cfg.auto_approve)
+                    try:
+                        await register_mcp_tools(registry, client, auto_approve=auto_approve)
+                    except Exception as err:
+                        logger.warning(
+                            "mcp_tools_register_failed",
+                            server=client.name,
+                            error=str(err),
+                        )
 
                 resp_env = ProtocolEnvelope(
                     v=1,
@@ -219,8 +301,8 @@ async def run_agentd() -> None:
                             "output": res_text,
                         },
                     )
-                    sys.stdout.write(end_env.model_dump_json() + "\n")
-                    sys.stdout.flush()
+                    out.write(end_env.model_dump_json() + "\n")
+                    out.flush()
                 except Exception as err:
                     err_env = ProtocolEnvelope(
                         v=1,
@@ -232,9 +314,12 @@ async def run_agentd() -> None:
                             "error": str(err),
                         },
                     )
-                    sys.stdout.write(err_env.model_dump_json() + "\n")
-                    sys.stdout.flush()
+                    out.write(err_env.model_dump_json() + "\n")
+                    out.flush()
     finally:
+        for client in mcp_clients:
+            with contextlib.suppress(Exception):
+                await client.close()
         await episodic_memory.close()
         await event_store.close()
 

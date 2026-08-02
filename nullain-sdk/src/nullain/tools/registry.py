@@ -126,7 +126,12 @@ class ToolRegistry:
             String output of execution.
         """
         registered = self.get_tool(name)
-        level = self._evaluate_permission(name, arguments)
+        # A tool may carry a fixed permission level (e.g. MCP-backed tools)
+        # that overrides the argument-based policy heuristics.
+        if registered.permission_level is not None:
+            level = registered.permission_level
+        else:
+            level = self._evaluate_permission(name, arguments)
 
         if level == PermissionLevel.DENY:
             raise ToolPermissionError(f"Tool '{name}' denied by permission policy")

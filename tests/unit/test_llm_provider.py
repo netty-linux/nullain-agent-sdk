@@ -156,3 +156,116 @@ async def test_ollama_health_check() -> None:
 
     provider = OllamaCloudProvider(base_url="https://ollama.com")
     assert await provider.health_check() is True
+
+
+# ---------------------------------------------------------------------------
+# Native Ollama API (/api/chat, /api/tags)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_native_generate_success() -> None:
+    respx.post("https://ollama.com/api/chat").respond(
+        status_code=200,
+        json={
+            "model": "test-model",
+            "created_at": "2024-01-01T00:00:00Z",
+            "message": {"role": "assistant", "content": "Hello native!"},
+            "done": True,
+            "prompt_eval_count": 10,
+            "eval_count": 5,
+        },
+    )
+
+    provider = OllamaCloudProvider(
+        base_url="https://ollama.com", endpoint_type="native", max_retries=1
+    )
+    req = CompletionRequest(model="test-model", messages=[ChatMessage(role="user", content="Hi")])
+
+    chunk = await provider.generate(req)
+    assert chunk.delta_text == "Hello native!"
+    assert chunk.finish_reason == "stop"
+    assert chunk.usage is not None
+    assert chunk.usage.prompt_tokens == 10
+    assert chunk.usage.completion_tokens == 5
+    assert chunk.usage.total_tokens == 15
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_native_generate_tool_call() -> None:
+    respx.post("https://ollama.com/api/chat").respond(
+        status_code=200,
+        json={
+            "model": "test-model",
+            "created_at": "2024-01-01T00:00:00Z",
+            "message": {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "read_file", "arguments": {"path": "README.md"}},
+                    }
+                ],
+            },
+            "done": True,
+        },
+    )
+
+    provider = OllamaCloudProvider(
+        base_url="https://ollama.com", endpoint_type="native", max_retries=1
+    )
+    req = CompletionRequest(
+        model="test-model", messages=[ChatMessage(role="user", content="Read file")]
+    )
+
+    chunk = await provider.generate(req)
+    assert chunk.tool_calls is not None
+    assert len(chunk.tool_calls) == 1
+    tc = chunk.tool_calls[0]
+    assert tc.id == "call_1"
+    assert tc.name == "read_file"
+    assert tc.arguments == {"path": "README.md"}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_native_streaming() -> None:
+    # Native streams raw NDJSON objects (no "data: " prefix), terminated by a
+    # final object with done=true carrying token counts.
+    stream_content = (
+        '{"model":"m","message":{"role":"assistant","content":"Hello"}}\n'
+        '{"model":"m","message":{"role":"assistant","content":" native!"}}\n'
+        '{"model":"m","message":{"role":"assistant","content":""},'
+        '"done":true,"prompt_eval_count":4,"eval_count":2}\n'
+    )
+    respx.post("https://ollama.com/api/chat").respond(status_code=200, text=stream_content)
+
+    provider = OllamaCloudProvider(base_url="https://ollama.com", endpoint_type="native")
+    req = CompletionRequest(
+        model="m", messages=[ChatMessage(role="user", content="Hi")], stream=True
+    )
+
+    parts: list[str] = []
+    usage = None
+    async for chunk in provider.stream(req):
+        if chunk.delta_text:
+            parts.append(chunk.delta_text)
+        if chunk.usage:
+            usage = chunk.usage
+
+    assert "".join(parts) == "Hello native!"
+    assert usage is not None
+    assert usage.total_tokens == 6
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_native_health_check() -> None:
+    respx.get("https://ollama.com/api/tags").respond(status_code=200)
+
+    provider = OllamaCloudProvider(base_url="https://ollama.com", endpoint_type="native")
+    assert await provider.health_check() is True

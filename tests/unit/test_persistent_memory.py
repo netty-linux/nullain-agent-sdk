@@ -176,7 +176,10 @@ async def test_agent_loop_reinjects_agents_md_and_memory_post_compaction(tmp_pat
         compacted_event_ids=(),
     )
     messages = agent._build_messages(  # type: ignore[reportPrivateUsage]
-        sess, [compaction], agent._assemble_system_prompt(), step=1  # type: ignore[reportPrivateUsage]
+        sess,
+        [compaction],
+        agent._assemble_system_prompt(),  # type: ignore[reportPrivateUsage]
+        step=1,
     )
 
     system_text = messages[0].content

@@ -34,4 +34,21 @@ max_context = 128000
 #
 # [[hooks.stop]]
 # command = ["./hooks/stop.sh"]
+#
+
+# MCP (Model Context Protocol) servers. Each server is spawned over stdio with
+# an explicit argv list (never a shell): [command, *args]. Tools exposed by a
+# server are registered as mcp__<server>__<tool>. auto_approve = false (the
+# default) gates every MCP tool call through the permission approval loop
+# (ASK); set true only for servers you fully trust.
+# [mcp.servers.filesystem]
+# command = "npx"
+# args = ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"]
+# auto_approve = false
+# enabled = true
+#
+# [mcp.servers.git]
+# command = "uvx"
+# args = ["mcp-server-git", "--repository", "/workspace"]
+# env = { GIT_AUTHOR_NAME = "nullain" }
 

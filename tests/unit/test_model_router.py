@@ -63,3 +63,50 @@ def test_circuit_breaker_and_fallback() -> None:
     # All circuits open -> raises NoModelAvailableError
     with pytest.raises(NoModelAvailableError):
         router.select_model("fast")
+
+
+# ---------------------------------------------------------------------------
+# IntentParser edge cases
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected_intent", "expected_tier", "expected_complexity"),
+    [
+        ("", "general_task", "balanced", Complexity.MEDIUM),
+        ("   ", "general_task", "balanced", Complexity.MEDIUM),
+        ("FORMAT this file please", "simple_edit", "fast", Complexity.LOW),
+        ("Generate a COMMIT MESSAGE", "simple_edit", "fast", Complexity.LOW),
+        (
+            "run a security audit on the auth module",
+            "complex_architecture",
+            "deep",
+            Complexity.HIGH,
+        ),
+        ("overhaul the persistence layer", "complex_architecture", "deep", Complexity.HIGH),
+        ("add a login endpoint", "general_task", "balanced", Complexity.MEDIUM),
+    ],
+)
+def test_intent_parser_edge_cases(
+    prompt: str,
+    expected_intent: str,
+    expected_tier: str,
+    expected_complexity: Complexity,
+) -> None:
+    """Empty/whitespace and unknown prompts fall through to the MEDIUM default;
+    keyword matching is case-insensitive; each branch yields a stable intent_type."""
+    parser = IntentParser()
+    res = parser.parse(prompt)
+    assert res.intent_type == expected_intent
+    assert res.suggested_tier == expected_tier
+    assert res.complexity == expected_complexity
+
+
+def test_intent_parser_result_is_consistent_across_calls() -> None:
+    """The heuristic classifier is deterministic (no randomness)."""
+    parser = IntentParser()
+    prompt = "refactor the event bus for parallel processing"
+    first = parser.parse(prompt)
+    second = parser.parse(prompt)
+    assert first == second
+    assert first.complexity == Complexity.HIGH

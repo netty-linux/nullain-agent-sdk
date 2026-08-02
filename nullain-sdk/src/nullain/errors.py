@@ -108,10 +108,31 @@ class SpecValidationError(NullainError):
     pass
 
 
+class MCPError(NullainError):
+    """Base exception for Model Context Protocol (MCP) client errors."""
+
+    pass
+
+
+class MCPProtocolError(MCPError):
+    """Raised when an MCP server returns a malformed or error JSON-RPC response."""
+
+    pass
+
+
+class MCPTransportError(MCPError):
+    """Raised when the MCP transport layer fails (spawn, I/O, EOF)."""
+
+    pass
+
+
 __all__ = [
     "BudgetExceededError",
     "ContextError",
     "ContextWindowExhaustedError",
+    "MCPError",
+    "MCPProtocolError",
+    "MCPTransportError",
     "NoModelAvailableError",
     "NullainError",
     "ProviderAuthenticationError",

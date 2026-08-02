@@ -30,6 +30,28 @@ class RouterConfig(BaseModel):
     fallback_chain: list[str] = Field(default_factory=lambda: ["deep", "balanced", "fast"])
 
 
+class MCPServerConfig(BaseModel):
+    """Configuration for a single MCP server launched via stdio.
+
+    The server is spawned with ``[command, *args]`` as an explicit argv list
+    (never a shell). ``auto_approve`` controls the permission level the
+    registry assigns to the server's tools: True = ALLOW, False = ASK (default,
+    gating tool calls through the human approval loop).
+    """
+
+    command: str
+    args: list[str] = Field(default_factory=list)
+    env: dict[str, str] = Field(default_factory=dict)
+    auto_approve: bool = False
+    enabled: bool = True
+
+
+class MCPConfig(BaseModel):
+    """MCP client configuration: a named map of stdio MCP servers."""
+
+    servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
+
+
 class NullainSettings(BaseSettings):
     """Root application settings loaded from nullain.toml or environment."""
 
@@ -41,6 +63,7 @@ class NullainSettings(BaseSettings):
 
     router: RouterConfig = Field(default_factory=RouterConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
+    mcp: MCPConfig = Field(default_factory=MCPConfig)
     ollama_api_key: str | None = None
     ollama_base_url: str = "https://ollama.com"
 
@@ -56,4 +79,11 @@ def load_settings(config_path: str | Path | None = None) -> NullainSettings:
     return NullainSettings()
 
 
-__all__ = ["NullainSettings", "RouterConfig", "TierConfig", "load_settings"]
+__all__ = [
+    "MCPConfig",
+    "MCPServerConfig",
+    "NullainSettings",
+    "RouterConfig",
+    "TierConfig",
+    "load_settings",
+]
