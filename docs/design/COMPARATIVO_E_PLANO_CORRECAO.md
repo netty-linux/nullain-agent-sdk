@@ -135,7 +135,7 @@ Priorizado por impacto/risco. Cada item: o quê, onde, tempo estimado.
 
 ### P4 — Diferenciação (mês 2+, após paridade)
 
-23. **Sandbox fail-closed por padrão** (landlock/Seatbelt/firejail) — ganha onde Grok é fail-open.
+23. ✅ **Sandbox fail-closed por padrão** (landlock/Seatbelt/Job Object) — ganha onde Grok é fail-open. **Concluído.** Port `Sandbox` + runner fail-closed + NoSandbox + selector; adapters Linux landlock (FS + rede via scope ≥6.2, validado no CI Ubuntu), macOS seatbelt (write-confined + network-denied, gated/macOS-manual), Windows Job Object (contenção de processo + privilege drop, validado em host Windows); wired no bash/git + daemon + `nullain.toml.example`. Follow-ups honestos: read-isolation no seatbelt, low-integrity token + AppContainer no Windows, deny_network no Windows v1.
 24. **Authority-intersection law p/ subagentes** (child authority = intersection(parent-delegation, child-def, context, policy)) — nenhum concorrente prova isso.
 25. **Plugin signing + SBOM + capability manifests.**
 26. **Tool search (schemas deferidos) p/ escalar MCP.**
