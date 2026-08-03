@@ -222,16 +222,24 @@ class LandlockSandbox:
             for sys_dir in ("/usr", "/lib", "/lib64", "/bin", "/sbin", "/etc", "/dev", "/proc"):
                 if os.path.exists(sys_dir):
                     LandlockSandbox._add_path_rule(ruleset_fd, sys_dir, _RO_ALL & fs_mask, fs_mask)
-            # 5) Allow the executable's own directory tree (RO) so the child can
-            #    exec its interpreter wherever it lives — CI toolcache, pyenv,
-            #    /usr/bin, etc. Without this the child fails to start, which would
-            #    make the escape test pass for the wrong reason.
+            # 5) Allow the interpreter's own directory tree (RO) so the child can
+            #    exec its interpreter and read its venv wherever it lives — CI
+            #    toolcache, pyenv, /usr/bin, a uv venv symlink, etc. We must allow
+            #    BOTH the literal argv[0] tree (e.g. .venv/ holding pyvenv.cfg that
+            #    site.py reads at startup) AND its realpath target tree (the actual
+            #    binary + stdlib), because sys.executable is often a symlink.
+            #    Without this the child fails to start, which would make the escape
+            #    test pass for the wrong reason.
             if exe_path:
-                exe_real = os.path.realpath(exe_path)
-                exe_dir = os.path.dirname(exe_real)
-                for d in (exe_dir, os.path.dirname(exe_dir)):
-                    if d and os.path.exists(d):
-                        LandlockSandbox._add_path_rule(ruleset_fd, d, _RO_ALL & fs_mask, fs_mask)
+                allowed: set[str] = set()
+                for cand in (exe_path, os.path.realpath(exe_path)):
+                    d = os.path.dirname(cand)
+                    for tree in (d, os.path.dirname(d)):
+                        if tree and os.path.exists(tree) and tree not in allowed:
+                            allowed.add(tree)
+                            LandlockSandbox._add_path_rule(
+                                ruleset_fd, tree, _RO_ALL & fs_mask, fs_mask
+                            )
             # 6) Bind the ruleset to ourselves. After this, the restrictions are
             #    enforced for this process and all exec'd children.
             _set_errno(
