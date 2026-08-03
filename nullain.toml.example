@@ -52,3 +52,18 @@ max_context = 128000
 # args = ["mcp-server-git", "--repository", "/workspace"]
 # env = { GIT_AUTHOR_NAME = "nullain" }
 
+# OS-level subprocess sandbox for the bash/git tools. The selector picks the
+# platform adapter: landlock (Linux >=5.13), seatbelt (macOS), windows_job
+# (Windows), or none. Fail-closed: when required=true and the adapter is
+# unavailable on this host, bash/git REFUSE to run rather than executing
+# unconfined — the safe default. Set required=false to opt out (run unconfined
+# if the adapter is unavailable); set enabled=false to disable isolation entirely.
+# allow_paths grants the sandboxed child extra writable paths beyond the workspace
+# (e.g. a shared cache). deny_network blocks network access where the adapter
+# supports it (landlock >=6.2, seatbelt; windows_job v1 does not enforce it).
+[sandbox]
+enabled = true
+required = true
+allow_paths = []
+deny_network = true
+

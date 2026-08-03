@@ -25,9 +25,19 @@ from nullain.protocol import (
 from nullain.router import ModelRouter
 from nullain.telemetry import configure_telemetry, get_logger
 from nullain.tools import PermissionPolicy, ToolRegistry
+from nullain.tools.sandbox import SandboxOptions, select_sandbox
 from nullain_tools import register_default_tools
 
 logger = get_logger(__name__)
+
+
+def _sandbox_opts(settings: NullainSettings, ws_root: str) -> SandboxOptions:
+    """Build per-session sandbox options from settings + the session workspace."""
+    return SandboxOptions(
+        workspace_root=Path(ws_root),
+        allow_paths=[Path(p) for p in settings.sandbox.allow_paths],
+        deny_network=settings.sandbox.deny_network,
+    )
 
 
 async def _load_mcp_clients(settings: NullainSettings) -> list[MCPClient]:
@@ -89,6 +99,18 @@ async def run_agentd(
         if config_path is None and Path("nullain.toml").exists():
             config_path = "nullain.toml"
         settings = load_settings(config_path)
+
+    # Sandbox: select the platform adapter once. When isolation is enabled and
+    # required but the adapter is unavailable on this host, fail-closed would
+    # refuse every bash/git call at execution time — surface that at startup so
+    # the operator can fix the host (or set sandbox.required=false to opt out).
+    sandbox = select_sandbox(settings.sandbox)
+    if settings.sandbox.enabled and sandbox.required and not sandbox.available():
+        logger.warning(
+            "sandbox_required_but_unavailable",
+            sandbox=sandbox.name,
+            hint="set [sandbox] required=false to run unconfined, or enable the adapter",
+        )
 
     # Provider: injected (tests) or built from settings (production).
     if provider is None:
@@ -209,7 +231,13 @@ async def run_agentd(
         permission_callback=permission_callback,
     )
     persistent_memory: PersistentMemory | None = None
-    register_default_tools(registry, ws_root, ask_user_callback=ask_user_callback)
+    register_default_tools(
+        registry,
+        ws_root,
+        ask_user_callback=ask_user_callback,
+        sandbox=sandbox,
+        sandbox_opts=_sandbox_opts(settings, ws_root),
+    )
 
     try:
         while True:
@@ -246,6 +274,8 @@ async def run_agentd(
                     ws_root,
                     ask_user_callback=ask_user_callback,
                     persistent_memory=persistent_memory,
+                    sandbox=sandbox,
+                    sandbox_opts=_sandbox_opts(settings, ws_root),
                 )
                 # Register each MCP server's tools into the fresh per-session
                 # registry. The shared client/subprocess persists across
