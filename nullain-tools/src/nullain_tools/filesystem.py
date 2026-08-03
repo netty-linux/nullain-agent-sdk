@@ -4,6 +4,7 @@ import contextlib
 import re
 from pathlib import Path
 
+from nullain.authority import Capability
 from nullain.tools import RegisteredTool, resolve_and_validate_path, tool
 
 
@@ -14,6 +15,7 @@ def create_filesystem_tools(workspace_root: str | Path) -> list[RegisteredTool]:
         name="read_file",
         description="Read complete text file content within the workspace.",
         read_only=True,
+        requires=frozenset({Capability.READ}),
     )
     def read_file(path: str) -> str:
         target = resolve_and_validate_path(root, path)
@@ -23,7 +25,11 @@ def create_filesystem_tools(workspace_root: str | Path) -> list[RegisteredTool]:
             return f"Error: Path '{path}' is not a regular file."
         return target.read_text(encoding="utf-8", errors="replace")
 
-    @tool(name="write_file", description="Write text content to a file in the workspace.")
+    @tool(
+        name="write_file",
+        description="Write text content to a file in the workspace.",
+        requires=frozenset({Capability.WRITE}),
+    )
     def write_file(path: str, content: str) -> str:
         target = resolve_and_validate_path(root, path)
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -33,6 +39,7 @@ def create_filesystem_tools(workspace_root: str | Path) -> list[RegisteredTool]:
     @tool(
         name="edit_file",
         description="Perform exact string replacement (old_str with new_str) in a workspace file.",
+        requires=frozenset({Capability.WRITE}),
     )
     def edit_file(path: str, old_str: str, new_str: str) -> str:
         target = resolve_and_validate_path(root, path)
@@ -49,6 +56,7 @@ def create_filesystem_tools(workspace_root: str | Path) -> list[RegisteredTool]:
         name="grep",
         description="Search for regex pattern across files in the workspace.",
         read_only=True,
+        requires=frozenset({Capability.READ}),
     )
     def grep(pattern: str, relative_dir: str = ".") -> str:
         search_dir = resolve_and_validate_path(root, relative_dir)
@@ -96,6 +104,7 @@ def create_filesystem_tools(workspace_root: str | Path) -> list[RegisteredTool]:
             "(e.g. '**/*.py', 'src/**/*.ts'). Returns matching paths, one per line."
         ),
         read_only=True,
+        requires=frozenset({Capability.READ}),
     )
     def glob(pattern: str, relative_dir: str = ".") -> str:
         search_dir = resolve_and_validate_path(root, relative_dir)
@@ -135,6 +144,7 @@ def create_filesystem_tools(workspace_root: str | Path) -> list[RegisteredTool]:
             "directories and 'name' for files."
         ),
         read_only=True,
+        requires=frozenset({Capability.READ}),
     )
     def list_directory(relative_dir: str = ".") -> str:
         target = resolve_and_validate_path(root, relative_dir)

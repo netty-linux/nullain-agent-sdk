@@ -10,6 +10,7 @@ from pydantic import ValidationError
 
 from nullain.agent.result import RunResult, RunStatus
 from nullain.agent.spec import BASH_NONZERO_PREFIX, SpecValidator, TaskSpec
+from nullain.authority import Authority, Capability
 from nullain.context.assembler import PromptAssembler
 from nullain.context.manager import ContextManager
 from nullain.errors import (
@@ -47,7 +48,7 @@ from nullain.ports.clock import Clock, SystemClock
 from nullain.router import Complexity, IntentParser, ModelRouter
 from nullain.telemetry import get_cost_tracker, get_logger
 from nullain.telemetry import span as telemetry_span
-from nullain.tools import ToolRegistry
+from nullain.tools import PermissionLevel, PermissionPolicy, ToolRegistry
 
 logger = get_logger(__name__)
 
@@ -79,6 +80,38 @@ def _step_signature(tool_calls: list[ToolCall]) -> str:
     return "|".join(parts)
 
 
+def _project_authority_policy(
+    base: PermissionPolicy | None, effective: Authority
+) -> PermissionPolicy:
+    """Build a child permission policy realising the effective authority.
+
+    The authority gate already refuses tools whose required capabilities the
+    subagent lacks. This projection folds the same bound into the existing
+    permission engine so deny-pattern narrowing (delegated denies unioned with
+    the policy's) and level tightening (WRITE/EXEC default-deny when absent
+    from the effective capabilities) are enforced by the already-tested policy
+    path too — belt and suspenders, no logic duplicated for the capability
+    subset itself.
+    """
+    workspace = base.workspace_root if base is not None else "."
+    write_level = base.default_write_level if base is not None else PermissionLevel.ASK
+    exec_level = base.default_exec_level if base is not None else PermissionLevel.ASK
+    read_level = base.default_read_level if base is not None else PermissionLevel.ALLOW
+    return PermissionPolicy(
+        workspace_root=workspace,
+        default_read_level=read_level,
+        default_write_level=(
+            PermissionLevel.DENY if Capability.WRITE not in effective.capabilities else write_level
+        ),
+        default_exec_level=(
+            PermissionLevel.DENY if Capability.EXEC not in effective.capabilities else exec_level
+        ),
+        # effective.deny_patterns already unions the base policy's denies via
+        # the meet with Authority.from_policy(base).
+        deny_patterns=sorted(effective.deny_patterns),
+    )
+
+
 class AgentLoop:
     """Orchestrated Agent Execution Engine with Plan/Act/Verify, Routing & Memory."""
 
@@ -105,6 +138,7 @@ class AgentLoop:
         self_correction_max: int = 3,
         max_compaction_attempts: int = 3,
         loop_detection_threshold: int = 3,
+        authority: Authority | None = None,
     ) -> None:
         """Initialize AgentLoop with integrated engine collaborators.
 
@@ -131,10 +165,15 @@ class AgentLoop:
             max_tokens: Token budget ceiling.
             timeout: Execution timeout in seconds.
             self_correction_max: Max self-correction retries per session.
+            authority: Authority enforced for this loop (P4.24). None = the
+                unrestricted trust root (no capability/allowed-tool gate). A
+                materialised Authority is set on spawned subagents by
+                ``spawn`` and enforced at the registry execution gate.
         """
         self.workspace_root = Path(workspace_root).resolve()
         self.provider = provider
         self.tools = tools
+        self.authority = authority
         self.event_bus = event_bus or EventBus()
         self.event_store = event_store
         self.explicit_model = model
@@ -1095,6 +1134,7 @@ class AgentLoop:
         tools: ToolRegistry | None = None,
         model: str | None = None,
         max_steps: int | None = None,
+        authority: Authority | None = None,
     ) -> str:
         """Run a sub-agent with fresh context and return its final answer text.
 
@@ -1104,6 +1144,20 @@ class AgentLoop:
         receives only the sub-agent's final text, so a long-running
         investigation does not blow out the parent's context.
 
+        Authority-intersection law (P4.24): when ``authority`` is delegated,
+        the child's effective authority is the meet of four factors::
+
+            effective = parent_authority ∧ delegation ∧ child_def ∧ policy
+
+        enforced at the registry execution gate. The child can exercise a
+        capability only if every factor grants it; any single denial removes
+        it. Delegation is clamped to the parent's own authority (a parent can
+        never delegate what it does not hold). When ``authority`` is None the
+        sub-run is unrestricted and backward compatible — no gate is applied.
+
+        A subagent whose effective authority lacks the SPAWN capability cannot
+        itself spawn (``NullainError``); this caps delegation depth.
+
         Args:
             prompt: The subtask prompt for the sub-agent.
             tools: Scoped tool registry for the sub-agent. When None, the
@@ -1112,6 +1166,10 @@ class AgentLoop:
                 None, the sub-agent routes by intent like a normal run.
             max_steps: Step cap for the sub-agent. When None, inherits the
                 parent's ``max_steps``.
+            authority: Delegated authority for the sub-agent. When None, the
+                sub-agent inherits an unrestricted view (backward compatible).
+                When provided, it is intersected with the parent's authority,
+                the child's tool-defined surface, and the permission policy.
 
         Returns:
             The sub-agent's final answer text.
@@ -1121,9 +1179,35 @@ class AgentLoop:
             finishes. Background worktrees / concurrent sub-agents are deferred
             to a later milestone.
         """
+        child_authority: Authority | None = None
+        if authority is None:
+            child_tools = tools or self.tools
+        else:
+            # SPAWN capability: a subagent without it cannot spawn further.
+            if self.authority is not None and not self.authority.can_spawn:
+                raise NullainError("subagent lacks the SPAWN capability and cannot spawn a child")
+            source_registry = tools or self.tools
+            parent_auth = self.authority or Authority.unrestricted()
+            # Clamp delegation to the parent's holdings — a parent cannot
+            # delegate authority it does not itself hold.
+            delegation = authority.meet(parent_auth)
+            child_def = source_registry.capability_surface()
+            base_policy = source_registry.permission_policy
+            policy_auth = (
+                Authority.from_policy(base_policy)
+                if base_policy is not None
+                else Authority.unrestricted()
+            )
+            effective = delegation.meet(child_def).meet(policy_auth)
+            child_authority = effective
+            child_tools = source_registry.scoped(
+                authority=effective,
+                permission_policy=_project_authority_policy(base_policy, effective),
+            )
+
         child = AgentLoop(
             provider=self.provider,
-            tools=tools or self.tools,
+            tools=child_tools,
             model=model,
             workspace_root=self.workspace_root,
             max_steps=max_steps or self.max_steps,
@@ -1136,6 +1220,7 @@ class AgentLoop:
             # Fresh event bus: sub-agent internal events do not pollute the
             # parent's trajectory. The parent only sees the returned text.
             event_bus=EventBus(),
+            authority=child_authority,
         )
         result = await child.run_result(prompt=prompt)
         return result.final_text

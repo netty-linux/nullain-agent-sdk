@@ -1,6 +1,7 @@
 """Nullain Agent SDK — Production Agentic Framework for Python."""
 
 from nullain.agent import AgentLoop, SpecValidator, TaskSpec
+from nullain.authority import Authority, Capability
 from nullain.config import (
     MCPConfig,
     MCPServerConfig,
@@ -92,8 +93,10 @@ __all__ = [
     "HARNESS_RULES",
     "AgentEventPayload",
     "AgentLoop",
+    "Authority",
     "BaseEvent",
     "BudgetExceededError",
+    "Capability",
     "ChatMessage",
     "CircuitBreaker",
     "Clock",

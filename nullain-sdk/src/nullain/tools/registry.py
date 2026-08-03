@@ -1,8 +1,11 @@
 """Nullain Agent SDK — Tool Registry and Execution Manager."""
 
+from __future__ import annotations
+
 from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
+from nullain.authority import Authority, Capability
 from nullain.errors import ToolNotFoundError, ToolPermissionError
 from nullain.llm.types import ToolSpec
 from nullain.tools.decorator import RegisteredTool
@@ -20,16 +23,64 @@ class ToolRegistry:
         self,
         permission_policy: PermissionPolicy | None = None,
         permission_callback: PermissionCallback | None = None,
+        authority: Authority | None = None,
     ) -> None:
         self._tools: dict[str, RegisteredTool] = {}
         self.permission_policy = permission_policy
         # When ASK has no callback, execution is DENIED (fail-closed). This
         # prevents the previous behavior where ASK silently became ALLOW.
         self.permission_callback = permission_callback
+        # Authority enforced for subagents (P4.24). None = unrestricted (the
+        # trust root): no capability/allowed-tool gate is applied, preserving
+        # backward-compatible behavior for the root agent and for existing
+        # callers that never spawn. A materialised Authority is set on a child
+        # registry by AgentLoop.spawn and checked in execute() BEFORE the
+        # permission policy, so an authority denial is an immediate, non-ASK
+        # refusal — a subagent can never prompt its way out of its authority.
+        self.authority = authority
 
     def register(self, tool_obj: RegisteredTool) -> None:
         """Register a RegisteredTool instance."""
         self._tools[tool_obj.name] = tool_obj
+
+    def scoped(
+        self,
+        *,
+        authority: Authority,
+        permission_policy: PermissionPolicy | None,
+    ) -> ToolRegistry:
+        """Return a child registry sharing this registry's tools + callback.
+
+        The child carries the given (already-intersected) authority and policy,
+        while reusing the parent's registered tools and permission callback.
+        Used by :meth:`AgentLoop.spawn` to give a subagent a capability-
+        intersected view of the tools without mutating the parent's registry.
+        """
+        child = ToolRegistry(
+            permission_policy=permission_policy,
+            permission_callback=self.permission_callback,
+            authority=authority,
+        )
+        child._tools = dict(self._tools)
+        return child
+
+    def capability_surface(self) -> Authority:
+        """Derive the ``child_def`` authority factor from this registry's tools.
+
+        ``allowed_tools`` is the set of registered tool names; ``capabilities``
+        is the union of every tool's required capabilities. This is the child-
+        definition operand of the intersection law: a child is *defined* to use
+        exactly the tools/capabilities its registry exposes, no more.
+        """
+        caps: set[Capability] = set()
+        for registered in self._tools.values():
+            caps |= registered.requires
+        return Authority(
+            capabilities=frozenset(caps),
+            allowed_tools=frozenset(self._tools),
+            deny_patterns=frozenset(),
+            can_spawn=True,
+        )
 
     def is_read_only(self, name: str) -> bool:
         """Whether a registered tool is marked side-effect-free (read-only).
@@ -116,7 +167,14 @@ class ToolRegistry:
     async def execute(self, name: str, arguments: dict[str, Any]) -> str:
         """Execute registered tool by name with arguments dict.
 
-        Permission resolution:
+        Authority gate (P4.24): when this registry carries an ``authority``
+        (i.e. it belongs to a spawned subagent), the call is refused if the
+        tool is outside the authority's allowed set or requires a capability
+        the subagent lacks. This check runs BEFORE the permission policy and
+        never resolves to ASK — authority denial is absolute, so a subagent
+        cannot prompt its way past the intersection bound.
+
+        Permission resolution (policy factor):
         - ALLOW: proceed.
         - DENY: raise ToolPermissionError.
         - ASK: invoke permission_callback; if none is configured, DENY
@@ -126,6 +184,19 @@ class ToolRegistry:
             String output of execution.
         """
         registered = self.get_tool(name)
+        # Authority-intersection gate (subagents only; None = unrestricted root).
+        if self.authority is not None and not self.authority.permits(name, registered.requires):
+            missing = registered.requires - self.authority.capabilities
+            if missing:
+                reason = (
+                    f"requires {sorted(c.value for c in registered.requires)} "
+                    f"but subagent authority grants "
+                    f"{sorted(c.value for c in self.authority.capabilities)} "
+                    f"(missing: {sorted(c.value for c in missing)})"
+                )
+            else:
+                reason = f"tool '{name}' is not in this subagent's allowed set"
+            raise ToolPermissionError(f"Tool '{name}' denied by authority: {reason}")
         # A tool may carry a fixed permission level (e.g. MCP-backed tools)
         # that overrides the argument-based policy heuristics.
         if registered.permission_level is not None:

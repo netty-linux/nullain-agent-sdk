@@ -4,6 +4,7 @@ import inspect
 from collections.abc import Callable
 from typing import Any
 
+from nullain.authority import Capability
 from nullain.llm.types import FunctionSpec, ToolSpec
 from nullain.tools.permissions import PermissionLevel
 
@@ -19,6 +20,7 @@ class RegisteredTool:
         func: Callable[..., Any],
         read_only: bool = False,
         permission_level: PermissionLevel | None = None,
+        requires: frozenset[Capability] = frozenset(),
     ) -> None:
         self.name = name
         self.description = description
@@ -35,6 +37,12 @@ class RegisteredTool:
         # either trusted (ALLOW) or gated behind the human approval loop (ASK).
         # None means "use the registry's per-tool policy logic".
         self.permission_level = permission_level
+        # Capabilities the tool exercises (P4.24 authority-intersection law).
+        # The registry's authority gate refuses a call when the calling
+        # subagent's authority does not include every required capability.
+        # Empty for capability-neutral tools (e.g. ask_user), which are then
+        # governed solely by the allowed-tool set.
+        self.requires = frozenset(requires)
 
     async def execute(self, kwargs: dict[str, Any]) -> Any:
         """Execute tool function handling both sync and async functions."""
@@ -48,6 +56,7 @@ def tool(
     description: str | None = None,
     read_only: bool = False,
     permission_level: PermissionLevel | None = None,
+    requires: frozenset[Capability] = frozenset(),
 ) -> Callable[[Callable[..., Any]], RegisteredTool]:
     """Decorator to register a python function as an agent Tool with JSON Schema auto-derivation.
 
@@ -58,6 +67,9 @@ def tool(
             dispatch it concurrently with other read-only tool calls.
         permission_level: Optional fixed permission level overriding the
             registry's policy heuristics (used for MCP-backed tools).
+        requires: Capabilities the tool exercises, enforced by the registry's
+            authority gate against a subagent's effective authority (P4.24).
+            Defaults to empty (capability-neutral).
     """
 
     def decorator(func: Callable[..., Any]) -> RegisteredTool:
@@ -97,6 +109,7 @@ def tool(
             func=func,
             read_only=read_only,
             permission_level=permission_level,
+            requires=requires,
         )
 
     return decorator

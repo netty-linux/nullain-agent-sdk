@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from nullain.authority import Capability
 from nullain.tools import RegisteredTool, execute_subprocess, tool
 from nullain.tools.sandbox import Sandbox, SandboxOptions
 
@@ -18,6 +19,7 @@ def create_bash_tool(
         description=(
             "Execute a shell command specified as a list of argument strings in the workspace."
         ),
+        requires=frozenset({Capability.EXEC}),
     )
     async def bash(command_args: list[str]) -> str:
         returncode, output = await execute_subprocess(

@@ -8,6 +8,7 @@ without an LLM summarization round-trip, matching the parity-feature scope.
 import re
 
 import httpx
+from nullain.authority import Capability
 from nullain.tools import RegisteredTool, tool
 
 _MAX_RESPONSE_CHARS = 50_000
@@ -41,6 +42,7 @@ def create_web_fetch_tool() -> RegisteredTool:
             "to text; no summarization). Useful for reading documentation or APIs."
         ),
         read_only=True,
+        requires=frozenset({Capability.READ, Capability.NETWORK}),
     )
     async def web_fetch(url: str) -> str:
         if not url.startswith(("http://", "https://")):

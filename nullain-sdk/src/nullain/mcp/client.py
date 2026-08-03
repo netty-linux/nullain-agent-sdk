@@ -23,6 +23,7 @@ from typing import Any
 
 from pydantic import ValidationError
 
+from nullain.authority import Capability
 from nullain.errors import MCPProtocolError
 from nullain.llm.types import FunctionSpec, ToolSpec
 from nullain.mcp.protocol import (
@@ -254,6 +255,12 @@ async def register_mcp_tools(
             func=_proxy,
             read_only=False,
             permission_level=level,
+            # An MCP server's side-effects cannot be introspected, so each
+            # wrapper is conservatively treated as WRITE-capable: a subagent
+            # delegated read-only authority therefore cannot invoke it. The
+            # fixed permission_level (ASK/ALLOW) remains the human-approval
+            # gate; this capability tag is the authority-intersection gate.
+            requires=frozenset({Capability.WRITE}),
         )
         registry.register(wrapper)
         registered_names.append(namespaced)

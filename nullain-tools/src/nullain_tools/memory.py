@@ -5,6 +5,7 @@ record durable facts (user preferences, project constraints, feedback) that
 are re-injected into the system prompt and survive context compaction.
 """
 
+from nullain.authority import Capability
 from nullain.memory import MemoryEntry, MemoryType, PersistentMemory
 from nullain.tools import RegisteredTool, tool
 
@@ -21,6 +22,7 @@ def create_memory_tools(persistent_memory: PersistentMemory) -> list[RegisteredT
             "lowercase kebab-case slug; `type` is user|feedback|project|reference."
         ),
         read_only=False,
+        requires=frozenset({Capability.WRITE}),
     )
     async def save_memory(
         name: str,
@@ -48,6 +50,7 @@ def create_memory_tools(persistent_memory: PersistentMemory) -> list[RegisteredT
             "all stored memory slugs when name is omitted."
         ),
         read_only=True,
+        requires=frozenset({Capability.READ}),
     )
     async def read_memory(name: str = "") -> str:
         if not name:
