@@ -42,7 +42,10 @@ def _platform_adapter(cfg: SandboxConfig) -> Sandbox | None:
         from nullain.tools.sandbox.adapters.seatbelt import SeatbeltSandbox
 
         return SeatbeltSandbox(required=cfg.required)
-    # Windows Job Object lands in a follow-up commit.
+    if sys.platform == "win32":
+        from nullain.tools.sandbox.adapters.windows_job import WindowsJobSandbox
+
+        return WindowsJobSandbox(required=cfg.required)
     return None
 
 

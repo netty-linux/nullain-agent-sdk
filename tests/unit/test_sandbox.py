@@ -404,3 +404,60 @@ def test_seatbelt_selector_wires_on_darwin() -> None:
     sb = select_sandbox(SandboxConfig(enabled=True, required=True))
     assert isinstance(sb, SeatbeltSandbox)
     assert sb.required is True
+
+
+# ---------------------------------------------------------------------------
+# Windows Job Object adapter (platform-gated; runs on a Windows host — CI is
+# Ubuntu-only so this is skipped there and validated on a Windows box)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="job object is Windows-only")
+@pytest.mark.asyncio
+async def test_windows_job_runs_child_and_captures_output(tmp_path: Path) -> None:
+    """End-to-end launcher integration: a sandboxed child execs, its stdout
+    reaches the runner's pipe (inherited handles), and its exit code is
+    forwarded. This proves the Job Object + restricted-token + suspended-assign
+    path works, not an fs escape (Windows v1 fs isolation is PermissionPolicy)."""
+    from nullain.tools.sandbox.adapters.windows_job import WindowsJobSandbox
+
+    sb = WindowsJobSandbox(required=True)
+    if not sb.available():
+        pytest.skip("job object not available on this host")
+
+    code, output = await execute_subprocess(
+        [sys.executable, "-c", "import sys; sys.stdout.write('ran'); sys.exit(0)"],
+        cwd=tmp_path,
+        sandbox=sb,
+        sandbox_opts=SandboxOptions(workspace_root=tmp_path),
+    )
+    assert code == 0, f"sandboxed child must run to completion: {output}"
+    assert "ran" in output, "child stdout must reach the runner via inherited handles"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="job object is Windows-only")
+@pytest.mark.asyncio
+async def test_windows_job_forwards_nonzero_exit(tmp_path: Path) -> None:
+    """A non-zero child exit code must propagate through the launcher."""
+    from nullain.tools.sandbox.adapters.windows_job import WindowsJobSandbox
+
+    sb = WindowsJobSandbox(required=True)
+    if not sb.available():
+        pytest.skip("job object not available on this host")
+
+    code, _output = await execute_subprocess(
+        [sys.executable, "-c", "import sys; sys.exit(7)"],
+        cwd=tmp_path,
+        sandbox=sb,
+        sandbox_opts=SandboxOptions(workspace_root=tmp_path),
+    )
+    assert code == 7
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="job object is Windows-only")
+def test_windows_job_selector_wires_on_win32() -> None:
+    from nullain.tools.sandbox.adapters.windows_job import WindowsJobSandbox
+
+    sb = select_sandbox(SandboxConfig(enabled=True, required=True))
+    assert isinstance(sb, WindowsJobSandbox)
+    assert sb.required is True
