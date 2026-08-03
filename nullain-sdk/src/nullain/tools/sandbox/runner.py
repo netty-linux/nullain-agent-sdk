@@ -117,13 +117,20 @@ async def execute_subprocess(
     if sandbox is not None:
         _fail_closed(sandbox)
         opts = sandbox_opts if sandbox_opts is not None else SandboxOptions(workspace_root=cwd_path)
-        # Adapter returns platform-specific kwargs (preexec_fn / creationflags).
-        # Merge defensively: adapter keys win, but never overwrite our stdio/cwd.
+        # Adapter returns platform-specific kwargs (preexec_fn / creationflags),
+        # and may also wrap the command in a confining launcher (e.g. macOS
+        # sandbox-exec) by returning an ``argv`` list. Merge defensively: adapter
+        # keys win, but never overwrite our stdio/cwd; ``argv`` is consumed here
+        # (never passed as a subprocess kwarg) and remains an explicit argv list,
+        # never a shell string.
         extra = sandbox.prepare(list(cmd_args), opts)
+        wrapped_argv = extra.pop("argv", None)
         for key, value in extra.items():
             if key in ("stdout", "stderr", "stdin", "cwd", "env"):
                 continue
             launch_kwargs[key] = value
+        if wrapped_argv is not None:
+            cmd_args = list(wrapped_argv)
 
     try:
         proc = await asyncio.create_subprocess_exec(cmd_args[0], *cmd_args[1:], **launch_kwargs)

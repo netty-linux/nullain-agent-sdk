@@ -330,3 +330,77 @@ def test_landlock_selector_wires_on_linux() -> None:
     sb = select_sandbox(SandboxConfig(enabled=True, required=True))
     assert isinstance(sb, LandlockSandbox)
     assert sb.required is True
+
+
+# ---------------------------------------------------------------------------
+# macOS Seatbelt adapter (platform-gated; CI is Ubuntu-only, so this is skipped
+# there and validated manually on a macOS host)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="seatbelt is macOS-only")
+@pytest.mark.asyncio
+async def test_seatbelt_blocks_write_outside_workspace(tmp_path: Path) -> None:
+    """A sandboxed child cannot write outside its workspace on macOS. Gated to
+    macOS because CI runs Ubuntu; validated on a macOS dev box. Skipped (not
+    failed) elsewhere — the cross-platform fail-closed unit test guards the
+    security property regardless of platform."""
+    from nullain.tools.sandbox.adapters.seatbelt import SeatbeltSandbox
+
+    sb = SeatbeltSandbox(required=True)
+    if not sb.available():
+        pytest.skip("sandbox-exec not available on this host")
+
+    outside_dir = tmp_path.parent / f"nullain_seatbelt_escape_{tmp_path.name}"
+    outside_dir.mkdir(exist_ok=True)
+    target = outside_dir / "evil.txt"
+    if target.exists():
+        target.unlink()
+
+    try:
+        code, output = await execute_subprocess(
+            [sys.executable, "-c", f"open(r'{target}', 'w').write('x')"],
+            cwd=tmp_path,
+            sandbox=sb,
+            sandbox_opts=SandboxOptions(workspace_root=tmp_path, deny_network=True),
+        )
+        assert code != 0, "writing outside the workspace must be denied"
+        assert not target.exists(), "no file must be created outside the workspace"
+        assert "Operation not permitted" in output or "Permission denied" in output, output
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            target.unlink()
+        with contextlib.suppress(OSError):
+            outside_dir.rmdir()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="seatbelt is macOS-only")
+@pytest.mark.asyncio
+async def test_seatbelt_allows_write_inside_workspace(tmp_path: Path) -> None:
+    """Complement to the escape test: the child can still write inside its
+    workspace, so a profile that blocks everything is caught, not just one that
+    lets everything through."""
+    from nullain.tools.sandbox.adapters.seatbelt import SeatbeltSandbox
+
+    sb = SeatbeltSandbox(required=True)
+    if not sb.available():
+        pytest.skip("sandbox-exec not available on this host")
+
+    inside = tmp_path / "inside.txt"
+    code, output = await execute_subprocess(
+        [sys.executable, "-c", f"open(r'{inside}', 'w').write('x')"],
+        cwd=tmp_path,
+        sandbox=sb,
+        sandbox_opts=SandboxOptions(workspace_root=tmp_path),
+    )
+    assert code == 0, f"writing inside the workspace must succeed: {output}"
+    assert inside.read_text() == "x"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="seatbelt is macOS-only")
+def test_seatbelt_selector_wires_on_darwin() -> None:
+    from nullain.tools.sandbox.adapters.seatbelt import SeatbeltSandbox
+
+    sb = select_sandbox(SandboxConfig(enabled=True, required=True))
+    assert isinstance(sb, SeatbeltSandbox)
+    assert sb.required is True

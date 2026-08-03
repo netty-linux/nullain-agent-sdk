@@ -38,7 +38,11 @@ def _platform_adapter(cfg: SandboxConfig) -> Sandbox | None:
         from nullain.tools.sandbox.adapters.landlock import LandlockSandbox
 
         return LandlockSandbox(required=cfg.required)
-    # macOS seatbelt and Windows Job Object land in follow-up commits.
+    if sys.platform == "darwin":
+        from nullain.tools.sandbox.adapters.seatbelt import SeatbeltSandbox
+
+        return SeatbeltSandbox(required=cfg.required)
+    # Windows Job Object lands in a follow-up commit.
     return None
 
 
