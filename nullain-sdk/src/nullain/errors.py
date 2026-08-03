@@ -126,6 +126,23 @@ class MCPTransportError(MCPError):
     pass
 
 
+class SandboxError(NullainError):
+    """Base exception for OS-level sandbox failures."""
+
+    pass
+
+
+class SandboxUnavailableError(SandboxError):
+    """Raised when a sandbox is required but no usable adapter is available.
+
+    Fail-closed: rather than executing a subprocess without isolation, the
+    runner refuses and raises. This is the security differentiator — the agent
+    is the sandboxed-by-default harness, not the fail-open one.
+    """
+
+    pass
+
+
 __all__ = [
     "BudgetExceededError",
     "ContextError",
@@ -140,6 +157,8 @@ __all__ = [
     "ProviderRateLimitError",
     "ProviderTimeoutError",
     "RouterError",
+    "SandboxError",
+    "SandboxUnavailableError",
     "SpecValidationError",
     "ToolError",
     "ToolExecutionError",

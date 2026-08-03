@@ -52,6 +52,28 @@ class MCPConfig(BaseModel):
     servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
+class SandboxConfig(BaseModel):
+    """OS-level subprocess sandbox configuration.
+
+    - ``enabled`` (default True): when False, the runner uses the NoSandbox
+      adapter (no isolation, explicit opt-out; the PermissionPolicy path checks
+      still apply).
+    - ``required`` (default True): when True and the platform's real adapter
+      reports ``available() == False``, the runner raises
+      :class:`~nullain.errors.SandboxUnavailableError` (fail-closed) rather than
+      executing the subprocess without isolation.
+    - ``allow_paths``: extra paths (beyond the workspace root) the sandbox
+      permits the child to read/write.
+    - ``deny_network`` (default True): request network isolation when the
+      platform adapter supports it.
+    """
+
+    enabled: bool = True
+    required: bool = True
+    allow_paths: list[str] = Field(default_factory=list)
+    deny_network: bool = True
+
+
 class NullainSettings(BaseSettings):
     """Root application settings loaded from nullain.toml or environment."""
 
@@ -64,6 +86,7 @@ class NullainSettings(BaseSettings):
     router: RouterConfig = Field(default_factory=RouterConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     ollama_api_key: str | None = None
     ollama_base_url: str = "https://ollama.com"
 
@@ -84,6 +107,7 @@ __all__ = [
     "MCPServerConfig",
     "NullainSettings",
     "RouterConfig",
+    "SandboxConfig",
     "TierConfig",
     "load_settings",
 ]

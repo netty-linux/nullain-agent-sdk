@@ -1,0 +1,254 @@
+"""Unit tests for the OS-level sandbox port, runner fail-closed behavior, and selector.
+
+These tests are fully offline and cross-platform: the fail-closed logic and
+adapter-kwargs merge are exercised with a fake adapter + monkeypatched
+``asyncio.create_subprocess_exec`` (no real confinement, no platform dependency).
+Platform-specific adapters (landlock/seatbelt/windows_job) get their own gated
+tests in follow-up commits.
+"""
+
+import asyncio
+import sys
+from collections.abc import Sequence
+from pathlib import Path
+from typing import Any
+
+import pytest
+from nullain.config import NullainSettings, SandboxConfig
+from nullain.errors import SandboxUnavailableError
+from nullain.tools.sandbox import (
+    NoSandbox,
+    SandboxOptions,
+    execute_subprocess,
+    select_sandbox,
+)
+
+
+class _FakeSandbox:
+    """In-memory Sandbox adapter for offline runner/selector tests."""
+
+    def __init__(
+        self,
+        *,
+        required: bool,
+        available: bool,
+        extra: dict[str, Any] | None = None,
+    ) -> None:
+        self._required = required
+        self._available = available
+        self._extra = extra or {}
+        self.prepared: list[tuple[list[str], SandboxOptions]] = []
+
+    @property
+    def name(self) -> str:
+        return "fake"
+
+    @property
+    def required(self) -> bool:
+        return self._required
+
+    def available(self) -> bool:
+        return self._available
+
+    def prepare(self, argv: Sequence[str], opts: SandboxOptions) -> dict[str, Any]:
+        self.prepared.append((list(argv), opts))
+        return dict(self._extra)
+
+
+class _FakeProc:
+    def __init__(self) -> None:
+        self.returncode = 0
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        return (b"ok", b"")
+
+
+# ---------------------------------------------------------------------------
+# NoSandbox adapter
+# ---------------------------------------------------------------------------
+
+
+def test_no_sandbox_is_permissive_and_available() -> None:
+    sb = NoSandbox()
+    assert sb.name == "none"
+    assert sb.required is False
+    assert sb.available() is True
+    assert sb.prepare(["ls"], SandboxOptions(workspace_root=Path("."))) == {}
+
+
+def test_no_sandbox_required_flag_is_respected() -> None:
+    # Even NoSandbox carries the flag so the selector can communicate intent;
+    # the runner only fail-closes when required AND not available, and
+    # NoSandbox.available() is always True, so it never fail-closes.
+    assert NoSandbox(required=True).required is True
+
+
+# ---------------------------------------------------------------------------
+# Runner fail-closed behavior
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fail_closed_raises_before_subprocess(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A required adapter that is unavailable refuses to launch — the security
+    differentiator. No subprocess is spawned; the runner raises immediately."""
+    launched = False
+
+    async def _spy(*args: Any, **kwargs: Any) -> _FakeProc:
+        nonlocal launched
+        launched = True
+        return _FakeProc()
+
+    # Patch the symbol the runner actually calls; monkeypatch restores it after.
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spy)
+
+    sb = _FakeSandbox(required=True, available=False)
+    with pytest.raises(SandboxUnavailableError) as exc:
+        await execute_subprocess(
+            [sys.executable, "-c", "print('hi')"],
+            cwd=tmp_path,
+            sandbox=sb,
+            sandbox_opts=SandboxOptions(workspace_root=tmp_path),
+        )
+    assert "fake" in str(exc.value)
+    assert launched is False, "fail-closed must not spawn any subprocess"
+
+
+@pytest.mark.asyncio
+async def test_not_required_unavailable_still_runs(tmp_path: Path) -> None:
+    """required=False means the unavailable adapter does NOT fail-closed: the
+    caller opted out of strict isolation, so execution proceeds."""
+    sb = _FakeSandbox(required=False, available=False, extra={})
+    code, output = await execute_subprocess(
+        [sys.executable, "-c", "print('ran')"],
+        cwd=tmp_path,
+        sandbox=sb,
+        sandbox_opts=SandboxOptions(workspace_root=tmp_path),
+    )
+    assert code == 0
+    assert "ran" in output
+    assert sb.prepared, "adapter.prepare must still be called when not required"
+
+
+@pytest.mark.asyncio
+async def test_adapter_kwargs_are_merged_into_launch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def _spy(*args: Any, **kwargs: Any) -> _FakeProc:
+        captured.update(kwargs)
+        captured["_argv"] = args
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spy)
+
+    sb = _FakeSandbox(required=True, available=True, extra={"_marker": True})
+    await execute_subprocess(
+        [sys.executable, "-c", "pass"],
+        cwd=tmp_path,
+        sandbox=sb,
+        sandbox_opts=SandboxOptions(workspace_root=tmp_path),
+    )
+    assert captured.get("_marker") is True, "adapter extra kwargs must be merged"
+    # The runner still owns the executable argv (never shell).
+    assert captured["_argv"][0] == sys.executable
+
+
+@pytest.mark.asyncio
+async def test_adapter_cannot_override_runner_stdio_or_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An adapter must not be able to redirect stdio or change cwd past the
+    runner's controlled workspace — those are the runner's to set."""
+    captured: dict[str, Any] = {}
+
+    async def _spy(*args: Any, **kwargs: Any) -> _FakeProc:
+        captured.update(kwargs)
+        return _FakeProc()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _spy)
+
+    sb = _FakeSandbox(
+        required=True,
+        available=True,
+        extra={"cwd": "/evil", "stdout": None, "stdin": None, "_ok": 1},
+    )
+    await execute_subprocess(
+        [sys.executable, "-c", "pass"],
+        cwd=tmp_path,
+        sandbox=sb,
+        sandbox_opts=SandboxOptions(workspace_root=tmp_path),
+    )
+    assert captured["cwd"] == str(tmp_path.resolve()), "cwd must stay the workspace"
+    assert captured["stdout"] is asyncio.subprocess.PIPE, "stdout must stay PIPE"
+    assert "stdin" not in captured, "adapter stdin override must be dropped"
+    assert captured.get("_ok") == 1, "non-protected keys still merge"
+
+
+# ---------------------------------------------------------------------------
+# Selector
+# ---------------------------------------------------------------------------
+
+
+def test_select_sandbox_disabled_returns_nosandbox() -> None:
+    sb = select_sandbox(SandboxConfig(enabled=False))
+    assert sb.name == "none"
+    assert sb.required is False
+
+
+def test_select_sandbox_enabled_returns_adapter() -> None:
+    # Foundation: no real platform adapter wired yet, so the selector returns
+    # the permissive NoSandbox fallback (regression-free). Follow-up commits
+    # replace this with landlock/seatbelt/windows_job on their platforms.
+    sb = select_sandbox(SandboxConfig(enabled=True, required=True))
+    assert sb.available(), "fallback adapter must be usable"
+    # The fallback never fail-closes; real isolation activates with adapters.
+
+
+def test_select_sandbox_preserves_disabled_required_false() -> None:
+    # Disabling isolation is an explicit opt-out: required is False so even a
+    # real-but-unavailable adapter downstream would not block execution.
+    sb = select_sandbox(SandboxConfig(enabled=False, required=True))
+    assert sb.required is False
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+
+def test_sandbox_config_defaults() -> None:
+    cfg = SandboxConfig()
+    assert cfg.enabled is True
+    assert cfg.required is True
+    assert cfg.allow_paths == []
+    assert cfg.deny_network is True
+
+
+def test_nullain_settings_has_sandbox_default() -> None:
+    settings = NullainSettings()
+    assert isinstance(settings.sandbox, SandboxConfig)
+    assert settings.sandbox.enabled is True
+
+
+def test_load_settings_sandbox_from_toml(tmp_path: Path) -> None:
+    from nullain.config import load_settings
+
+    toml = tmp_path / "nullain.toml"
+    toml.write_text(
+        """
+[sandbox]
+enabled = true
+required = false
+allow_paths = ["/opt/nullain/cache"]
+deny_network = false
+"""
+    )
+    settings = load_settings(toml)
+    assert settings.sandbox.enabled is True
+    assert settings.sandbox.required is False
+    assert settings.sandbox.allow_paths == ["/opt/nullain/cache"]
+    assert settings.sandbox.deny_network is False
