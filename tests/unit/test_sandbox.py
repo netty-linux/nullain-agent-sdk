@@ -8,6 +8,7 @@ tests in follow-up commits.
 """
 
 import asyncio
+import contextlib
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -252,3 +253,80 @@ deny_network = false
     assert settings.sandbox.required is False
     assert settings.sandbox.allow_paths == ["/opt/nullain/cache"]
     assert settings.sandbox.deny_network is False
+
+
+# ---------------------------------------------------------------------------
+# Linux Landlock adapter (platform-gated; CI Ubuntu validates the escape test)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="landlock is Linux-only")
+@pytest.mark.asyncio
+async def test_landlock_blocks_write_outside_workspace(tmp_path: Path) -> None:
+    """The flagship security proof: a sandboxed child CANNOT write outside its
+    workspace. Runs only on Linux where landlock is supported; CI (Ubuntu)
+    validates it. Skipped on hosts without landlock rather than failing — the
+    cross-platform fail-closed unit test already guards the security property.
+    """
+    from nullain.tools.sandbox.adapters.landlock import LandlockSandbox
+
+    sb = LandlockSandbox(required=True)
+    if not sb.available():
+        pytest.skip("landlock not available on this kernel")
+
+    # A target OUTSIDE the workspace, under the shared pytest tmp root.
+    outside_dir = tmp_path.parent / f"nullain_landlock_escape_{tmp_path.name}"
+    outside_dir.mkdir(exist_ok=True)
+    target = outside_dir / "evil.txt"
+    if target.exists():
+        target.unlink()
+
+    try:
+        code, output = await execute_subprocess(
+            [sys.executable, "-c", f"open(r'{target}', 'w').write('x')"],
+            cwd=tmp_path,
+            sandbox=sb,
+            sandbox_opts=SandboxOptions(workspace_root=tmp_path, deny_network=True),
+        )
+        assert code != 0, "writing outside the workspace must be denied"
+        assert not target.exists(), "no file must be created outside the workspace"
+        assert "PermissionError" in output or "Permission denied" in output, output
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            target.unlink()
+        with contextlib.suppress(OSError):
+            outside_dir.rmdir()
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="landlock is Linux-only")
+@pytest.mark.asyncio
+async def test_landlock_allows_write_inside_workspace(tmp_path: Path) -> None:
+    """Isolation must not over-restrict: the child can still write inside its
+    workspace. This complements the escape test so a regression that blocks
+    everything is caught, not just one that lets everything through."""
+    from nullain.tools.sandbox.adapters.landlock import LandlockSandbox
+
+    sb = LandlockSandbox(required=True)
+    if not sb.available():
+        pytest.skip("landlock not available on this kernel")
+
+    inside = tmp_path / "inside.txt"
+    code, output = await execute_subprocess(
+        [sys.executable, "-c", f"open(r'{inside}', 'w').write('x')"],
+        cwd=tmp_path,
+        sandbox=sb,
+        sandbox_opts=SandboxOptions(workspace_root=tmp_path),
+    )
+    assert code == 0, f"writing inside the workspace must succeed: {output}"
+    assert inside.read_text() == "x"
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="landlock is Linux-only")
+def test_landlock_selector_wires_on_linux() -> None:
+    """select_sandbox on Linux returns the landlock adapter (not the NoSandbox
+    fallback) when isolation is enabled and required."""
+    from nullain.tools.sandbox.adapters.landlock import LandlockSandbox
+
+    sb = select_sandbox(SandboxConfig(enabled=True, required=True))
+    assert isinstance(sb, LandlockSandbox)
+    assert sb.required is True

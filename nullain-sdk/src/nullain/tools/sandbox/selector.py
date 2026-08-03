@@ -23,15 +23,22 @@ from nullain.tools.sandbox.port import Sandbox
 
 
 def _platform_adapter(cfg: SandboxConfig) -> Sandbox | None:
-    """Return the real adapter for this platform, or None if none is available.
+    """Return the real adapter for this platform, or None if none is shipped.
 
     Real adapters (landlock on Linux, seatbelt on macOS, windows_job on Windows)
-    are added in follow-up commits and inserted here. A returned adapter carries
-    ``required`` from config so the runner fail-closes when it is unavailable.
+    are inserted here by platform. A returned adapter carries ``required`` from
+    config so the runner fail-closes when it is required but unavailable.
+
+    Note: this returns the adapter even when ``available()`` is False on purpose
+    — that is how fail-closed reaches the runner. A required-but-unavailable
+    adapter makes ``execute_subprocess`` raise before spawning; a
+    not-required-but-unavailable adapter runs unconfined (the caller opted out).
     """
-    # Foundation: no real adapter wired yet. Platform gating kept explicit so
-    # follow-up commits plug in cleanly without re-architecting the selector.
-    _ = (sys.platform, cfg)
+    if sys.platform.startswith("linux"):
+        from nullain.tools.sandbox.adapters.landlock import LandlockSandbox
+
+        return LandlockSandbox(required=cfg.required)
+    # macOS seatbelt and Windows Job Object land in follow-up commits.
     return None
 
 
