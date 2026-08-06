@@ -8,7 +8,7 @@ import tempfile
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from anyio import get_cancelled_exc_class
 from pydantic import ValidationError
@@ -45,9 +45,11 @@ from nullain.llm import (
     ChatMessage,
     CompletionChunk,
     CompletionRequest,
+    FunctionSpec,
     LLMProvider,
     TokenUsage,
     ToolCall,
+    ToolSpec,
 )
 from nullain.memory import EpisodicMemory, PersistentMemory, TrajectoryRecord
 from nullain.ports.clock import Clock, SystemClock
@@ -243,16 +245,41 @@ class AgentLoop:
         )
 
     async def _generate_spec(self, prompt: str, model: str, system_prompt: str) -> TaskSpec:
-        """Ask the LLM to generate a structured TaskSpec for the task.
+        """Ask the LLM to generate a structured TaskSpec via forced tool-calling.
 
-        Falls back to a minimal generic spec if JSON parsing fails.
+        Uses a synthetic ``emit_task_spec`` tool so the model returns
+        structured, schema-validated arguments through the same tool-calling
+        path already exercised for real tools — rather than free-text JSON
+        that has to be fished out of markdown fences and can be truncated or
+        preceded by chatter. Smaller open-source models are more prone to
+        malformed free-text JSON than frontier models, so this path matters
+        more here than it would for a stronger model.
+
+        Falls back to parsing ``delta_text`` as JSON (legacy path, for models
+        or providers that ignore the tool and answer in prose), then to a
+        minimal generic spec if both fail.
         """
+        spec_tool = ToolSpec(
+            function=FunctionSpec(
+                name="emit_task_spec",
+                description="Emit the structured task plan for the requested work.",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "objective": {"type": "string"},
+                        "steps": {"type": "array", "items": {"type": "string"}},
+                        "target_files": {"type": "array", "items": {"type": "string"}},
+                        "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
+                    },
+                    "required": ["objective", "steps"],
+                },
+            )
+        )
         spec_instruction = (
-            "Analyze the following task and generate a structured plan.\n"
-            "Respond ONLY with a JSON object matching this schema:\n"
-            '{"objective": "...", "steps": ["step1", ...], '
-            '"target_files": ["file1.py", ...], '
-            '"acceptance_criteria": ["criterion1", ...]}\n\n'
+            "Analyze the following task and call `emit_task_spec` with a "
+            "structured plan: the objective, ordered steps, any files you "
+            "expect to create or modify, and the acceptance criteria a "
+            "verifier could check.\n\n"
             f"Task: {prompt}"
         )
         spec_messages = [
@@ -262,12 +289,33 @@ class AgentLoop:
         req = CompletionRequest(
             model=model,
             messages=spec_messages,
+            tools=[spec_tool],
             stream=False,
         )
         response = await self.provider.generate(req)
-        text = (response.delta_text or "").strip()
 
-        # Extract JSON from markdown code fence if present
+        for tc in response.tool_calls or []:
+            if tc.name != "emit_task_spec":
+                continue
+            raw_args = tc.arguments
+            args: dict[str, Any]
+            if isinstance(raw_args, str):
+                try:
+                    parsed_args: object = _json.loads(raw_args)
+                except _json.JSONDecodeError:
+                    continue
+                if not isinstance(parsed_args, dict):
+                    continue
+                args = cast(dict[str, Any], parsed_args)
+            else:
+                args = raw_args
+            try:
+                return TaskSpec.model_validate(args)
+            except ValidationError:
+                logger.warning("spec_tool_call_validation_failed", raw_args=str(args)[:200])
+
+        # Legacy fallback: some models ignore `tools` and answer in prose.
+        text = (response.delta_text or "").strip()
         if "```" in text:
             for part in text.split("```"):
                 cleaned = part.strip()

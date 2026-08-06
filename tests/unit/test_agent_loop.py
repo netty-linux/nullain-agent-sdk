@@ -101,6 +101,62 @@ async def test_agent_loop_e2e_create_facts_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_spec_generation_uses_structured_tool_call(tmp_path: Path) -> None:
+    """Plan phase parses TaskSpec from a tool call, not free-text JSON (M12).
+
+    The spec-generation request now offers an ``emit_task_spec`` tool; when
+    the model responds with a tool call (rather than delta_text), the spec
+    must be built from the call's arguments.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    registry = ToolRegistry()
+    register_default_tools(registry, workspace)
+
+    spec_via_tool_call = CompletionChunk(
+        tool_calls=[
+            ToolCall(
+                id="call_spec_1",
+                name="emit_task_spec",
+                arguments={
+                    "objective": "Create FACTS.txt file",
+                    "steps": ["Write 3 facts"],
+                    "target_files": ["FACTS.txt"],
+                    "acceptance_criteria": ["FACTS.txt exists"],
+                },
+            )
+        ]
+    )
+    write_call = CompletionChunk(
+        tool_calls=[
+            ToolCall(
+                id="call_write_1",
+                name="write_file",
+                arguments={"path": "FACTS.txt", "content": "1. Fact A"},
+            )
+        ],
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
+    )
+    final_answer = CompletionChunk(
+        delta_text="Finished creating FACTS.txt.",
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+
+    fake_provider = FakeSequenceProvider([spec_via_tool_call, write_call, final_answer])
+    agent = AgentLoop(
+        provider=fake_provider,
+        tools=registry,
+        max_steps=5,
+        workspace_root=workspace,
+    )
+
+    result = await agent.run_result("Create FACTS.txt file")
+    assert result.status == "success"
+    assert (workspace / "FACTS.txt").exists()
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_verify_fix_reverify(tmp_path: Path) -> None:
     """A failed VERIFY re-enters the Act phase instead of terminating (M12).
 
