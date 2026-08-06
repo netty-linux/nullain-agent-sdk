@@ -40,8 +40,16 @@ Built on **Hexagonal Architecture** and **Event Sourcing**, `nullain` enforces d
   Prevents context rot and degradation. Automatically compacts history at 75% window capacity while preserving active specs, key decisions, and diagnostics, paired with instruction re-injection and progressive tool disclosure.
 - 🧬 **Episodic Memory & Learning Loop (`EpisodicMemory`)**
   SQLite-backed trajectory engine that records execution attempts, success metrics, and repository fingerprints—injecting relevant few-shot examples into future tasks.
-- 🔒 **Defense-in-Depth Security & Sandboxing (`PermissionPolicy`)**
-  Subprocess execution strictly via explicit argument lists (no `shell=True`), strict path resolution (`resolve()` + `is_relative_to`), and 3-tier action permissions (`allow`, `ask`, `deny`).
+- 🔒 **Defense-in-Depth Security & Sandboxing (`PermissionPolicy` + `Sandbox`)**
+  Subprocess execution strictly via explicit argument lists (no `shell=True`), strict path resolution (`resolve()` + `is_relative_to`), and 3-tier action permissions (`allow`, `ask`, `deny`). On top of that, an **OS-level fail-closed sandbox** (`Landlock` on Linux ≥5.13, `Seatbelt` on macOS, Job Object on Windows) isolates filesystem + network for subprocess tools — if a sandbox is required and unavailable, execution is **refused**, never run unsandboxed.
+- 🪪 **Subagent Authority-Intersection Law (`Authority`)**
+  A child subagent's effective authority is the **meet** (intersection) of four factors — parent authority ∧ delegation ∧ child definition ∧ policy. A capability is granted only if all four grant it; any single denial removes it outright (no ASK escape). `AgentLoop.spawn` materialises the bound onto a scoped child registry.
+- 📦 **Signed Plugins + SBOM + Capability Manifests (`PluginLoader`)**
+  Plugins (v1: MCP server bundles) are signed, capability-manifested bundles. A signature covers identity + transport command + capabilities + tool declarations + a content-hashed SBOM, so drift in any of them invalidates the signature. The loader verifies, intersects declared capabilities with the operator's grant, and registers tools — **fail-closed at every branch** (Ed25519 via the optional `signing` extra).
+- 🔎 **Tool Search & Deferred MCP Schemas**
+  MCP tools register with minimal metadata (name + description); full input schemas are **deferred** and hydrated on demand. The agent discovers tools via a `search_tools` tool, and only the schemas of the tools it actually selects are loaded into the LLM context — keeping the prompt small as the tool surface scales.
+- 🧩 **Deterministic Workflow Orchestrator (`Workflow`)**
+  A workflow is a Python function that orchestrates subagents deterministically — which subagents run, in what order, with what fan-out and pipeline stages is fixed by the script, never decided by an LLM. `agent()`, `parallel()` (barrier), and `pipeline()` (no barrier) compose into auditable, resumable, testable multi-agent tasks.
 - ⚡ **Zero-Drift Stdio NDJSON Daemon (`nullain-agentd`)**
   Exposes a typed stdio NDJSON protocol with automated JSON Schema generation (`make schema`), allowing Go, Rust, or CLI wrappers to consume the SDK natively.
 
@@ -52,22 +60,26 @@ Built on **Hexagonal Architecture** and **Event Sourcing**, `nullain` enforces d
 ```
 ┌────────────────────────────────────────────────────────────┐
 │  PUBLIC API                                                │
-│  AgentLoop · Conversation · OllamaCloudProvider            │
+│  AgentLoop · Conversation · OllamaCloudProvider · Workflow │
 ├────────────────────────────────────────────────────────────┤
 │  ORCHESTRATION & HARNESS                                   │
-│  AgentLoop (ReAct + Plan/Act) · IntentParser               │
-│  SpecValidator · Reflection/Self-correction                │
+│  AgentLoop (ReAct + Plan/Act) · Workflow (subagent DSL)    │
+│  IntentParser · SpecValidator · Reflection/Self-correction │
 ├────────────────────────────────────────────────────────────┤
 │  CONTEXT & MEMORY                                          │
 │  ContextManager (compaction, instruction centrifuging)     │
-│  EpisodicMemory · TrajectoryRecord (SQLite)                │
+│  EpisodicMemory · PersistentMemory · TrajectoryRecord      │
 ├────────────────────────────────────────────────────────────┤
 │  MODEL ROUTING                                             │
 │  ModelRouter (task → tier → model) · CircuitBreaker        │
 │  LLMProvider (Port) ← OllamaCloudProvider (Adapter)        │
 ├────────────────────────────────────────────────────────────┤
 │  TOOLS & EXECUTION                                         │
-│  ToolRegistry · PermissionPolicy · Sandboxed Execution     │
+│  ToolRegistry · Tool Search (deferred schemas) · MCPClient │
+│  PermissionPolicy · Sandbox (fail-closed) · Authority gate │
+├────────────────────────────────────────────────────────────┤
+│  PLUGINS & TRUST                                           │
+│  PluginLoader · PluginManifest · SignatureVerifier · SBOM  │
 ├────────────────────────────────────────────────────────────┤
 │  INFRASTRUCTURE & TRANSPORT                                │
 │  EventBus · Telemetry (structlog) · Stdio NDJSON Protocol  │
@@ -80,8 +92,8 @@ Built on **Hexagonal Architecture** and **Event Sourcing**, `nullain` enforces d
 
 The repository is organized as a high-efficiency `uv` monorepo:
 
-- **`nullain-sdk/`**: Core SDK engine containing LLM adapters, event bus, router, context manager, and memory storage.
-- **`nullain-tools/`**: Built-in developer tools (`read_file`, `write_file`, `edit_file`, `bash`, `grep`, `git`).
+- **`nullain-sdk/`**: Core SDK engine — LLM adapters, event bus, router, context manager, memory, MCP client, authority, plugins, sandbox, and the workflow orchestrator.
+- **`nullain-tools/`**: Built-in developer tools (`read_file`, `write_file`, `edit_file`, `bash`, `grep`, `git`, `web_fetch`, `ask_user`, `search_tools`, memory tools).
 - **`nullain-agentd/`**: High-performance daemon reading/writing NDJSON over stdio for CLI integration.
 - **`schema/`**: Exported JSON Schema contracts for cross-language interoperability.
 
@@ -189,15 +201,29 @@ make typecheck
 
 # Format code automatically
 make format
+
+# Audit dependencies for known vulnerabilities
+make audit
+
+# Regenerate the exported JSON Schema (schema/protocol_v1.json)
+make schema
 ```
+
+> **Plugin signing (optional).** Ed25519 signature verification requires the
+> `signing` extra: `uv sync --extra signing` (installs `cryptography`). Without
+> it, the SDK installs cleanly and a signed plugin is refused fail-closed rather
+> than loaded on trust.
 
 ---
 
 ## 🔒 Security & Threat Model
 
 1. **Subprocess Isolation**: Zero reliance on `shell=True`. Commands run via argument array execution with timeouts and output truncation.
-2. **Workspace Containment**: File operations enforce absolute path resolution verified against the `workspace_root`. Symlinks are resolved prior to authorization checks.
-3. **Secret Redaction**: Automatic redaction patterns prevent API keys and credentials from entering logs or LLM context prompts.
+2. **Fail-Closed OS Sandbox**: Subprocess tools run inside an OS-level sandbox (`Landlock` on Linux ≥5.13, `Seatbelt` on macOS, Job Object on Windows) isolating filesystem + network. If a sandbox is required and unavailable, execution is **refused** — never run unsandboxed.
+3. **Workspace Containment**: File operations enforce absolute path resolution verified against the `workspace_root`. Symlinks are resolved prior to authorization checks.
+4. **Subagent Authority-Intersection**: A child subagent's effective authority is the meet of parent ∧ delegation ∧ child definition ∧ policy — a capability is granted only if all four grant it, with no ASK escape from the bound.
+5. **Signed Plugins & SBOM**: Plugins are signed, capability-manifested bundles; the signature covers identity + transport + capabilities + tool declarations + a content-hashed SBOM, and the loader is fail-closed at every branch.
+6. **Secret Redaction**: Automatic redaction patterns prevent API keys and credentials from entering logs or LLM context prompts.
 
 ---
 
