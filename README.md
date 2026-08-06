@@ -117,36 +117,62 @@ cd nullain-agent-sdk
 uv sync
 ```
 
+### CLI
+
+```bash
+# Run a single prompt
+uv run nullain run "list the python files in this workspace"
+
+# Structured NDJSON output for piping
+uv run nullain run "list the python files" --json
+
+# Interactive multi-turn chat with TTY permission approval
+uv run nullain chat
+
+# Environment health checks
+uv run nullain doctor
+
+# Manage MCP servers declared in nullain.toml
+uv run nullain mcp list
+```
+
 ### Python SDK Usage Example
+
+The `Agent` facade is the primary entry point — it assembles the provider,
+tools, permission policy, router, and sandbox with safe defaults:
 
 ```python
 import asyncio
-from nullain.agent import AgentLoop
-from nullain.llm import OllamaCloudProvider
-from nullain.tools import ToolRegistry
-from nullain_tools import register_default_tools
+from nullain import Agent
 
 
 async def main():
-    # Initialize tools & provider
-    registry = ToolRegistry()
-    register_default_tools(registry, workspace_root=".")
-    provider = OllamaCloudProvider()
-
-    # Create agent loop instance
-    agent = AgentLoop(provider=provider, tools=registry)
-
-    # Run agent task
-    output = await agent.run(
-        prompt="Audit pyproject.toml and ensure all dependencies are up to date",
-        session_id="session-001",
-    )
-    print("Agent Execution Result:", output)
+    agent = Agent(workspace_root=".")
+    result = await agent.run("Audit pyproject.toml and ensure all dependencies are up to date")
+    print("Agent Execution Result:", result.final_text)
 
 
 if __name__ == "__main__":
     asyncio.run(main())
 ```
+
+For scripts, `run_sync` is a thin synchronous facade:
+
+```python
+from nullain import Agent
+
+result = Agent(workspace_root=".").run_sync("say hello")
+print(result.final_text)
+```
+
+### Documentation & Examples
+
+- [docs/quickstart.md](docs/quickstart.md) — from zero to a running agent.
+- [docs/configuration.md](docs/configuration.md) — every `nullain.toml` section.
+- [docs/tools.md](docs/tools.md) — the built-in tools and their capabilities.
+- [docs/architecture.md](docs/architecture.md) — the pipeline and layers.
+- [docs/api-stability.md](docs/api-stability.md) — what is public API under SemVer.
+- `examples/` — runnable examples: `01_basic_agent.py` … `05_mcp_server.py`.
 
 ---
 
