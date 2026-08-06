@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from nullain.hooks import HooksConfig
+from nullain.lsp.config import LSPConfig, LSPServerConfig
 
 
 class TierConfig(BaseModel):
@@ -28,6 +29,10 @@ class RouterConfig(BaseModel):
         }
     )
     fallback_chain: list[str] = Field(default_factory=lambda: ["deep", "balanced", "fast"])
+    #: Optional model used by :class:`~nullain.router.intent.IntentParser` to
+    #: classify a task when the deterministic heuristics are not confident
+    #: (M11.3). When None, the parser stays heuristic-only.
+    classifier_model: str | None = None
 
 
 class MCPServerConfig(BaseModel):
@@ -127,6 +132,7 @@ class NullainSettings(BaseSettings):
     router: RouterConfig = Field(default_factory=RouterConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
+    lsp: LSPConfig = Field(default_factory=LSPConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
     ollama_api_key: str | None = None
@@ -145,6 +151,8 @@ def load_settings(config_path: str | Path | None = None) -> NullainSettings:
 
 
 __all__ = [
+    "LSPConfig",
+    "LSPServerConfig",
     "MCPConfig",
     "MCPServerConfig",
     "NullainSettings",

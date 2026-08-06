@@ -533,9 +533,7 @@ async def test_agent_loop_prefers_real_usage_over_estimate(tmp_path: Path) -> No
     # ~5000-token estimate of the long tool-call argument.
     long_path = "x" * 20000
     tool_chunk = CompletionChunk(
-        tool_calls=[
-            ToolCall(id="call_1", name="read_file", arguments={"path": long_path})
-        ],
+        tool_calls=[ToolCall(id="call_1", name="read_file", arguments={"path": long_path})],
         usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
     )
     final_chunk = CompletionChunk(

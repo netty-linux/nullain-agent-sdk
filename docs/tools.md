@@ -16,6 +16,7 @@ by the registry's authority gate for subagents (P4.24).
 | `glob` | READ | yes | Find files matching a glob pattern. |
 | `list_directory` | READ | yes | List directory entries (`name/` for dirs). |
 | `todo_write` | — | no | Update the todo list; at most one `in_progress`; emits a `TodoEvent`. |
+| `undo` | WRITE | no | Restore the most recent pre-write checkpoint of a file (M11.1). |
 
 ### `read_file`
 
@@ -85,6 +86,21 @@ fallback with the same output format. Truncation is always announced.
 |------|-----------|-----------|-------------|
 | `save_memory` | WRITE | no | Persist a durable fact (registered when a `PersistentMemory` is provided). |
 | `read_memory` | READ | yes | Read persisted facts (registered when a `PersistentMemory` is provided). |
+
+## Language Server (LSP) — read-only code intelligence
+
+Registered by `register_lsp_tools(registry, clients)` when LSP servers are
+configured (M11.2). Each tool routes a file to its server by extension →
+language → server map. A server that fails to initialize is logged and skipped
+(fail-soft); an unsupported file type or unavailable server surfaces as a
+`ToolResult` error, never a session crash.
+
+| Tool | Capability | Read-only | Description |
+|------|-----------|-----------|-------------|
+| `lsp_diagnostics` | READ | yes | Pull diagnostics for a file. |
+| `lsp_goto_definition` | READ | yes | Jump to a symbol's definition. |
+| `lsp_find_references` | READ | yes | Find all references to a symbol. |
+| `lsp_hover` | READ | yes | Hover documentation for a symbol. |
 
 ## Capabilities
 

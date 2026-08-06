@@ -1,10 +1,14 @@
 """Nullain Agent SDK — AgentLoop ReAct and Plan/Act Orchestrated Execution Engine."""
 
 import asyncio
+import contextlib
 import json as _json
+import shutil
+import tempfile
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from anyio import get_cancelled_exc_class
 from pydantic import ValidationError
@@ -52,8 +56,10 @@ from nullain.telemetry import get_cost_tracker, get_logger
 from nullain.telemetry import span as telemetry_span
 from nullain.tools import PermissionLevel, PermissionPolicy, ToolRegistry
 from nullain.tools.result import ToolResult
+from nullain.tools.sandbox import execute_subprocess
 
 logger = get_logger(__name__)
+
 
 def _step_signature(tool_calls: list[ToolCall]) -> str:
     """Build a stable signature for one step's requested tool calls.
@@ -129,6 +135,7 @@ class AgentLoop:
         max_compaction_attempts: int = 3,
         loop_detection_threshold: int = 3,
         authority: Authority | None = None,
+        tool_factory: Callable[[Path], ToolRegistry] | None = None,
     ) -> None:
         """Initialize AgentLoop with integrated engine collaborators.
 
@@ -159,6 +166,12 @@ class AgentLoop:
                 unrestricted trust root (no capability/allowed-tool gate). A
                 materialised Authority is set on spawned subagents by
                 ``spawn`` and enforced at the registry execution gate.
+            tool_factory: Callable that builds a fresh :class:`ToolRegistry`
+                rooted at a given workspace path. Required for
+                ``isolation="worktree"`` subagents (M11.4): tools bind to their
+                workspace root at creation time, so a worktree-isolated child
+                needs a registry re-rooted at the worktree directory. When
+                None, worktree isolation is refused.
         """
         self.workspace_root = Path(workspace_root).resolve()
         self.provider = provider
@@ -191,6 +204,7 @@ class AgentLoop:
         # which the loop is considered stuck and is broken out of. Mirrors the
         # loop-detection Gemini CLI uses to escape thrash.
         self.loop_detection_threshold = loop_detection_threshold
+        self.tool_factory = tool_factory
         self._compaction_attempts = 0
         # Incremental conversation fold (M10 D3): a cached ConversationState
         # updated by appending only new events, shared between the budget check
@@ -342,13 +356,9 @@ class AgentLoop:
                     # A call reaching execution must have complete, parsed
                     # arguments (the streaming merge finalizes them); a raw
                     # fragment here indicates an incomplete call.
-                    raise ToolError(
-                        f"Tool '{tc.name}' called with incomplete (unparsed) arguments"
-                    )
+                    raise ToolError(f"Tool '{tc.name}' called with incomplete (unparsed) arguments")
                 result = await self.tools.execute(tc.name, tc.arguments)
-                tool_span.set_attributes(
-                    {"tool.is_error": result.is_error, "tool.blocked": False}
-                )
+                tool_span.set_attributes({"tool.is_error": result.is_error, "tool.blocked": False})
             except ToolPermissionError as err:
                 logger.warning(
                     "tool_permission_denied",
@@ -890,7 +900,12 @@ class AgentLoop:
         self._folded_count = 0
 
         # 1. Intent Parsing & Model Routing
-        intent_res = self.intent_parser.parse(prompt)
+        # M11.3: parse_async runs the deterministic heuristics first and only
+        # calls the LLM classifier (router.classifier_model) when no heuristic
+        # matches with confidence, falling back to the heuristic on any failure.
+        intent_res = await self.intent_parser.parse_async(
+            prompt, self.provider, self.router.config.classifier_model
+        )
         active_model = self.explicit_model or self.router.route_intent(intent_res)
         logger.info(
             "task_intent_classified",
@@ -1239,6 +1254,7 @@ class AgentLoop:
         model: str | None = None,
         max_steps: int | None = None,
         authority: Authority | None = None,
+        isolation: Literal["worktree", None] = None,
     ) -> str:
         """Run a sub-agent with fresh context and return its final answer text.
 
@@ -1262,6 +1278,14 @@ class AgentLoop:
         A subagent whose effective authority lacks the SPAWN capability cannot
         itself spawn (``NullainError``); this caps delegation depth.
 
+        Worktree isolation (M11.4): when ``isolation="worktree"`` the child runs
+        in a detached ``git worktree`` (``git worktree add --detach``) with a
+        tool registry re-rooted at the worktree via ``self.tool_factory``. The
+        child edits an isolated checkout; changed files are integrated back into
+        the parent workspace afterwards, and the worktree is removed in
+        ``finally`` (including on failure/cancellation). Requires
+        ``self.tool_factory`` to be set, else ``NullainError``.
+
         Args:
             prompt: The subtask prompt for the sub-agent.
             tools: Scoped tool registry for the sub-agent. When None, the
@@ -1274,6 +1298,8 @@ class AgentLoop:
                 sub-agent inherits an unrestricted view (backward compatible).
                 When provided, it is intersected with the parent's authority,
                 the child's tool-defined surface, and the permission policy.
+            isolation: ``"worktree"`` runs the child in a detached git worktree
+                (M11.4); ``None`` (default) runs in place.
 
         Returns:
             The sub-agent's final answer text.
@@ -1283,32 +1309,9 @@ class AgentLoop:
             finishes. Background worktrees / concurrent sub-agents are deferred
             to a later milestone.
         """
-        child_authority: Authority | None = None
-        if authority is None:
-            child_tools = tools or self.tools
-        else:
-            # SPAWN capability: a subagent without it cannot spawn further.
-            if self.authority is not None and not self.authority.can_spawn:
-                raise NullainError("subagent lacks the SPAWN capability and cannot spawn a child")
-            source_registry = tools or self.tools
-            parent_auth = self.authority or Authority.unrestricted()
-            # Clamp delegation to the parent's holdings — a parent cannot
-            # delegate authority it does not itself hold.
-            delegation = authority.meet(parent_auth)
-            child_def = source_registry.capability_surface()
-            base_policy = source_registry.permission_policy
-            policy_auth = (
-                Authority.from_policy(base_policy)
-                if base_policy is not None
-                else Authority.unrestricted()
-            )
-            effective = delegation.meet(child_def).meet(policy_auth)
-            child_authority = effective
-            child_tools = source_registry.scoped(
-                authority=effective,
-                permission_policy=_project_authority_policy(base_policy, effective),
-            )
-
+        if isolation == "worktree":
+            return await self._spawn_worktree(prompt, tools, model, max_steps, authority)
+        child_authority, child_tools = self._child_registry(tools or self.tools, authority)
         child = AgentLoop(
             provider=self.provider,
             tools=child_tools,
@@ -1328,6 +1331,134 @@ class AgentLoop:
         )
         result = await child.run_result(prompt=prompt)
         return result.final_text
+
+    def _child_registry(
+        self, base_registry: ToolRegistry, authority: Authority | None
+    ) -> tuple[Authority | None, ToolRegistry]:
+        """Apply the P4.24 authority-intersection law to a child registry.
+
+        Returns ``(child_authority, child_tools)``. When ``authority`` is None
+        the child is unrestricted (backward compatible). Otherwise the effective
+        authority is the meet of parent ∧ delegation ∧ child_def ∧ policy, and
+        the returned registry is scoped to it. ``base_registry`` may be the
+        parent's registry or a worktree-rooted registry from ``tool_factory``.
+        """
+        if authority is None:
+            return None, base_registry
+        # SPAWN capability: a subagent without it cannot spawn further.
+        if self.authority is not None and not self.authority.can_spawn:
+            raise NullainError("subagent lacks the SPAWN capability and cannot spawn a child")
+        parent_auth = self.authority or Authority.unrestricted()
+        # Clamp delegation to the parent's holdings — a parent cannot delegate
+        # authority it does not itself hold.
+        delegation = authority.meet(parent_auth)
+        child_def = base_registry.capability_surface()
+        base_policy = base_registry.permission_policy
+        policy_auth = (
+            Authority.from_policy(base_policy)
+            if base_policy is not None
+            else Authority.unrestricted()
+        )
+        effective = delegation.meet(child_def).meet(policy_auth)
+        child_tools = base_registry.scoped(
+            authority=effective,
+            permission_policy=_project_authority_policy(base_policy, effective),
+        )
+        return effective, child_tools
+
+    async def _spawn_worktree(
+        self,
+        prompt: str,
+        tools: ToolRegistry | None,
+        model: str | None,
+        max_steps: int | None,
+        authority: Authority | None,
+    ) -> str:
+        """Run a sub-agent in a detached git worktree (M11.4).
+
+        Creates ``git worktree add --detach <tmpdir>`` (detached HEAD, no branch
+        pollution), re-roots the child's tool registry at the worktree via
+        ``self.tool_factory``, runs the child with ``workspace_root=worktree_dir``,
+        integrates changed files back into the parent workspace, and guarantees
+        worktree cleanup in ``finally`` (including on failure/cancellation).
+        """
+        if self.tool_factory is None:
+            raise NullainError("worktree isolation requires a tool_factory")
+        tmpdir = Path(tempfile.mkdtemp(prefix="nullain-wt-"))
+        worktree_dir = tmpdir / "worktree"
+        try:
+            await self._run_git(
+                ["worktree", "add", "--detach", str(worktree_dir)],
+                cwd=self.workspace_root,
+            )
+            base_registry = self.tool_factory(worktree_dir)
+            child_authority, child_tools = self._child_registry(base_registry, authority)
+            child = AgentLoop(
+                provider=self.provider,
+                tools=child_tools,
+                model=model,
+                workspace_root=worktree_dir,
+                max_steps=max_steps or self.max_steps,
+                max_tokens=self.max_tokens,
+                timeout=self.timeout,
+                loop_detection_threshold=self.loop_detection_threshold,
+                context_manager=ContextManager(),
+                # Re-root the prompt assembler at the worktree so SOUL.md /
+                # AGENTS.md are read from the isolated checkout, not the parent.
+                prompt_assembler=PromptAssembler(workspace_root=worktree_dir),
+                episodic_memory=None,  # isolated; the parent records the trajectory
+                event_bus=EventBus(),
+                authority=child_authority,
+            )
+            result = await child.run_result(prompt=prompt)
+            await self._integrate_worktree(worktree_dir)
+            return result.final_text
+        finally:
+            # Guaranteed cleanup: remove the worktree (force, in case the child
+            # left untracked files) and the temp dir, even on failure/cancel.
+            with contextlib.suppress(Exception):
+                await self._run_git(
+                    ["worktree", "remove", "--force", str(worktree_dir)],
+                    cwd=self.workspace_root,
+                )
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    async def _integrate_worktree(self, worktree_dir: Path) -> None:
+        """Copy files the child changed in the worktree back into the workspace.
+
+        The child edits the worktree's working tree without committing. After
+        the run, ``git status --porcelain`` lists the changed paths; each is
+        copied from the worktree back to the parent workspace so the child's
+        edits land in the main checkout. Deleted files are removed from the
+        parent too.
+        """
+        status = await self._run_git(["status", "--porcelain"], cwd=worktree_dir)
+        for line in status.splitlines():
+            if not line.strip():
+                continue
+            # Porcelain v1: "XY <path>", with renames as "XY old -> new".
+            rel = line[3:].strip()
+            if " -> " in rel:
+                rel = rel.split(" -> ", 1)[1]
+            src = worktree_dir / rel
+            dst = self.workspace_root / rel
+            if line[0] == "D" or line[1] == "D":
+                dst.unlink(missing_ok=True)
+            elif src.exists():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(src, dst)
+
+    async def _run_git(self, args: list[str], cwd: Path) -> str:
+        """Run a git command (explicit argv, no shell) and return stdout.
+
+        Raises :class:`~nullain.errors.NullainError` on a non-zero exit so
+        worktree setup/cleanup failures surface rather than silently leaving a
+        stray worktree behind.
+        """
+        code, output = await execute_subprocess(["git", *args], cwd=cwd)
+        if code != 0:
+            raise NullainError(f"git {' '.join(args)} failed (exit {code}): {output.strip()}")
+        return output
 
 
 __all__ = ["AgentLoop"]

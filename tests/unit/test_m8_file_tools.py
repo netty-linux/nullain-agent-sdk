@@ -83,50 +83,57 @@ def test_read_file_rejects_negative_offset(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_edit_file_requires_prior_read(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_edit_file_requires_prior_read(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("hello world")
     tools = _tools(tmp_path)
-    out = tools["edit_file"].func(path="a.txt", old_str="hello", new_str="goodbye")
+    out = await tools["edit_file"].func(path="a.txt", old_str="hello", new_str="goodbye")
     assert "has not been read" in out.output
     # After reading, the edit succeeds.
     tools["read_file"].func(path="a.txt")
-    out = tools["edit_file"].func(path="a.txt", old_str="hello", new_str="goodbye")
+    out = await tools["edit_file"].func(path="a.txt", old_str="hello", new_str="goodbye")
     assert "Edited" in out
     assert (tmp_path / "a.txt").read_text() == "goodbye world"
 
 
-def test_edit_file_rejects_ambiguous_match(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_edit_file_rejects_ambiguous_match(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("foo foo foo")
     tools = _tools(tmp_path)
     tools["read_file"].func(path="a.txt")
-    out = tools["edit_file"].func(path="a.txt", old_str="foo", new_str="bar")
+    out = await tools["edit_file"].func(path="a.txt", old_str="foo", new_str="bar")
     assert "appears 3 times" in out.output
     # File unchanged.
     assert (tmp_path / "a.txt").read_text() == "foo foo foo"
 
 
-def test_edit_file_replace_all(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_edit_file_replace_all(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("foo foo foo")
     tools = _tools(tmp_path)
     tools["read_file"].func(path="a.txt")
-    out = tools["edit_file"].func(path="a.txt", old_str="foo", new_str="bar", replace_all=True)
+    out = await tools["edit_file"].func(
+        path="a.txt", old_str="foo", new_str="bar", replace_all=True
+    )
     assert "Edited" in out
     assert (tmp_path / "a.txt").read_text() == "bar bar bar"
 
 
-def test_edit_file_rejects_noop(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_edit_file_rejects_noop(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("hello")
     tools = _tools(tmp_path)
     tools["read_file"].func(path="a.txt")
-    out = tools["edit_file"].func(path="a.txt", old_str="hello", new_str="hello")
+    out = await tools["edit_file"].func(path="a.txt", old_str="hello", new_str="hello")
     assert "no-op" in out.output
 
 
-def test_edit_file_returns_numbered_snippet(tmp_path: Path) -> None:
+@pytest.mark.asyncio
+async def test_edit_file_returns_numbered_snippet(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("line1\nline2\nline3\n")
     tools = _tools(tmp_path)
     tools["read_file"].func(path="a.txt")
-    out = tools["edit_file"].func(path="a.txt", old_str="line2", new_str="CHANGED")
+    out = await tools["edit_file"].func(path="a.txt", old_str="line2", new_str="CHANGED")
     assert "CHANGED" in out
     assert "2\tCHANGED" in out
 

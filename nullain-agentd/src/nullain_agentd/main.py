@@ -15,6 +15,7 @@ from nullain.config import NullainSettings, load_settings
 from nullain.events import BaseEvent, EventBus, EventStore
 from nullain.hooks import HookManager
 from nullain.llm import LLMProvider, OllamaCloudProvider
+from nullain.lsp import LSPClient, register_lsp_tools
 from nullain.mcp import MCPClient, StdioTransport, register_mcp_tools
 from nullain.memory import EpisodicMemory, PersistentMemory
 from nullain.plugins import PluginLoader, PreparedPlugin, select_verifier
@@ -28,7 +29,7 @@ from nullain.router import ModelRouter
 from nullain.telemetry import configure_telemetry, get_logger
 from nullain.tools import PermissionPolicy, ToolRegistry
 from nullain.tools.sandbox import SandboxOptions, select_sandbox
-from nullain_tools import FileAccessTracker, register_default_tools
+from nullain_tools import CheckpointStore, FileAccessTracker, register_default_tools
 
 logger = get_logger(__name__)
 
@@ -71,6 +72,39 @@ async def _load_mcp_clients(settings: NullainSettings) -> list[MCPClient]:
             )
             with contextlib.suppress(Exception):
                 await transport.close()
+    return clients
+
+
+async def _load_lsp_clients(settings: NullainSettings) -> dict[str, LSPClient]:
+    """Start the LSP servers declared in settings and return them by language.
+
+    Mirrors :func:`_load_mcp_clients`: a server that fails to initialize is
+    logged and skipped — one unavailable language server must not prevent the
+    daemon from serving the rest of its tools. The error is surfaced as a
+    structured log (AGENTS.md rule 5).
+    """
+    clients: dict[str, LSPClient] = {}
+    for language, server_cfg in settings.lsp.servers.items():
+        if not server_cfg.enabled:
+            continue
+        client = LSPClient(
+            command=server_cfg.command,
+            args=server_cfg.args,
+            env=server_cfg.env,
+            name=language,
+        )
+        try:
+            await client.initialize()
+            clients[language] = client
+        except Exception as err:
+            logger.warning(
+                "lsp_server_init_failed",
+                language=language,
+                command=server_cfg.command,
+                error=str(err),
+            )
+            with contextlib.suppress(Exception):
+                await client.close()
     return clients
 
 
@@ -138,6 +172,7 @@ async def run_agentd(
     output: TextIO | None = None,
     settings: NullainSettings | None = None,
     mcp_clients: list[MCPClient] | None = None,
+    lsp_clients: dict[str, LSPClient] | None = None,
     prepared_plugins: list[PreparedPlugin] | None = None,
     episodic_memory: EpisodicMemory | None = None,
     event_store: EventStore | None = None,
@@ -183,6 +218,11 @@ async def run_agentd(
     # sessions — the subprocesses are expensive to spawn and persist.
     if mcp_clients is None:
         mcp_clients = await _load_mcp_clients(settings)
+
+    # LSP clients: injected (tests) or started from settings. Shared across
+    # sessions like MCP clients — the language-server subprocesses persist.
+    if lsp_clients is None:
+        lsp_clients = await _load_lsp_clients(settings)
 
     # Plugins: injected (tests) or prepared from settings. Shared across
     # sessions like MCP clients — the verified manifest + live MCP server are
@@ -312,6 +352,34 @@ async def run_agentd(
         sandbox_opts=_sandbox_opts(settings, ws_root),
     )
 
+    def _build_worktree_registry(worktree_root: Path, sess_id: str) -> ToolRegistry:
+        """Build a fresh registry rooted at a worktree directory (M11.4).
+
+        Tools bind to their workspace root at creation time, so a
+        worktree-isolated subagent needs a registry built against the worktree
+        path rather than the parent's. Captures the same permission/ask
+        callbacks, sandbox, event bus, and session id as the parent registry.
+        """
+        wt_root = str(worktree_root)
+        wt_policy = PermissionPolicy(workspace_root=wt_root)
+        wt_registry = ToolRegistry(
+            permission_policy=wt_policy,
+            permission_callback=permission_callback,
+        )
+        register_default_tools(
+            wt_registry,
+            wt_root,
+            ask_user_callback=ask_user_callback,
+            persistent_memory=PersistentMemory(workspace_root=wt_root),
+            sandbox=sandbox,
+            sandbox_opts=_sandbox_opts(settings, wt_root),
+            file_access_tracker=FileAccessTracker(),
+            event_bus=event_bus,
+            session_id=sess_id,
+            checkpoint_store=CheckpointStore(wt_root),
+        )
+        return wt_registry
+
     try:
         while True:
             line_bytes = await reader.readline()
@@ -356,7 +424,11 @@ async def run_agentd(
                     file_access_tracker=FileAccessTracker(),
                     event_bus=event_bus,
                     session_id=sess_id,
+                    # M11: a fresh checkpoint store per session so write tools
+                    # snapshot pre-write state and the undo tool can restore it.
+                    checkpoint_store=CheckpointStore(ws_root),
                 )
+
                 # Register each MCP server's tools into the fresh per-session
                 # registry. The shared client/subprocess persists across
                 # sessions; only the lightweight wrappers are re-created.
@@ -387,6 +459,13 @@ async def run_agentd(
                             plugin=prepared.manifest.name,
                             error=str(err),
                         )
+                # Register the LSP-backed read-only tools into the per-session
+                # registry. The shared language-server subprocesses persist
+                # across sessions (like MCP clients); only the lightweight
+                # wrappers are re-created. Fail-soft: an unavailable server or
+                # unsupported file type surfaces as a ToolResult error, never a
+                # session crash.
+                register_lsp_tools(registry, lsp_clients)
 
                 resp_env = ProtocolEnvelope(
                     v=1,
@@ -413,6 +492,10 @@ async def run_agentd(
                     hooks=hook_manager,
                     persistent_memory=persistent_memory,
                     workspace_root=Path(ws_root),
+                    # M11.4: enables isolation="worktree" subagents by re-rooting
+                    # a fresh registry at the worktree directory. The lambda binds
+                    # this session's id (B023: loop var captured as a default).
+                    tool_factory=lambda p, _sid=sess_id: _build_worktree_registry(p, _sid),
                 )
 
                 try:

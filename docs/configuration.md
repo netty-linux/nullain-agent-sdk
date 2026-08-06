@@ -19,6 +19,10 @@ ollama_base_url = "https://ollama.com"
 ```toml
 [router]
 fallback_chain = ["deep", "balanced", "fast"]
+# Optional model used to classify a task's intent/complexity when the
+# deterministic heuristics are not confident (M11.3). When unset, the parser
+# stays heuristic-only.
+# classifier_model = "gpt-oss:20b"
 
 [router.tiers.fast]
 models = ["gpt-oss:20b"]
@@ -36,6 +40,12 @@ max_context = 128000
 The `ModelRouter` classifies each task into an intent and complexity, picks a
 tier, and falls back along `fallback_chain` when a model is unavailable or the
 circuit breaker trips.
+
+`IntentParser` runs deterministic heuristics first and is authoritative when
+they match a known keyword. When none matches with confidence and
+`classifier_model` is set, the parser asks that model (tier `fast`) to classify
+the task, falling back to the heuristic default on any failure (M11.3). Results
+are cached by prompt hash within the session.
 
 ## `[sandbox]` — OS-level subprocess isolation
 
@@ -74,6 +84,27 @@ nullain mcp list
 nullain mcp add filesystem --command npx --args -y @modelcontextprotocol/server-filesystem /workspace
 nullain mcp remove filesystem
 ```
+
+## `[lsp.servers.<language>]` — LSP servers
+
+```toml
+[lsp.servers.python]
+command = "pyright-langserver"
+args = ["--stdio"]
+enabled = true
+
+[lsp.servers.typescript]
+command = "typescript-language-server"
+args = ["--stdio"]
+enabled = true
+```
+
+Each server is spawned over stdio with an explicit argv list (never a shell).
+The four read-only tools (`lsp_diagnostics`, `lsp_goto_definition`,
+`lsp_find_references`, `lsp_hover`) route a file to its server by extension →
+language → this map. A server that fails to initialize is logged and skipped
+(fail-soft); an unsupported file type or unavailable server surfaces as a
+`ToolResult` error (M11.2).
 
 ## `[plugins]` — signed plugin bundles
 

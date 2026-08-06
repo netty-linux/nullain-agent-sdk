@@ -4,6 +4,10 @@ ollama_base_url = "https://ollama.com"
 
 [router]
 fallback_chain = ["deep", "balanced", "fast"]
+# Optional model used to classify a task's intent/complexity when the
+# deterministic heuristics are not confident (M11.3). When unset, the parser
+# stays heuristic-only.
+# classifier_model = "gpt-oss:20b"
 
 [router.tiers.fast]
 models = ["gpt-oss:20b"]
@@ -51,6 +55,22 @@ max_context = 128000
 # command = "uvx"
 # args = ["mcp-server-git", "--repository", "/workspace"]
 # env = { GIT_AUTHOR_NAME = "nullain" }
+
+# LSP (Language Server Protocol) servers (M11.2). Each server is spawned over
+# stdio with an explicit argv list (never a shell): [command, *args]. The four
+# read-only tools (lsp_diagnostics, lsp_goto_definition, lsp_find_references,
+# lsp_hover) route a file to its server by extension -> language -> this map.
+# A server that fails to initialize is logged and skipped (fail-soft); an
+# unsupported file type or unavailable server surfaces as a ToolResult error.
+# [lsp.servers.python]
+# command = "pyright-langserver"
+# args = ["--stdio"]
+# enabled = true
+#
+# [lsp.servers.typescript]
+# command = "typescript-language-server"
+# args = ["--stdio"]
+# enabled = true
 
 # Plugins (P4.25): signed, SBOM'd, capability-manifested MCP server bundles.
 # A plugin's identity, launch command, declared capabilities, tool declarations,

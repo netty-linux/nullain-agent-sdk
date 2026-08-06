@@ -9,6 +9,7 @@ from nullain.tools.sandbox import Sandbox, SandboxOptions
 
 from nullain_tools.ask_user import AskUserCallback, create_ask_user_tool
 from nullain_tools.bash import create_bash_tool
+from nullain_tools.checkpoints import CheckpointStore
 from nullain_tools.filesystem import FileAccessTracker, create_filesystem_tools
 from nullain_tools.git import create_git_tools
 from nullain_tools.memory import create_memory_tools
@@ -26,6 +27,7 @@ def register_default_tools(
     file_access_tracker: FileAccessTracker | None = None,
     event_bus: EventBus | None = None,
     session_id: str = "default",
+    checkpoint_store: CheckpointStore | None = None,
 ) -> None:
     """Register all built-in tools into a ToolRegistry.
 
@@ -50,6 +52,10 @@ def register_default_tools(
         event_bus: Optional event bus; when provided, ``todo_write`` emits a
             ``TodoEvent`` on each update.
         session_id: Session id stamped on emitted ``TodoEvent``s.
+        checkpoint_store: Session-scoped checkpoint store (M11). When provided,
+            write tools snapshot pre-write state and an ``undo`` tool is
+            registered. When None, writes proceed without snapshots (backward
+            compatible).
     """
     tools: list[RegisteredTool] = []
     tools.extend(
@@ -58,6 +64,7 @@ def register_default_tools(
             file_access_tracker=file_access_tracker,
             event_bus=event_bus,
             session_id=session_id,
+            checkpoint_store=checkpoint_store,
         )
     )
     tools.append(create_bash_tool(workspace_root, sandbox=sandbox, sandbox_opts=sandbox_opts))
@@ -78,6 +85,7 @@ __version__ = "0.1.0"
 
 __all__ = [
     "AskUserCallback",
+    "CheckpointStore",
     "FileAccessTracker",
     "create_ask_user_tool",
     "create_bash_tool",

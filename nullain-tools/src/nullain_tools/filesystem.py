@@ -19,6 +19,8 @@ from nullain.tools import RegisteredTool, resolve_and_validate_path, tool
 from nullain.tools.result import ToolResult
 from pydantic import BaseModel
 
+from nullain_tools.checkpoints import CheckpointStore
+
 #: Individual lines longer than this are truncated with an explicit marker so a
 #: minified file cannot blow the model's context window.
 MAX_LINE_LEN = 2000
@@ -259,6 +261,7 @@ def create_filesystem_tools(
     file_access_tracker: FileAccessTracker | None = None,
     event_bus: EventBus | None = None,
     session_id: str = "default",
+    checkpoint_store: CheckpointStore | None = None,
 ) -> list[RegisteredTool]:
     """Create the built-in filesystem tools.
 
@@ -270,6 +273,11 @@ def create_filesystem_tools(
             ``TodoEvent`` on each update. Without it, the tool validates and
             returns without emitting (graceful degradation).
         session_id: Session id stamped on emitted ``TodoEvent``s.
+        checkpoint_store: Session-scoped checkpoint store (M11). When provided,
+            ``write_file``/``edit_file``/``multi_edit`` snapshot the pre-write
+            state and an ``undo`` tool is registered. When None, writes proceed
+            without snapshots and ``undo`` reports no checkpoints (backward
+            compatible).
     """
     root = Path(workspace_root).resolve()
     tracker = file_access_tracker or FileAccessTracker()
@@ -328,8 +336,10 @@ def create_filesystem_tools(
         description="Write text content to a file in the workspace.",
         requires=frozenset({Capability.WRITE}),
     )
-    def write_file(path: str, content: str) -> str | ToolResult:
+    async def write_file(path: str, content: str) -> str | ToolResult:
         target = resolve_and_validate_path(root, path)
+        if checkpoint_store is not None:
+            await checkpoint_store.snapshot(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
         return f"Successfully wrote {len(content)} characters to '{path}'."
@@ -343,7 +353,7 @@ def create_filesystem_tools(
         ),
         requires=frozenset({Capability.WRITE}),
     )
-    def edit_file(
+    async def edit_file(
         path: str, old_str: str, new_str: str, replace_all: bool = False
     ) -> str | ToolResult:
         target = resolve_and_validate_path(root, path)
@@ -356,8 +366,7 @@ def create_filesystem_tools(
         if not tracker.was_read(target):
             return ToolResult(
                 output=(
-                    f"Error: File '{path}' has not been read in this session. "
-                    "Call read_file first."
+                    f"Error: File '{path}' has not been read in this session. Call read_file first."
                 ),
                 is_error=True,
                 error_type="ToolError",
@@ -392,6 +401,8 @@ def create_filesystem_tools(
             updated = content.replace(old_str, new_str)
         else:
             updated = content.replace(old_str, new_str, 1)
+        if checkpoint_store is not None:
+            await checkpoint_store.snapshot(target)
         target.write_text(updated, encoding="utf-8")
         snippet = _numbered_snippet(updated, new_str)
         return f"Edited '{path}'.\n{snippet}"
@@ -406,7 +417,7 @@ def create_filesystem_tools(
         ),
         requires=frozenset({Capability.WRITE}),
     )
-    def multi_edit(path: str, edits: list[FileEdit]) -> str | ToolResult:
+    async def multi_edit(path: str, edits: list[FileEdit]) -> str | ToolResult:
         # Coerce raw dicts (from direct .func calls) to FileEdit models; the
         # registry passes arguments through without pydantic validation.
         edits = [FileEdit.model_validate(e) for e in edits]
@@ -420,8 +431,7 @@ def create_filesystem_tools(
         if not tracker.was_read(target):
             return ToolResult(
                 output=(
-                    f"Error: File '{path}' has not been read in this session. "
-                    "Call read_file first."
+                    f"Error: File '{path}' has not been read in this session. Call read_file first."
                 ),
                 is_error=True,
                 error_type="ToolError",
@@ -463,6 +473,8 @@ def create_filesystem_tools(
                 else content.replace(edit.old_str, edit.new_str, 1)
             )
 
+        if checkpoint_store is not None:
+            await checkpoint_store.snapshot(target)
         target.write_text(content, encoding="utf-8")
         snippet = _numbered_snippet(content, edits[-1].new_str)
         return f"Applied {len(edits)} edits to '{path}'.\n{snippet}"
@@ -633,7 +645,35 @@ def create_filesystem_tools(
         rendered = "\n".join(f"- [{it.status}] {it.content}" for it in items)
         return f"Todo list updated:\n{rendered}"
 
-    return [read_file, write_file, edit_file, multi_edit, grep, glob, list_directory, todo_write]
+    @tool(
+        name="undo",
+        description=(
+            "Restore the most recent pre-write checkpoint of a file. Reverts "
+            "the last write_file/edit_file/multi_edit. Returns a summary of what "
+            "was restored, or a message if there is nothing to undo."
+        ),
+        requires=frozenset({Capability.WRITE}),
+    )
+    async def undo() -> str | ToolResult:
+        if checkpoint_store is None:
+            return ToolResult(
+                output="Error: no checkpoint store configured for this session.",
+                is_error=True,
+                error_type="ToolError",
+            )
+        return await checkpoint_store.undo()
+
+    return [
+        read_file,
+        write_file,
+        edit_file,
+        multi_edit,
+        grep,
+        glob,
+        list_directory,
+        todo_write,
+        undo,
+    ]
 
 
 __all__ = ["FileAccessTracker", "create_filesystem_tools"]

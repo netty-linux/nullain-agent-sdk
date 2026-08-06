@@ -121,6 +121,20 @@ class MCPProtocolError(MCPError):
 
 
 class MCPTransportError(MCPError):
+    """Raised when an MCP transport fails (spawn, EOF, timeout, I/O)."""
+
+
+class LSPError(NullainError):
+    """Base class for LSP client errors (M11.2)."""
+
+
+class LSPProtocolError(LSPError):
+    """Raised when an LSP server returns an error or malformed response."""
+
+
+class LSPTransportError(LSPError):
+    """Raised when an LSP transport fails (spawn, EOF, timeout, I/O)."""
+
     """Raised when the MCP transport layer fails (spawn, I/O, EOF)."""
 
     pass
@@ -203,6 +217,9 @@ __all__ = [
     "BudgetExceededError",
     "ContextError",
     "ContextWindowExhaustedError",
+    "LSPError",
+    "LSPProtocolError",
+    "LSPTransportError",
     "MCPError",
     "MCPProtocolError",
     "MCPTransportError",

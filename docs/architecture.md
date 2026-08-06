@@ -39,7 +39,10 @@ Sourcing** (frozen, append-only Pydantic events; state derived by fold).
 `AgentLoop.run_result` drives a single task through six phases:
 
 1. **Intent** — `IntentParser` classifies the prompt into an intent type and
-   complexity (LOW / MEDIUM / HIGH) using deterministic heuristics.
+   complexity (LOW / MEDIUM / HIGH). Deterministic heuristics run first and are
+   authoritative when they match; when none matches with confidence and a
+   `classifier_model` is configured, the parser asks that model to classify the
+   task, falling back to the heuristic default on any failure (M11.3).
 2. **Route** — `ModelRouter` maps the intent to a tier and model, with a
    fallback chain and circuit breakers.
 3. **Plan** — for MEDIUM/HIGH tasks, the model generates a `TaskSpec`
@@ -83,3 +86,15 @@ the final `RunResult`; `run_sync` is a thin synchronous facade.
   policy — a single denial removes a capability outright (no ASK escape).
 - Plugins are signed, SBOM'd, capability-manifested bundles, fail-closed at
   every branch.
+
+## Subagents & worktree isolation
+
+`AgentLoop.spawn` runs a sub-agent with fresh context and an isolated event
+bus, returning only its final text. When `isolation="worktree"` (M11.4), the
+child runs in a detached `git worktree` (`git worktree add --detach`) with a
+tool registry re-rooted at the worktree via a `tool_factory` — tools bind to
+their workspace root at creation time, so the child edits an isolated checkout
+rather than the parent's. Changed files are integrated back into the parent
+workspace afterwards, and the worktree is removed in `finally` (including on
+failure/cancellation). The authority-intersection law is preserved: isolation
+is additional to the capability gate, never a substitute.
