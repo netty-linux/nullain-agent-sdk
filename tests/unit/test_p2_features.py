@@ -241,6 +241,8 @@ async def test_parallel_read_only_dispatch_executes_all_calls(tmp_path: Path) ->
     assert result.status == "success"
 
     tool_results = [e for e in events if isinstance(e, ToolResultEvent)]
-    # Both calls executed (concurrently, since both are read-only)
+    # Both calls executed (concurrently, since both are read-only). read_file
+    # (M8) returns numbered lines, so assert the content is present.
     outputs = {e.output for e in tool_results}
-    assert {"one", "two"} <= outputs
+    assert any("one" in o for o in outputs)
+    assert any("two" in o for o in outputs)

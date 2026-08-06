@@ -28,7 +28,7 @@ from nullain.router import ModelRouter
 from nullain.telemetry import configure_telemetry, get_logger
 from nullain.tools import PermissionPolicy, ToolRegistry
 from nullain.tools.sandbox import SandboxOptions, select_sandbox
-from nullain_tools import register_default_tools
+from nullain_tools import FileAccessTracker, register_default_tools
 
 logger = get_logger(__name__)
 
@@ -336,6 +336,7 @@ async def run_agentd(
 
             if env.type == "session.start":
                 ws_root = str(env.payload.get("workspace_root", "."))
+                sess_id = str(env.payload.get("session_id", "s1"))
                 policy = PermissionPolicy(workspace_root=ws_root)
                 registry = ToolRegistry(
                     permission_policy=policy,
@@ -349,6 +350,12 @@ async def run_agentd(
                     persistent_memory=persistent_memory,
                     sandbox=sandbox,
                     sandbox_opts=_sandbox_opts(settings, ws_root),
+                    # M8: a fresh read-tracker per session so edit_file requires
+                    # a prior read within the same session; todo_write mirrors
+                    # progress to the client via TodoEvent on the shared bus.
+                    file_access_tracker=FileAccessTracker(),
+                    event_bus=event_bus,
+                    session_id=sess_id,
                 )
                 # Register each MCP server's tools into the fresh per-session
                 # registry. The shared client/subprocess persists across

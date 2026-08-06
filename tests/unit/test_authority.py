@@ -180,7 +180,8 @@ async def test_registry_gate_allows_permitted_call(tmp_path: Path) -> None:
     auth = Authority.only({Capability.READ}, allowed_tools=frozenset({"read_file"}))
     child = reg.scoped(authority=auth, permission_policy=reg.permission_policy)
     out = await child.execute("read_file", {"path": "readme.txt"})
-    assert out == "hello world"
+    # read_file (M8) returns numbered lines; the gate allows the call through.
+    assert "hello world" in out
 
 
 @pytest.mark.asyncio

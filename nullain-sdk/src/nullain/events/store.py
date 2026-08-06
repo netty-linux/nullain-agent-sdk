@@ -12,6 +12,7 @@ from nullain.events.types import (
     SpecCreatedEvent,
     SpecVerifiedEvent,
     StreamDeltaEvent,
+    TodoEvent,
     ToolCallEvent,
     ToolResultEvent,
     UserMessageEvent,
@@ -30,6 +31,7 @@ EVENT_CLASS_MAP: dict[str, type[BaseEvent]] = {
     "spec_created": SpecCreatedEvent,
     "spec_verified": SpecVerifiedEvent,
     "stream_delta": StreamDeltaEvent,
+    "todo": TodoEvent,
 }
 
 

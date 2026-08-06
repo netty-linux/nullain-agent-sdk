@@ -123,6 +123,24 @@ class WorkflowAgentEvent(BaseEvent, frozen=True):
     output: str | None = None
 
 
+class TodoItem(BaseModel, frozen=True):
+    """A single task in the agent's todo list (M8)."""
+
+    content: str
+    status: Literal["pending", "in_progress", "completed"]
+
+
+class TodoEvent(BaseEvent, frozen=True):
+    """Event emitted when the agent updates its todo list (M8).
+
+    Carries the full todo list after the update so the daemon can mirror the
+    agent's progress to the client without tracking state itself.
+    """
+
+    event_type: Literal["todo"] = "todo"
+    items: tuple[TodoItem, ...]
+
+
 EventUnion = (
     UserMessageEvent
     | ModelResponseEvent
@@ -136,6 +154,7 @@ EventUnion = (
     | WorkflowPhaseEvent
     | WorkflowLogEvent
     | WorkflowAgentEvent
+    | TodoEvent
 )
 
 
@@ -148,6 +167,8 @@ __all__ = [
     "SpecCreatedEvent",
     "SpecVerifiedEvent",
     "StreamDeltaEvent",
+    "TodoEvent",
+    "TodoItem",
     "ToolCallEvent",
     "ToolResultEvent",
     "UserMessageEvent",
