@@ -23,6 +23,28 @@ logger = get_logger(__name__)
 # Number of recent events kept verbatim (not summarized) during compaction.
 _RECENT_KEEP = 4
 
+# Characters per token assumed before any real ``usage`` has been observed.
+# Deliberately the classic "~4 chars per token" heuristic; it is only the
+# bootstrap value, replaced by the measured ratio after the first response.
+_DEFAULT_CHARS_PER_TOKEN = 4.0
+
+# Bounds on the calibrated chars-per-token ratio. A ratio outside this range
+# means the sample was degenerate (e.g. a near-empty context whose prompt
+# tokens are dominated by fixed provider overhead), so it is discarded rather
+# than allowed to skew every later estimate.
+_MIN_CHARS_PER_TOKEN = 1.0
+_MAX_CHARS_PER_TOKEN = 12.0
+
+# Minimum context size (in characters) a sample must have before it is used for
+# calibration. Small contexts are dominated by per-request overhead and would
+# calibrate the ratio far too low.
+_MIN_CALIBRATION_CHARS = 200
+
+# Weight of a new observation in the exponential moving average. Low enough
+# that one anomalous response cannot swing the ratio, high enough to track a
+# genuine model change within a few steps.
+_CALIBRATION_ALPHA = 0.3
+
 
 class ContextManager:
     """Manages LLM context window, compaction, and instruction centrifugation.
@@ -48,21 +70,92 @@ class ContextManager:
         self.max_window_tokens = max_window_tokens
         self.compaction_threshold = compaction_threshold
         self.reinject_every_steps = reinject_every_steps
+        # Calibrated characters-per-token ratio, refined by ``calibrate`` from
+        # the provider's real ``usage``. Starts at the bootstrap heuristic.
+        self._chars_per_token = _DEFAULT_CHARS_PER_TOKEN
+        self._calibration_samples = 0
 
-    def estimate_tokens(self, text: str) -> int:
-        """Estimate token count for a text snippet (approx 4 chars per token)."""
-        return max(1, len(text) // 4)
+    @property
+    def chars_per_token(self) -> float:
+        """Current characters-per-token ratio used for estimation.
 
-    def estimate_context_tokens(self, messages: list[ChatMessage]) -> int:
-        """Estimate total token count for current context window messages."""
+        Starts at the bootstrap heuristic (~4.0) and converges on the ratio
+        actually observed from the provider's reported prompt tokens.
+        """
+        return self._chars_per_token
+
+    @property
+    def calibration_samples(self) -> int:
+        """Number of provider responses that have refined the ratio."""
+        return self._calibration_samples
+
+    def calibrate(self, messages: list[ChatMessage], prompt_tokens: int) -> None:
+        """Refine the chars-per-token ratio from a provider's real token count.
+
+        The agent loop calls this after each model response, passing the exact
+        messages that were sent and the ``prompt_tokens`` the provider reported
+        for them. The measured ratio is folded into an exponential moving
+        average, so estimation converges on the tokenizer the active model
+        actually uses instead of a fixed ~4-chars-per-token guess.
+
+        Degenerate samples are ignored: a non-positive token count, a context
+        too small to be dominated by content rather than per-request overhead,
+        or a ratio outside the plausible band.
+
+        Args:
+            messages: The exact messages sent in the request.
+            prompt_tokens: Prompt tokens the provider reported for them.
+        """
+        if prompt_tokens <= 0:
+            return
+        chars = self._context_chars(messages)
+        if chars < _MIN_CALIBRATION_CHARS:
+            return
+        observed = chars / prompt_tokens
+        if not _MIN_CHARS_PER_TOKEN <= observed <= _MAX_CHARS_PER_TOKEN:
+            logger.debug(
+                "token_calibration_sample_rejected",
+                observed_ratio=round(observed, 3),
+                chars=chars,
+                prompt_tokens=prompt_tokens,
+            )
+            return
+        if self._calibration_samples == 0:
+            self._chars_per_token = observed
+        else:
+            self._chars_per_token = (
+                _CALIBRATION_ALPHA * observed + (1.0 - _CALIBRATION_ALPHA) * self._chars_per_token
+            )
+        self._calibration_samples += 1
+
+    @staticmethod
+    def _context_chars(messages: list[ChatMessage]) -> int:
+        """Total characters the given messages contribute to the context.
+
+        Mirrors exactly what :meth:`estimate_context_tokens` measures, so the
+        calibrated ratio is derived from the same quantity it is applied to.
+        """
         total = 0
         for msg in messages:
             if msg.content:
-                total += self.estimate_tokens(msg.content)
+                total += len(msg.content)
             if msg.tool_calls:
                 for tc in msg.tool_calls:
-                    total += self.estimate_tokens(str(tc.arguments))
+                    total += len(str(tc.arguments))
         return total
+
+    def estimate_tokens(self, text: str) -> int:
+        """Estimate the token count of a text snippet.
+
+        Uses the calibrated characters-per-token ratio (see :meth:`calibrate`),
+        falling back to the ~4-chars-per-token heuristic until the first real
+        ``usage`` has been observed.
+        """
+        return max(1, int(len(text) / self._chars_per_token))
+
+    def estimate_context_tokens(self, messages: list[ChatMessage]) -> int:
+        """Estimate the token count of the current context window messages."""
+        return max(0, int(self._context_chars(messages) / self._chars_per_token))
 
     def should_compact(self, current_tokens: int) -> bool:
         """Check if current token usage exceeds the compaction threshold."""

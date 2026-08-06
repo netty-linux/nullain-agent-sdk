@@ -1006,6 +1006,11 @@ class AgentLoop:
 
                 if usage:
                     total_tokens += usage.total_tokens
+                    # Calibrate the context estimator against the provider's
+                    # real prompt-token count for exactly the messages we just
+                    # sent, so compaction fires on measured size rather than on
+                    # a fixed chars-per-token guess.
+                    self.context_manager.calibrate(messages, usage.prompt_tokens)
 
                 model_ev = ModelResponseEvent(
                     session_id=sess_id,
