@@ -63,6 +63,33 @@ async def test_event_store_append_and_get() -> None:
     await store.close()
 
 
+@pytest.mark.asyncio
+async def test_event_store_preserves_order_on_identical_timestamps() -> None:
+    """Events sharing a timestamp come back in insertion order.
+
+    Regression: ordering was ``timestamp ASC, id ASC``. ``time.time()`` has
+    ~15.6 ms resolution on Windows, so consecutive appends routinely land on
+    one timestamp and the tiebreaker on a random UUID reordered them —
+    corrupting the trajectory. This pins the exact collision the CI hit,
+    on every platform.
+    """
+    store = EventStore(":memory:")
+    await store.initialize()
+
+    stamp = 1_700_000_000.0
+    appended = [
+        UserMessageEvent(session_id="sess_ts", content=f"msg {i}", timestamp=stamp)
+        for i in range(10)
+    ]
+    for ev in appended:
+        await store.append(ev)
+
+    events = await store.get_session_events("sess_ts")
+
+    assert [e.id for e in events] == [e.id for e in appended]
+    await store.close()
+
+
 @given(
     user_texts=st.lists(st.text(min_size=1, max_size=50), min_size=1, max_size=10),
 )

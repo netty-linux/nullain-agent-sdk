@@ -22,6 +22,7 @@ nullain-agentd = { workspace = true }
 dev = [
     "pytest>=8.0.0",
     "pytest-asyncio>=0.23.0",
+    "pytest-cov>=5.0.0",
     "respx>=0.21.0",
     "hypothesis>=6.90.0",
     "ruff>=0.4.0",
@@ -57,3 +58,29 @@ minversion = "8.0"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 pythonpath = ["nullain-sdk/src", "nullain-tools/src", "nullain-agentd/src"]
+
+[tool.coverage.run]
+source = ["nullain", "nullain_tools", "nullain_agentd"]
+branch = true
+omit = [
+    # Launched as a separate process by the Windows sandbox adapter; its
+    # coverage is not attributable to the parent test process.
+    "*/tools/sandbox/adapters/_win_launcher.py",
+]
+
+[tool.coverage.report]
+# Platform-specific sandbox adapters and optional-dependency import guards are
+# unreachable on any single CI runner; excluding them keeps the gate honest
+# rather than forcing tests that cannot run.
+exclude_also = [
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "@(abc\\.)?abstractmethod",
+    "if __name__ == .__main__.:",
+    "class .*\\bProtocol\\):",
+]
+show_missing = true
+# Gate set just below the measured baseline (80%) so a genuine regression
+# fails CI while normal per-platform variation (sandbox adapters differ by OS)
+# does not. Raise it as coverage grows; never lower it to make a build pass.
+fail_under = 78

@@ -134,6 +134,7 @@ class AgentLoop:
         self_correction_max: int = 3,
         max_compaction_attempts: int = 3,
         loop_detection_threshold: int = 3,
+        verify_retry_max: int = 2,
         authority: Authority | None = None,
         tool_factory: Callable[[Path], ToolRegistry] | None = None,
     ) -> None:
@@ -162,6 +163,14 @@ class AgentLoop:
             max_tokens: Token budget ceiling.
             timeout: Execution timeout in seconds.
             self_correction_max: Max self-correction retries per session.
+            verify_retry_max: Max number of verify-fix-reverify cycles when
+                the VERIFY phase finds unmet acceptance criteria. On each
+                failed verification (with budget remaining and steps left),
+                the feedback is injected as a correction message and the Act
+                phase resumes instead of terminating the run, mirroring
+                Claude Code's fix-and-reverify loop instead of surfacing a
+                single-shot "verification_failed" the caller must retry
+                itself.
             authority: Authority enforced for this loop (P4.24). None = the
                 unrestricted trust root (no capability/allowed-tool gate). A
                 materialised Authority is set on spawned subagents by
@@ -204,6 +213,7 @@ class AgentLoop:
         # which the loop is considered stuck and is broken out of. Mirrors the
         # loop-detection Gemini CLI uses to escape thrash.
         self.loop_detection_threshold = loop_detection_threshold
+        self.verify_retry_max = verify_retry_max
         self.tool_factory = tool_factory
         self._compaction_attempts = 0
         # Incremental conversation fold (M10 D3): a cached ConversationState
@@ -840,6 +850,183 @@ class AgentLoop:
             }
         )
 
+    async def _run_act_phase(
+        self,
+        sess_id: str,
+        accumulated_events: list[BaseEvent],
+        active_model: str,
+        active_spec: TaskSpec | None,
+        start_time: float,
+        streaming: bool,
+        step: int,
+        total_tokens: int,
+        correction_budget: int,
+        system_prompt: str,
+    ) -> tuple[int, int, int, str, str, bool, RunStatus | None, str | None, bool]:
+        """Run the ReAct Act loop until a final answer, terminal failure, or cap.
+
+        Called once per verify-fix-reverify cycle (M12): ``step``,
+        ``total_tokens`` and ``correction_budget`` carry over across calls so
+        the step cap, token budget, and self-correction allowance span the
+        whole run, not just one cycle. Loop-detection state
+        (``last_step_signature`` / ``repeat_count``) is local to each call —
+        a fresh cycle starts after a VERIFY-CORRECTION message has been
+        injected, which is itself a different step signature, so carrying
+        detection state over would only cost an extra step before the new
+        pattern is recognized.
+
+        Returns:
+            Tuple of (step, total_tokens, correction_budget, final_text,
+            last_output, completed, terminal_status, terminal_error,
+            loop_detected).
+        """
+        final_text = ""
+        last_output = ""
+        completed = False
+        terminal_status: RunStatus | None = None
+        terminal_error: str | None = None
+        loop_detected = False
+        last_step_signature: str | None = None
+        repeat_count = 0
+
+        try:
+            while step < self.max_steps:
+                # Timeout check
+                elapsed = self.clock.now() - start_time
+                if elapsed > self.timeout:
+                    err_ev = ErrorEvent(
+                        session_id=sess_id,
+                        error_type="TimeoutError",
+                        message=f"Agent loop timed out after {self.timeout} seconds",
+                    )
+                    await self._emit(err_ev)
+                    raise NullainError(f"Agent loop timed out after {self.timeout} seconds")
+
+                # Budget & compaction
+                await self._check_budget_and_compact(
+                    sess_id,
+                    accumulated_events,
+                    total_tokens,
+                    active_spec,
+                    system_prompt,
+                    active_model,
+                )
+
+                step += 1
+                # Re-assemble the system prompt so persistent memory and
+                # AGENTS.md are re-injected after compaction (and stay fresh
+                # if memory was written earlier this step).
+                system_prompt = self._assemble_system_prompt()
+                messages = self._build_messages(sess_id, accumulated_events, system_prompt, step)
+
+                tool_specs = self.tools.list_specs()
+                req = CompletionRequest(
+                    model=active_model,
+                    messages=messages,
+                    tools=tool_specs if tool_specs else None,
+                    stream=streaming,
+                )
+
+                step_text, tool_calls, usage = await self._generate_step_response(
+                    req=req,
+                    active_model=active_model,
+                    sess_id=sess_id,
+                    streaming=streaming,
+                )
+
+                if usage:
+                    total_tokens += usage.total_tokens
+                    # Calibrate the context estimator against the provider's
+                    # real prompt-token count for exactly the messages we just
+                    # sent, so compaction fires on measured size rather than on
+                    # a fixed chars-per-token guess.
+                    self.context_manager.calibrate(messages, usage.prompt_tokens)
+
+                model_ev = ModelResponseEvent(
+                    session_id=sess_id,
+                    model=active_model,
+                    content=step_text or None,
+                    tool_calls=(tuple(tool_calls) if tool_calls else None),
+                    usage=usage,
+                )
+                await self._emit(model_ev)
+                accumulated_events.append(model_ev)
+
+                # No tool calls = final answer
+                if not tool_calls:
+                    final_text = step_text
+                    last_output = final_text
+                    completed = True
+                    break
+
+                # Loop detection: hash the requested tool calls (name + args) for
+                # this step. If the same signature repeats for
+                # ``loop_detection_threshold`` consecutive steps, the agent is
+                # stuck; inject a strong self-correction and stop the loop
+                # rather than burning the remaining step budget.
+                step_signature = _step_signature(tool_calls)
+                if step_signature == last_step_signature:
+                    repeat_count += 1
+                else:
+                    last_step_signature = step_signature
+                    repeat_count = 1
+
+                if repeat_count >= self.loop_detection_threshold:
+                    loop_detected = True
+                    err_ev = ErrorEvent(
+                        session_id=sess_id,
+                        error_type="LoopDetected",
+                        message=(
+                            f"Agent loop repeated the same tool calls for "
+                            f"{repeat_count} consecutive steps; stopping to avoid thrash."
+                        ),
+                    )
+                    await self._emit(err_ev)
+                    accumulated_events.append(err_ev)
+                    reflection = UserMessageEvent(
+                        session_id=sess_id,
+                        content=(
+                            "[SELF-CORRECTION] You have repeated the same tool calls "
+                            f"{repeat_count} times in a row with no progress. "
+                            "Stop repeating. Either produce a final answer, or choose a "
+                            "different approach with different tool arguments."
+                        ),
+                    )
+                    await self._emit(reflection)
+                    accumulated_events.append(reflection)
+                    break
+
+                # Execute tools with self-correction
+                last_output, correction_budget = await self._execute_tools(
+                    tool_calls,
+                    sess_id,
+                    accumulated_events,
+                    correction_budget,
+                )
+        except BudgetExceededError as err:
+            terminal_status = "budget"
+            terminal_error = str(err)
+        except ContextWindowExhaustedError as err:
+            terminal_status = "context_exhausted"
+            terminal_error = str(err)
+        except NullainError as err:
+            # Timeout (raised as a plain NullainError) and any other domain
+            # failure surfaced from the act phase.
+            terminal_status = "timeout"
+            terminal_error = str(err)
+
+        return (
+            step,
+            total_tokens,
+            correction_budget,
+            final_text,
+            last_output,
+            completed,
+            terminal_status,
+            terminal_error,
+            loop_detected,
+        )
+
     async def _run_pipeline(
         self,
         prompt: str,
@@ -947,158 +1134,86 @@ class AgentLoop:
             await self._emit(spec_ev)
             accumulated_events.append(spec_ev)
 
-        # 4. Act Phase (ReAct Loop)
+        # 4. Act Phase (ReAct Loop), wrapped in a verify-fix-reverify cycle
+        # (M12): a failed VERIFY re-enters Act with the feedback injected as a
+        # correction message, instead of terminating on the first miss.
         step = 0
         total_tokens = 0
         final_text = ""
         last_output = ""
-        completed = False  # True only when the model returned a final answer (no tool calls)
+        completed = False
         terminal_status: RunStatus | None = None
         terminal_error: str | None = None
         loop_detected = False
-        last_step_signature: str | None = None
-        repeat_count = 0
-
-        try:
-            while step < self.max_steps:
-                # Timeout check
-                elapsed = self.clock.now() - start_time
-                if elapsed > self.timeout:
-                    err_ev = ErrorEvent(
-                        session_id=sess_id,
-                        error_type="TimeoutError",
-                        message=f"Agent loop timed out after {self.timeout} seconds",
-                    )
-                    await self._emit(err_ev)
-                    raise NullainError(f"Agent loop timed out after {self.timeout} seconds")
-
-                # Budget & compaction
-                await self._check_budget_and_compact(
-                    sess_id,
-                    accumulated_events,
-                    total_tokens,
-                    active_spec,
-                    system_prompt,
-                    active_model,
-                )
-
-                step += 1
-                # Re-assemble the system prompt so persistent memory and
-                # AGENTS.md are re-injected after compaction (and stay fresh
-                # if memory was written earlier this step).
-                system_prompt = self._assemble_system_prompt()
-                messages = self._build_messages(sess_id, accumulated_events, system_prompt, step)
-
-                tool_specs = self.tools.list_specs()
-                req = CompletionRequest(
-                    model=active_model,
-                    messages=messages,
-                    tools=tool_specs if tool_specs else None,
-                    stream=streaming,
-                )
-
-                step_text, tool_calls, usage = await self._generate_step_response(
-                    req=req,
-                    active_model=active_model,
-                    sess_id=sess_id,
-                    streaming=streaming,
-                )
-
-                if usage:
-                    total_tokens += usage.total_tokens
-
-                model_ev = ModelResponseEvent(
-                    session_id=sess_id,
-                    model=active_model,
-                    content=step_text or None,
-                    tool_calls=(tuple(tool_calls) if tool_calls else None),
-                    usage=usage,
-                )
-                await self._emit(model_ev)
-                accumulated_events.append(model_ev)
-
-                # No tool calls = final answer
-                if not tool_calls:
-                    final_text = step_text
-                    last_output = final_text
-                    completed = True
-                    break
-
-                # Loop detection: hash the requested tool calls (name + args) for
-                # this step. If the same signature repeats for
-                # ``loop_detection_threshold`` consecutive steps, the agent is
-                # stuck; inject a strong self-correction and stop the loop
-                # rather than burning the remaining step budget.
-                step_signature = _step_signature(tool_calls)
-                if step_signature == last_step_signature:
-                    repeat_count += 1
-                else:
-                    last_step_signature = step_signature
-                    repeat_count = 1
-
-                if repeat_count >= self.loop_detection_threshold:
-                    loop_detected = True
-                    err_ev = ErrorEvent(
-                        session_id=sess_id,
-                        error_type="LoopDetected",
-                        message=(
-                            f"Agent loop repeated the same tool calls for "
-                            f"{repeat_count} consecutive steps; stopping to avoid thrash."
-                        ),
-                    )
-                    await self._emit(err_ev)
-                    accumulated_events.append(err_ev)
-                    reflection = UserMessageEvent(
-                        session_id=sess_id,
-                        content=(
-                            "[SELF-CORRECTION] You have repeated the same tool calls "
-                            f"{repeat_count} times in a row with no progress. "
-                            "Stop repeating. Either produce a final answer, or choose a "
-                            "different approach with different tool arguments."
-                        ),
-                    )
-                    await self._emit(reflection)
-                    accumulated_events.append(reflection)
-                    break
-
-                # Execute tools with self-correction
-                last_output, correction_budget = await self._execute_tools(
-                    tool_calls,
-                    sess_id,
-                    accumulated_events,
-                    correction_budget,
-                )
-        except BudgetExceededError as err:
-            terminal_status = "budget"
-            terminal_error = str(err)
-        except ContextWindowExhaustedError as err:
-            terminal_status = "context_exhausted"
-            terminal_error = str(err)
-        except NullainError as err:
-            # Timeout (raised as a plain NullainError) and any other domain
-            # failure surfaced from the act phase.
-            terminal_status = "timeout"
-            terminal_error = str(err)
-
-        # 5. Verify Phase — only when the loop produced a final answer
         feedback: str | None = None
         verify_failed = False
-        if completed and active_spec:
-            verified, feedback = await self.spec_validator.verify(
-                active_spec,
+        verify_attempt = 0
+
+        while True:
+            (
+                step,
+                total_tokens,
+                correction_budget,
+                final_text,
                 last_output,
-                workspace_root=self.workspace_root,
-                tools=self.tools,
+                completed,
+                terminal_status,
+                terminal_error,
+                loop_detected,
+            ) = await self._run_act_phase(
+                sess_id=sess_id,
+                accumulated_events=accumulated_events,
+                active_model=active_model,
+                active_spec=active_spec,
+                start_time=start_time,
+                streaming=streaming,
+                step=step,
+                total_tokens=total_tokens,
+                correction_budget=correction_budget,
+                system_prompt=system_prompt,
             )
-            verify_failed = not verified
-            verify_ev = SpecVerifiedEvent(
+
+            feedback = None
+            verify_failed = False
+            if completed and active_spec and terminal_status is None:
+                verified, feedback = await self.spec_validator.verify(
+                    active_spec,
+                    last_output,
+                    workspace_root=self.workspace_root,
+                    tools=self.tools,
+                )
+                verify_failed = not verified
+                verify_ev = SpecVerifiedEvent(
+                    session_id=sess_id,
+                    spec_id=active_spec.spec_id,
+                    success=verified,
+                    feedback=feedback,
+                )
+                await self._emit(verify_ev)
+                accumulated_events.append(verify_ev)
+
+            if not (
+                verify_failed
+                and verify_attempt < self.verify_retry_max
+                and step < self.max_steps
+                and terminal_status is None
+                and not loop_detected
+            ):
+                break
+
+            verify_attempt += 1
+            fix_ev = UserMessageEvent(
                 session_id=sess_id,
-                spec_id=active_spec.spec_id,
-                success=verified,
-                feedback=feedback,
+                content=(
+                    f"[VERIFY-CORRECTION {verify_attempt}/{self.verify_retry_max}] "
+                    "The previous answer did not satisfy the task's acceptance "
+                    f"criteria: {feedback}\n"
+                    "Fix the issues above, then provide a new final answer."
+                ),
             )
-            await self._emit(verify_ev)
-            accumulated_events.append(verify_ev)
+            await self._emit(fix_ev)
+            accumulated_events.append(fix_ev)
+            completed = False
 
         # Resolve final status. Terminal-resource failures win; otherwise a
         # completed run is "success" unless verification failed, a detected

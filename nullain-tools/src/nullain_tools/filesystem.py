@@ -338,10 +338,16 @@ def create_filesystem_tools(
     )
     async def write_file(path: str, content: str) -> str | ToolResult:
         target = resolve_and_validate_path(root, path)
-        if checkpoint_store is not None:
-            await checkpoint_store.snapshot(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
+        if checkpoint_store is None:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+        else:
+            # One undo unit per tool call: the write and its snapshot revert
+            # together even if the tool later grows to touch several files.
+            async with checkpoint_store.operation():
+                await checkpoint_store.snapshot(target)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
         return f"Successfully wrote {len(content)} characters to '{path}'."
 
     @tool(
@@ -401,9 +407,12 @@ def create_filesystem_tools(
             updated = content.replace(old_str, new_str)
         else:
             updated = content.replace(old_str, new_str, 1)
-        if checkpoint_store is not None:
-            await checkpoint_store.snapshot(target)
-        target.write_text(updated, encoding="utf-8")
+        if checkpoint_store is None:
+            target.write_text(updated, encoding="utf-8")
+        else:
+            async with checkpoint_store.operation():
+                await checkpoint_store.snapshot(target)
+                target.write_text(updated, encoding="utf-8")
         snippet = _numbered_snippet(updated, new_str)
         return f"Edited '{path}'.\n{snippet}"
 
@@ -473,9 +482,14 @@ def create_filesystem_tools(
                 else content.replace(edit.old_str, edit.new_str, 1)
             )
 
-        if checkpoint_store is not None:
-            await checkpoint_store.snapshot(target)
-        target.write_text(content, encoding="utf-8")
+        if checkpoint_store is None:
+            target.write_text(content, encoding="utf-8")
+        else:
+            # All hunks of one multi_edit are a single undo unit — reverting
+            # only part of an atomic edit would defeat its purpose.
+            async with checkpoint_store.operation():
+                await checkpoint_store.snapshot(target)
+                target.write_text(content, encoding="utf-8")
         snippet = _numbered_snippet(content, edits[-1].new_str)
         return f"Applied {len(edits)} edits to '{path}'.\n{snippet}"
 

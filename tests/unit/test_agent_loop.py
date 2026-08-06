@@ -91,12 +91,81 @@ async def test_agent_loop_e2e_create_facts_file(tmp_path: Path) -> None:
         tools=registry,
         event_bus=bus,
         max_steps=5,
+        workspace_root=workspace,
     )
 
     result_text = await agent.run("Create FACTS.txt file")
     assert "Finished creating FACTS.txt" in result_text
     assert (workspace / "FACTS.txt").exists()
     assert "1. Fact A" in (workspace / "FACTS.txt").read_text()
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_verify_fix_reverify(tmp_path: Path) -> None:
+    """A failed VERIFY re-enters the Act phase instead of terminating (M12).
+
+    First attempt answers without creating the target file (verify fails on
+    the missing-file check); the injected VERIFY-CORRECTION message is
+    answered by actually creating the file, and the second verify passes.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    registry = ToolRegistry()
+    register_default_tools(registry, workspace)
+
+    spec_chunk = CompletionChunk(
+        delta_text=(
+            '{"objective": "Create FACTS.txt file", '
+            '"steps": ["Write 3 facts"], '
+            '"target_files": ["FACTS.txt"], '
+            '"acceptance_criteria": ["FACTS.txt exists"]}'
+        )
+    )
+    # Attempt 1: model answers immediately without creating the file.
+    premature_final = CompletionChunk(
+        delta_text="Done.",
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+    # Attempt 2 (after VERIFY-CORRECTION): model actually creates the file.
+    fix_tool_call = CompletionChunk(
+        tool_calls=[
+            ToolCall(
+                id="call_write_1",
+                name="write_file",
+                arguments={"path": "FACTS.txt", "content": "1. Fact A"},
+            )
+        ],
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
+    )
+    fixed_final = CompletionChunk(
+        delta_text="Fixed: FACTS.txt now exists.",
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+
+    fake_provider = FakeSequenceProvider(
+        [spec_chunk, premature_final, fix_tool_call, fixed_final]
+    )
+    bus = EventBus()
+    events_log: list[BaseEvent] = []
+
+    async def track_events(ev: BaseEvent) -> None:
+        events_log.append(ev)
+
+    bus.subscribe("*", track_events)
+
+    agent = AgentLoop(
+        provider=fake_provider,
+        tools=registry,
+        event_bus=bus,
+        max_steps=10,
+        workspace_root=workspace,
+    )
+
+    result = await agent.run_result("Create FACTS.txt file")
+    assert result.status == "success"
+    assert "Fixed: FACTS.txt now exists." in result.final_text
+    assert (workspace / "FACTS.txt").exists()
     assert len(events_log) >= 4
 
 

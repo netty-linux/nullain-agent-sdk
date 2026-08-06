@@ -5,15 +5,35 @@ build-backend = "hatchling.build"
 [project]
 name = "nullain-agentd"
 version = "0.1.0"
-description = "NDJSON stdio daemon wrapper for Nullain Agent SDK"
+description = "NDJSON-over-stdio daemon exposing the Nullain Agent SDK to editor and CLI clients"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Nullain" }]
+keywords = ["agent", "ai", "llm", "daemon", "ndjson", "nullain"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+    "Typing :: Typed",
+]
 dependencies = [
     "nullain-sdk",
     "nullain-tools",
     "pydantic>=2.7.0",
     "anyio>=4.3.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/netty-linux/nullain-agent-sdk"
+Repository = "https://github.com/netty-linux/nullain-agent-sdk"
+Issues = "https://github.com/netty-linux/nullain-agent-sdk/issues"
 
 [project.scripts]
 nullain-agentd = "nullain_agentd.main:main"
