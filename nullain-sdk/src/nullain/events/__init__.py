@@ -15,6 +15,9 @@ from nullain.events.types import (
     ToolCallEvent,
     ToolResultEvent,
     UserMessageEvent,
+    WorkflowAgentEvent,
+    WorkflowLogEvent,
+    WorkflowPhaseEvent,
 )
 
 __all__ = [
@@ -34,4 +37,7 @@ __all__ = [
     "ToolCallEvent",
     "ToolResultEvent",
     "UserMessageEvent",
+    "WorkflowAgentEvent",
+    "WorkflowLogEvent",
+    "WorkflowPhaseEvent",
 ]

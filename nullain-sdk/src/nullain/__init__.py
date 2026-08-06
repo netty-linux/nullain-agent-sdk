@@ -104,6 +104,12 @@ from nullain.protocol import (
 )
 from nullain.router import CircuitBreaker, Complexity, IntentParser, IntentResult, ModelRouter
 from nullain.telemetry import configure_telemetry, get_logger
+from nullain.workflow import (
+    Workflow,
+    WorkflowContext,
+    WorkflowSpawner,
+    loop_spawner,
+)
 
 __version__ = "0.1.0"
 
@@ -204,10 +210,14 @@ __all__ = [
     "TrajectoryRecord",
     "UserMessageEvent",
     "UserMessagePayload",
+    "Workflow",
+    "WorkflowContext",
+    "WorkflowSpawner",
     "configure_telemetry",
     "export_schema",
     "get_logger",
     "load_settings",
+    "loop_spawner",
     "register_mcp_tools",
     "select_verifier",
 ]

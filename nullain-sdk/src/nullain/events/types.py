@@ -97,6 +97,32 @@ class StreamDeltaEvent(BaseEvent, frozen=True):
     model: str
 
 
+class WorkflowPhaseEvent(BaseEvent, frozen=True):
+    """Event emitted when a workflow enters a phase (P4.27)."""
+
+    event_type: Literal["workflow_phase"] = "workflow_phase"
+    workflow: str
+    phase: str
+
+
+class WorkflowLogEvent(BaseEvent, frozen=True):
+    """Event emitted for a workflow progress message (P4.27)."""
+
+    event_type: Literal["workflow_log"] = "workflow_log"
+    workflow: str
+    message: str
+
+
+class WorkflowAgentEvent(BaseEvent, frozen=True):
+    """Event emitted when a workflow subagent starts, completes, or fails (P4.27)."""
+
+    event_type: Literal["workflow_agent"] = "workflow_agent"
+    workflow: str
+    label: str
+    status: Literal["started", "completed", "failed"]
+    output: str | None = None
+
+
 EventUnion = (
     UserMessageEvent
     | ModelResponseEvent
@@ -107,6 +133,9 @@ EventUnion = (
     | SpecCreatedEvent
     | SpecVerifiedEvent
     | StreamDeltaEvent
+    | WorkflowPhaseEvent
+    | WorkflowLogEvent
+    | WorkflowAgentEvent
 )
 
 
@@ -122,4 +151,7 @@ __all__ = [
     "ToolCallEvent",
     "ToolResultEvent",
     "UserMessageEvent",
+    "WorkflowAgentEvent",
+    "WorkflowLogEvent",
+    "WorkflowPhaseEvent",
 ]
