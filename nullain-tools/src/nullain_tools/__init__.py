@@ -11,6 +11,7 @@ from nullain_tools.bash import create_bash_tool
 from nullain_tools.filesystem import create_filesystem_tools
 from nullain_tools.git import create_git_tools
 from nullain_tools.memory import create_memory_tools
+from nullain_tools.search import create_search_tools_tool
 from nullain_tools.web import create_web_fetch_tool
 
 
@@ -47,6 +48,9 @@ def register_default_tools(
     tools.extend(create_git_tools(workspace_root, sandbox=sandbox, sandbox_opts=sandbox_opts))
     tools.append(create_web_fetch_tool())
     tools.append(create_ask_user_tool(ask_user_callback))
+    # Tool discovery (P4.26): lets the agent search for and hydrate deferred-
+    # schema MCP tools. Registered last so it is always present.
+    tools.append(create_search_tools_tool(registry))
     if persistent_memory is not None:
         tools.extend(create_memory_tools(persistent_memory))
 
@@ -63,6 +67,7 @@ __all__ = [
     "create_filesystem_tools",
     "create_git_tools",
     "create_memory_tools",
+    "create_search_tools_tool",
     "create_web_fetch_tool",
     "register_default_tools",
 ]

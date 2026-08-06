@@ -64,6 +64,10 @@ class MCPClient:
         self._client_version = client_version
         self._next_id = 1
         self._initialized = False
+        # Cache of the server's tool list, populated on first ``tools/list``.
+        # Deferred-schema hydration (P4.26) reuses it so each tool's schema is
+        # fetched once, not once per tool.
+        self._tools_cache: list[MCPToolDefinition] | None = None
 
     def _next_request_id(self) -> int:
         rid = self._next_id
@@ -112,12 +116,38 @@ class MCPClient:
         return init
 
     async def list_tools(self) -> list[MCPToolDefinition]:
-        """Return the tool definitions advertised by the server."""
+        """Return the tool definitions advertised by the server.
+
+        The result is cached after the first fetch; subsequent calls (including
+        deferred-schema hydration) reuse it.
+        """
+        if self._tools_cache is not None:
+            return list(self._tools_cache)
         result = await self._request(METHOD_TOOLS_LIST, {})
         from nullain.mcp.protocol import MCPListToolsResult
 
         parsed = MCPListToolsResult.model_validate(result or {})
-        return list(parsed.tools)
+        self._tools_cache = list(parsed.tools)
+        return list(self._tools_cache)
+
+    async def get_tool_schema(self, name: str) -> MCPToolDefinition:
+        """Return a single tool's full definition (schema) on demand.
+
+        MCP has no single-tool method, so this reuses the cached ``tools/list``
+        result and filters by name. This is the deferred-schema primitive
+        (P4.26): the full ``input_schema`` is fetched only when a tool is
+        hydrated, not for every tool at registration.
+
+        Raises:
+            MCPProtocolError: the server advertises no tool with this name.
+        """
+        for tool in await self.list_tools():
+            if tool.name == name:
+                return tool
+        raise MCPProtocolError(
+            f"MCP server '{self.name}' has no tool named '{name}'",
+            details={"name": name},
+        )
 
     async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
         """Invoke a remote tool and return its text content.
@@ -216,6 +246,7 @@ async def register_mcp_tools(
     client: MCPClient,
     *,
     auto_approve: bool = False,
+    defer_schemas: bool = False,
 ) -> list[str]:
     """Register an MCP server's tools into a ToolRegistry.
 
@@ -231,6 +262,13 @@ async def register_mcp_tools(
         auto_approve: When True, MCP tool calls resolve to ``ALLOW``. When
             False (the default), they resolve to ``ASK`` and flow through the
             registry's permission callback — fail-closed if none is set.
+        defer_schemas: When True (P4.26), register each tool with a deferred
+            schema: ``spec.function.parameters`` starts empty and is loaded
+            lazily on first hydration (via ``client.get_tool_schema``). A
+            deferred tool is hidden from ``ToolRegistry.list_specs()`` until
+            hydrated, so the LLM only sees schemas for tools the agent has
+            searched for. When False (the default), the full schema is
+            registered eagerly — unchanged behavior.
 
     Returns:
         The list of registered tool names.
@@ -248,6 +286,19 @@ async def register_mcp_tools(
         async def _proxy(_remote: str = remote_name, **kwargs: Any) -> str:
             return await client.call_tool(_remote, dict(kwargs))
 
+        if defer_schemas:
+            # Deferred schema: the full input_schema is fetched on demand, once,
+            # when the tool is hydrated. The spec starts with empty parameters.
+            spec.function.parameters = {}
+
+            async def _load_schema(_remote: str = remote_name) -> dict[str, Any]:
+                definition = await client.get_tool_schema(_remote)
+                return definition.input_schema
+
+            schema_loader = _load_schema
+        else:
+            schema_loader = None
+
         wrapper = RegisteredTool(
             name=namespaced,
             description=spec.function.description,
@@ -261,6 +312,7 @@ async def register_mcp_tools(
             # fixed permission_level (ASK/ALLOW) remains the human-approval
             # gate; this capability tag is the authority-intersection gate.
             requires=frozenset({Capability.WRITE}),
+            schema_loader=schema_loader,
         )
         registry.register(wrapper)
         registered_names.append(namespaced)

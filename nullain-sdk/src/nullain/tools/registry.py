@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any, cast
 
 from nullain.authority import Authority, Capability
@@ -14,6 +15,20 @@ from nullain.tools.permissions import PermissionLevel, PermissionPolicy
 # Async callback invoked when a tool action resolves to ASK. Receives the tool
 # name and a human-readable description of the action; resolves True to grant.
 PermissionCallback = Callable[[str, str], Awaitable[bool]]
+
+
+@dataclass(frozen=True)
+class ToolSearchResult:
+    """Minimal metadata for a tool matched by :meth:`ToolRegistry.search_tools`.
+
+    Carries no schema — discovery is cheap. ``is_deferred``/``is_hydrated`` let
+    the caller know whether the tool's full schema is loaded (P4.26).
+    """
+
+    name: str
+    description: str
+    is_deferred: bool
+    is_hydrated: bool
 
 
 class ToolRegistry:
@@ -111,8 +126,47 @@ class ToolRegistry:
         return self._tools[name]
 
     def list_specs(self) -> list[ToolSpec]:
-        """Get ToolSpec list for all registered tools."""
-        return [t.spec for t in self._tools.values()]
+        """Get ToolSpec list for all registered tools.
+
+        Unhydrated deferred tools (P4.26) are omitted: a tool whose schema has
+        not been loaded is hidden from the LLM so the model never sees a
+        schema-less tool it might call with no arguments. Non-deferred tools are
+        always included, so this is backward compatible when no deferred tools
+        are registered.
+        """
+        return [t.spec for t in self._tools.values() if t.is_hydrated]
+
+    def search_tools(self, query: str) -> list[ToolSearchResult]:
+        """Search registered tools by name/description (case-insensitive substring).
+
+        Returns minimal metadata only — no schemas are loaded. This is the
+        discovery primitive for deferred-schema MCP tools (P4.26): the agent
+        searches to find relevant tools, then :meth:`hydrate_tool` loads the
+        schemas of the ones it selects.
+        """
+        needle = query.casefold()
+        results: list[ToolSearchResult] = []
+        for tool in self._tools.values():
+            haystack = f"{tool.name} {tool.description}".casefold()
+            if needle in haystack:
+                results.append(
+                    ToolSearchResult(
+                        name=tool.name,
+                        description=tool.description,
+                        is_deferred=tool.is_deferred,
+                        is_hydrated=tool.is_hydrated,
+                    )
+                )
+        return results
+
+    async def hydrate_tool(self, name: str) -> None:
+        """Load a deferred tool's schema on demand (no-op if not deferred/hydrated).
+
+        Raises:
+            ToolNotFoundError if the tool is not registered.
+        """
+        tool = self.get_tool(name)
+        await tool.hydrate_schema()
 
     def _evaluate_permission(self, name: str, arguments: dict[str, Any]) -> PermissionLevel:
         """Resolve the permission level for a tool action under the current policy.
@@ -231,4 +285,4 @@ class ToolRegistry:
         return str(res)
 
 
-__all__ = ["PermissionCallback", "ToolRegistry"]
+__all__ = ["PermissionCallback", "ToolRegistry", "ToolSearchResult"]
