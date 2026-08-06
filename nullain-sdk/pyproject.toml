@@ -20,6 +20,12 @@ dependencies = [
     "opentelemetry-sdk>=1.24.0",
 ]
 
+[project.optional-dependencies]
+# Ed25519 signature verification for signed plugin manifests (P4.25). Optional:
+# without it the loader's fail-closed default refuses signed plugins rather than
+# loading them unverified. Unsigned plugins still load under require_signature=false.
+signing = ["cryptography>=42.0.0"]
+
 [project.scripts]
 nullain = "nullain.cli:app"
 

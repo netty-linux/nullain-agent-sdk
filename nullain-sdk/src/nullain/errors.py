@@ -143,6 +143,62 @@ class SandboxUnavailableError(SandboxError):
     pass
 
 
+class PluginError(NullainError):
+    """Base exception for plugin loading/verification failures.
+
+    Plugins are external, signed, capability-manifested tool bundles (P4.25).
+    Every load failure is fail-closed: an unverified or over-capable plugin is
+    refused rather than loaded with reduced guarantees.
+    """
+
+    pass
+
+
+class PluginSignatureError(PluginError):
+    """Raised when a plugin's signature is missing, unverifiable, or invalid.
+
+    Covers: unsigned plugin when signatures are required; signed plugin with no
+    verifier backend available (fail-closed); signature that does not verify
+    against the trusted key set; unknown key id.
+    """
+
+    pass
+
+
+class PluginManifestError(PluginError):
+    """Raised when a plugin manifest is structurally invalid or inconsistent.
+
+    Covers: schema mismatch, a tool whose required capabilities exceed the
+    plugin's declared capabilities, an unsupported signature algorithm, or a
+    runtime-version precondition not met.
+    """
+
+    pass
+
+
+class PluginSbomError(PluginError):
+    """Raised when a plugin's SBOM digest does not match the computed digest.
+
+    The signature covers the canonicalized manifest + SBOM digest, so any
+    dependency drift that escapes the digest invalidates the signature too;
+    this error is the explicit SBOM-integrity check.
+    """
+
+    pass
+
+
+class PluginCapabilityError(PluginError):
+    """Raised when a plugin declares no tool usable under the granted capabilities.
+
+    Tools whose required capabilities exceed the operator-granted set are
+    dropped (with a structured log); if every tool is dropped the plugin has
+    nothing usable to register and the load is refused rather than registering
+    an empty shell.
+    """
+
+    pass
+
+
 __all__ = [
     "BudgetExceededError",
     "ContextError",
@@ -152,6 +208,11 @@ __all__ = [
     "MCPTransportError",
     "NoModelAvailableError",
     "NullainError",
+    "PluginCapabilityError",
+    "PluginError",
+    "PluginManifestError",
+    "PluginSbomError",
+    "PluginSignatureError",
     "ProviderAuthenticationError",
     "ProviderError",
     "ProviderRateLimitError",

@@ -74,6 +74,47 @@ class SandboxConfig(BaseModel):
     deny_network: bool = True
 
 
+class PluginEntryConfig(BaseModel):
+    """Configuration for a single plugin entry.
+
+    The plugin's launch command, capabilities, tools, and SBOM live in the
+    SIGNED manifest referenced by ``manifest`` (so they cannot be substituted
+    without breaking the signature). The operator config only references the
+    manifest and optionally narrows the granted capabilities / approval mode.
+    """
+
+    enabled: bool = True
+    manifest: str  # path to the signed manifest JSON
+    auto_approve: bool = False  # permission_level for the plugin's tools (ASK default)
+    # Per-plugin narrowing of the global capability grant. None = use the global
+    # [plugins].allowed_capabilities; a list intersects further (P4.24 meet).
+    allowed_capabilities: list[str] | None = None
+
+
+class PluginsConfig(BaseModel):
+    """Plugin system configuration (P4.25).
+
+    - ``enabled`` (default True): master switch for plugin loading.
+    - ``require_signature`` (default True): fail-closed — an unsigned plugin is
+      refused unless this is explicitly False (trusted-local opt-in). A signed
+      plugin with no verifier backend installed is always refused.
+    - ``trusted_keys``: map of key_id -> base64 Ed25519 public key. A signature
+      whose key_id is not in this map does not verify.
+    - ``allowed_capabilities``: the global capability grant (values are
+      Capability strings: read/write/exec/network/spawn). A plugin tool is
+      registered only if its required capabilities are a subset of the plugin's
+      declared capabilities ∩ this grant. Empty (default) => no plugin tools
+      load — the operator must explicitly grant capabilities (deny by default).
+    - ``entries``: named plugin entries, each referencing a signed manifest.
+    """
+
+    enabled: bool = True
+    require_signature: bool = True
+    trusted_keys: dict[str, str] = Field(default_factory=dict)
+    allowed_capabilities: list[str] = Field(default_factory=list)
+    entries: dict[str, PluginEntryConfig] = Field(default_factory=dict)
+
+
 class NullainSettings(BaseSettings):
     """Root application settings loaded from nullain.toml or environment."""
 
@@ -87,6 +128,7 @@ class NullainSettings(BaseSettings):
     hooks: HooksConfig = Field(default_factory=HooksConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
+    plugins: PluginsConfig = Field(default_factory=PluginsConfig)
     ollama_api_key: str | None = None
     ollama_base_url: str = "https://ollama.com"
 
@@ -106,6 +148,8 @@ __all__ = [
     "MCPConfig",
     "MCPServerConfig",
     "NullainSettings",
+    "PluginEntryConfig",
+    "PluginsConfig",
     "RouterConfig",
     "SandboxConfig",
     "TierConfig",

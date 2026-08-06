@@ -10,12 +10,14 @@ from pathlib import Path
 from typing import Any, TextIO, cast
 
 from nullain.agent import AgentLoop
+from nullain.authority import Capability
 from nullain.config import NullainSettings, load_settings
 from nullain.events import BaseEvent, EventBus, EventStore
 from nullain.hooks import HookManager
 from nullain.llm import LLMProvider, OllamaCloudProvider
 from nullain.mcp import MCPClient, StdioTransport, register_mcp_tools
 from nullain.memory import EpisodicMemory, PersistentMemory
+from nullain.plugins import PluginLoader, PreparedPlugin, select_verifier
 from nullain.protocol import (
     AgentEventPayload,
     AskUserRequestPayload,
@@ -72,6 +74,63 @@ async def _load_mcp_clients(settings: NullainSettings) -> list[MCPClient]:
     return clients
 
 
+def _cap_set(names: list[str] | None) -> frozenset[Capability]:
+    """Parse capability names from config; ``None``/empty => the universe (all).
+
+    An unset operator grant means "no narrowing" (the plugin gets its full
+    declared set, intersected at load), matching the Authority meet semantics
+    where the universe is the identity element.
+    """
+    if not names:
+        return frozenset(Capability)
+    return frozenset(Capability(n.lower()) for n in names)
+
+
+async def _load_plugins(settings: NullainSettings) -> list[PreparedPlugin]:
+    """Verify, prepare, and initialize the plugins declared in settings.
+
+    Mirrors :func:`_load_mcp_clients`: the plugin subprocesses are prepared once
+    at startup and shared across sessions (the live MCP client persists); only
+    the lightweight per-session tool wrappers are re-created. A plugin that
+    fails any pipeline step (signature, SBOM, capability, MCP init) is logged
+    and skipped — fail-closed per plugin, never fatal to the daemon. This is
+    the AGENTS.md rule 5 structured-log discipline and the P4.25 trust policy:
+    an unverified or over-capable plugin is refused, not silently degraded.
+    """
+    pcfg = settings.plugins
+    if not pcfg.enabled:
+        return []
+    verifier = select_verifier()
+    global_grant = _cap_set(pcfg.allowed_capabilities)
+    prepared: list[PreparedPlugin] = []
+    for name, entry in pcfg.entries.items():
+        if not entry.enabled:
+            continue
+        # Per-entry grant narrows the operator's global grant (intersection) —
+        # an entry may never widen what [plugins].allowed_capabilities grants.
+        grant = global_grant
+        if entry.allowed_capabilities is not None:
+            grant = global_grant & _cap_set(entry.allowed_capabilities)
+        loader = PluginLoader(
+            verifier,
+            require_signature=pcfg.require_signature,
+            trusted_keys=dict(pcfg.trusted_keys),
+            allowed_capabilities=grant,
+            auto_approve_default=entry.auto_approve,
+        )
+        try:
+            manifest = PluginLoader.parse_manifest_file(entry.manifest)
+            prepared.append(await loader.prepare(manifest))
+        except Exception as err:
+            logger.warning(
+                "plugin_load_failed",
+                plugin=name,
+                manifest=entry.manifest,
+                error=str(err),
+            )
+    return prepared
+
+
 async def run_agentd(
     *,
     provider: LLMProvider | None = None,
@@ -79,6 +138,7 @@ async def run_agentd(
     output: TextIO | None = None,
     settings: NullainSettings | None = None,
     mcp_clients: list[MCPClient] | None = None,
+    prepared_plugins: list[PreparedPlugin] | None = None,
     episodic_memory: EpisodicMemory | None = None,
     event_store: EventStore | None = None,
 ) -> None:
@@ -86,10 +146,10 @@ async def run_agentd(
 
     Keyword-only injection points exist for testability: ``provider``,
     ``input_reader``, ``output``, ``settings``, ``mcp_clients``,
-    ``episodic_memory`` and ``event_store`` can be supplied to drive the daemon
-    in-process without spawning a real Ollama client, MCP subprocesses, or
-    touching the user's home-directory SQLite stores. In production all default
-    to their real values.
+    ``prepared_plugins``, ``episodic_memory`` and ``event_store`` can be supplied
+    to drive the daemon in-process without spawning a real Ollama client, MCP
+    subprocesses, or touching the user's home-directory SQLite stores. In
+    production all default to their real values.
     """
     configure_telemetry(log_level="INFO", json_format=True)
 
@@ -124,6 +184,12 @@ async def run_agentd(
     if mcp_clients is None:
         mcp_clients = await _load_mcp_clients(settings)
 
+    # Plugins: injected (tests) or prepared from settings. Shared across
+    # sessions like MCP clients — the verified manifest + live MCP server are
+    # prepared once; per-session registration only re-creates the wrappers.
+    if prepared_plugins is None:
+        prepared_plugins = await _load_plugins(settings)
+
     router = ModelRouter(config=settings.router)
     hook_manager = HookManager(settings.hooks)
     if event_store is None:
@@ -133,6 +199,13 @@ async def run_agentd(
         episodic_memory = EpisodicMemory()
     await episodic_memory.initialize()
     event_bus = EventBus()
+
+    # A single registrar for per-session plugin registration. register() only
+    # uses each PreparedPlugin's baked-in effective_capabilities/declarations
+    # (computed at prepare time with the per-entry grant); the loader's own
+    # grant/verifier are NOT consulted at register time, so one shared instance
+    # is correct and the per-entry narrowing is preserved.
+    plugin_registrar = PluginLoader(select_verifier())
 
     out: TextIO = output or sys.stdout
 
@@ -291,6 +364,22 @@ async def run_agentd(
                             server=client.name,
                             error=str(err),
                         )
+                # Register each prepared plugin's tools into the per-session
+                # registry. The verifier/capability pipeline already ran at
+                # prepare time; this only re-creates the namespaced wrappers and
+                # applies the manifest's per-tool requires/permission_level. A
+                # plugin that drops every tool at this stage (e.g. the operator
+                # narrowed the grant between prepare and register) is skipped
+                # with a structured log rather than crashing the session.
+                for prepared in prepared_plugins:
+                    try:
+                        await plugin_registrar.register(prepared, registry)
+                    except Exception as err:
+                        logger.warning(
+                            "plugin_register_failed",
+                            plugin=prepared.manifest.name,
+                            error=str(err),
+                        )
 
                 resp_env = ProtocolEnvelope(
                     v=1,
@@ -350,6 +439,9 @@ async def run_agentd(
         for client in mcp_clients:
             with contextlib.suppress(Exception):
                 await client.close()
+        for prepared in prepared_plugins:
+            with contextlib.suppress(Exception):
+                await prepared.client.close()
         await episodic_memory.close()
         await event_store.close()
 

@@ -52,6 +52,36 @@ max_context = 128000
 # args = ["mcp-server-git", "--repository", "/workspace"]
 # env = { GIT_AUTHOR_NAME = "nullain" }
 
+# Plugins (P4.25): signed, SBOM'd, capability-manifested MCP server bundles.
+# A plugin's identity, launch command, declared capabilities, tool declarations,
+# and SBOM are pinned in a signed manifest (nullain-plugin/0.1). The operator
+# config ONLY references the manifest path and narrows the granted capabilities;
+# it never carries the launch command (signature covers the command, preventing
+# substitution). The loader verifies the signature, intersects the plugin's
+# declared capabilities with `allowed_capabilities` (the P4.24 meet), and
+# registers the tools as mcp__<plugin>__<tool>.
+#
+# Fail-closed by default:
+#   require_signature = true  => an unsigned or unverified plugin is REFUSED
+#   signed plugin + no verifier backend (install nullain-sdk[signing]) => REFUSED
+#   tool requires a capability not in (declared ∩ granted) => tool dropped (logged)
+#   every tool dropped => plugin REFUSED
+# Set require_signature = false ONLY for locally-trusted plugins; unsigned plugins
+# then load with a structured warning.
+# trusted_keys maps key_id -> base64 Ed25519 public key.
+# allowed_capabilities narrows the operator grant (union across all plugins).
+# [plugins]
+# enabled = true
+# require_signature = true
+# trusted_keys = { alpha = "base64-ed25519-pubkey..." }
+# allowed_capabilities = ["read", "write", "network"]
+#
+# [plugins.entries.search]
+# manifest = "./plugins/search/plugin.json"
+# auto_approve = false
+# allowed_capabilities = ["read"]   # narrow this plugin's grant further
+# enabled = true
+
 # OS-level subprocess sandbox for the bash/git tools. The selector picks the
 # platform adapter: landlock (Linux >=5.13), seatbelt (macOS), windows_job
 # (Windows), or none. Fail-closed: when required=true and the adapter is

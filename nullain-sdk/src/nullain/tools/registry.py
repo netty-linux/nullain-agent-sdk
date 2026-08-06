@@ -43,6 +43,15 @@ class ToolRegistry:
         """Register a RegisteredTool instance."""
         self._tools[tool_obj.name] = tool_obj
 
+    def unregister(self, name: str) -> None:
+        """Drop a registered tool by name (no-op if absent).
+
+        Used by the plugin loader to drop a plugin tool whose required
+        capabilities exceed the operator grant — fail-closed at load, never
+        silently over-capable at runtime.
+        """
+        self._tools.pop(name, None)
+
     def scoped(
         self,
         *,
