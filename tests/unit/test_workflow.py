@@ -256,6 +256,4 @@ async def test_loop_spawner_delegates_to_agent_loop_spawn() -> None:
     out = await spawner("hello", model="m")
     assert out == "spawned:hello"
     # loop_spawner forwards model/max_steps/authority (None when unset).
-    assert loop.spawned == [
-        ("hello", {"model": "m", "max_steps": None, "authority": None})
-    ]
+    assert loop.spawned == [("hello", {"model": "m", "max_steps": None, "authority": None})]

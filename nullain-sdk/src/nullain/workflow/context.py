@@ -127,6 +127,7 @@ class WorkflowContext:
         receives ``(prev_result, original_item, index)``. A stage that throws
         drops that item to ``None`` and skips its remaining stages.
         """
+
         async def run_item(item: Any, index: int) -> Any:
             result: Any = item
             for stage in stages:
