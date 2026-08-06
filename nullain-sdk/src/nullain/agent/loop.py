@@ -134,6 +134,7 @@ class AgentLoop:
         self_correction_max: int = 3,
         max_compaction_attempts: int = 3,
         loop_detection_threshold: int = 3,
+        verify_retry_max: int = 2,
         authority: Authority | None = None,
         tool_factory: Callable[[Path], ToolRegistry] | None = None,
     ) -> None:
@@ -162,6 +163,14 @@ class AgentLoop:
             max_tokens: Token budget ceiling.
             timeout: Execution timeout in seconds.
             self_correction_max: Max self-correction retries per session.
+            verify_retry_max: Max number of verify-fix-reverify cycles when
+                the VERIFY phase finds unmet acceptance criteria. On each
+                failed verification (with budget remaining and steps left),
+                the feedback is injected as a correction message and the Act
+                phase resumes instead of terminating the run, mirroring
+                Claude Code's fix-and-reverify loop instead of surfacing a
+                single-shot "verification_failed" the caller must retry
+                itself.
             authority: Authority enforced for this loop (P4.24). None = the
                 unrestricted trust root (no capability/allowed-tool gate). A
                 materialised Authority is set on spawned subagents by
@@ -204,6 +213,7 @@ class AgentLoop:
         # which the loop is considered stuck and is broken out of. Mirrors the
         # loop-detection Gemini CLI uses to escape thrash.
         self.loop_detection_threshold = loop_detection_threshold
+        self.verify_retry_max = verify_retry_max
         self.tool_factory = tool_factory
         self._compaction_attempts = 0
         # Incremental conversation fold (M10 D3): a cached ConversationState
@@ -840,119 +850,39 @@ class AgentLoop:
             }
         )
 
-    async def _run_pipeline(
+    async def _run_act_phase(
         self,
-        prompt: str,
-        session_id: str | None = None,
-        events_history: list[BaseEvent] | None = None,
-        streaming: bool = False,
-    ) -> RunResult:
-        """Run orchestrated agent execution pipeline (telemetry root span).
-
-        Wraps the pipeline body in an ``agent.run`` span so the full
-        interaction (intent → route → plan → act → verify → memory) is
-        recorded as one trace, with child ``llm_request`` / ``tool`` spans.
-        """
-        with telemetry_span("agent.run") as root_span:
-            try:
-                return await self._run_pipeline_body(
-                    prompt, session_id, events_history, streaming, root_span
-                )
-            except get_cancelled_exc_class():
-                # Cancellation requested (e.g. daemon session.cancel or closed
-                # stdin). asyncio propagates the cancellation to in-flight child
-                # work (HTTP request, subprocess, subagent spawn) and awaits its
-                # cleanup; surface the outcome as a structured "cancelled"
-                # RunResult rather than a raw exception. (A bare anyio.CancelScope
-                # would re-raise on exit when the body returns normally, so the
-                # cancellation is caught directly here.)
-                return RunResult(
-                    session_id=session_id or str(uuid.uuid4()),
-                    status="cancelled",
-                    success=False,
-                    error="Agent run cancelled",
-                )
-
-    async def _run_pipeline_body(
-        self,
-        prompt: str,
-        session_id: str | None,
-        events_history: list[BaseEvent] | None,
+        sess_id: str,
+        accumulated_events: list[BaseEvent],
+        active_model: str,
+        active_spec: TaskSpec | None,
+        start_time: float,
         streaming: bool,
-        root_span: Any,
-    ) -> RunResult:
-        """Run orchestrated agent execution pipeline.
+        step: int,
+        total_tokens: int,
+        correction_budget: int,
+        system_prompt: str,
+    ) -> tuple[int, int, int, str, str, bool, RunStatus | None, str | None, bool]:
+        """Run the ReAct Act loop until a final answer, terminal failure, or cap.
 
-        Pipeline: Intent → Route → Plan → Act → Verify → Memory.
+        Called once per verify-fix-reverify cycle (M12): ``step``,
+        ``total_tokens`` and ``correction_budget`` carry over across calls so
+        the step cap, token budget, and self-correction allowance span the
+        whole run, not just one cycle. Loop-detection state
+        (``last_step_signature`` / ``repeat_count``) is local to each call —
+        a fresh cycle starts after a VERIFY-CORRECTION message has been
+        injected, which is itself a different step signature, so carrying
+        detection state over would only cost an extra step before the new
+        pattern is recognized.
 
-        Returns a structured ``RunResult``. Terminal-resource failures
-        (budget, timeout, context exhaustion) are captured as statuses rather
-        than raised, so structured callers can branch on outcome.
+        Returns:
+            Tuple of (step, total_tokens, correction_budget, final_text,
+            last_output, completed, terminal_status, terminal_error,
+            loop_detected).
         """
-        sess_id = session_id or str(uuid.uuid4())
-        root_span.set_attribute("session.id", sess_id)
-        start_time = self.clock.now()
-        accumulated_events: list[BaseEvent] = list(events_history or [])
-        correction_budget = self.self_correction_max
-        self._compaction_attempts = 0
-        # Fresh incremental fold per run (M10 D3).
-        self._fold = None
-        self._folded_count = 0
-
-        # 1. Intent Parsing & Model Routing
-        # M11.3: parse_async runs the deterministic heuristics first and only
-        # calls the LLM classifier (router.classifier_model) when no heuristic
-        # matches with confidence, falling back to the heuristic on any failure.
-        intent_res = await self.intent_parser.parse_async(
-            prompt, self.provider, self.router.config.classifier_model
-        )
-        active_model = self.explicit_model or self.router.route_intent(intent_res)
-        logger.info(
-            "task_intent_classified",
-            session_id=sess_id,
-            intent=intent_res.intent_type,
-            complexity=intent_res.complexity,
-            model=active_model,
-            streaming=streaming,
-        )
-        root_span.set_attributes({"llm.model": active_model, "task.intent": intent_res.intent_type})
-
-        # Emit initial UserMessageEvent
-        user_ev = UserMessageEvent(session_id=sess_id, content=prompt)
-        await self._emit(user_ev)
-        accumulated_events.append(user_ev)
-
-        # 2. Few-Shot Memory Retrieval
-        few_shot_str = await self._retrieve_few_shot(intent_res.intent_type, sess_id)
-        self._episodic_few_shot = few_shot_str
-
-        # Assemble Layered System Prompt (re-assembled each step so persistent
-        # memory / AGENTS.md survive compaction — see _assemble_system_prompt).
-        system_prompt = self._assemble_system_prompt()
-
-        # 3. Plan Phase — LLM generates spec for MEDIUM/HIGH tasks
-        active_spec: TaskSpec | None = None
-        if intent_res.complexity in (
-            Complexity.MEDIUM,
-            Complexity.HIGH,
-        ):
-            active_spec = await self._generate_spec(prompt, active_model, system_prompt)
-            self.spec_validator.validate_spec(active_spec)
-            spec_ev = SpecCreatedEvent(
-                session_id=sess_id,
-                spec_id=active_spec.spec_id,
-                title=active_spec.objective,
-                steps=tuple(active_spec.steps),
-            )
-            await self._emit(spec_ev)
-            accumulated_events.append(spec_ev)
-
-        # 4. Act Phase (ReAct Loop)
-        step = 0
-        total_tokens = 0
         final_text = ""
         last_output = ""
-        completed = False  # True only when the model returned a final answer (no tool calls)
+        completed = False
         terminal_status: RunStatus | None = None
         terminal_error: str | None = None
         loop_detected = False
@@ -1085,25 +1015,205 @@ class AgentLoop:
             terminal_status = "timeout"
             terminal_error = str(err)
 
-        # 5. Verify Phase — only when the loop produced a final answer
-        feedback: str | None = None
-        verify_failed = False
-        if completed and active_spec:
-            verified, feedback = await self.spec_validator.verify(
-                active_spec,
-                last_output,
-                workspace_root=self.workspace_root,
-                tools=self.tools,
-            )
-            verify_failed = not verified
-            verify_ev = SpecVerifiedEvent(
+        return (
+            step,
+            total_tokens,
+            correction_budget,
+            final_text,
+            last_output,
+            completed,
+            terminal_status,
+            terminal_error,
+            loop_detected,
+        )
+
+    async def _run_pipeline(
+        self,
+        prompt: str,
+        session_id: str | None = None,
+        events_history: list[BaseEvent] | None = None,
+        streaming: bool = False,
+    ) -> RunResult:
+        """Run orchestrated agent execution pipeline (telemetry root span).
+
+        Wraps the pipeline body in an ``agent.run`` span so the full
+        interaction (intent → route → plan → act → verify → memory) is
+        recorded as one trace, with child ``llm_request`` / ``tool`` spans.
+        """
+        with telemetry_span("agent.run") as root_span:
+            try:
+                return await self._run_pipeline_body(
+                    prompt, session_id, events_history, streaming, root_span
+                )
+            except get_cancelled_exc_class():
+                # Cancellation requested (e.g. daemon session.cancel or closed
+                # stdin). asyncio propagates the cancellation to in-flight child
+                # work (HTTP request, subprocess, subagent spawn) and awaits its
+                # cleanup; surface the outcome as a structured "cancelled"
+                # RunResult rather than a raw exception. (A bare anyio.CancelScope
+                # would re-raise on exit when the body returns normally, so the
+                # cancellation is caught directly here.)
+                return RunResult(
+                    session_id=session_id or str(uuid.uuid4()),
+                    status="cancelled",
+                    success=False,
+                    error="Agent run cancelled",
+                )
+
+    async def _run_pipeline_body(
+        self,
+        prompt: str,
+        session_id: str | None,
+        events_history: list[BaseEvent] | None,
+        streaming: bool,
+        root_span: Any,
+    ) -> RunResult:
+        """Run orchestrated agent execution pipeline.
+
+        Pipeline: Intent → Route → Plan → Act → Verify → Memory.
+
+        Returns a structured ``RunResult``. Terminal-resource failures
+        (budget, timeout, context exhaustion) are captured as statuses rather
+        than raised, so structured callers can branch on outcome.
+        """
+        sess_id = session_id or str(uuid.uuid4())
+        root_span.set_attribute("session.id", sess_id)
+        start_time = self.clock.now()
+        accumulated_events: list[BaseEvent] = list(events_history or [])
+        correction_budget = self.self_correction_max
+        self._compaction_attempts = 0
+        # Fresh incremental fold per run (M10 D3).
+        self._fold = None
+        self._folded_count = 0
+
+        # 1. Intent Parsing & Model Routing
+        # M11.3: parse_async runs the deterministic heuristics first and only
+        # calls the LLM classifier (router.classifier_model) when no heuristic
+        # matches with confidence, falling back to the heuristic on any failure.
+        intent_res = await self.intent_parser.parse_async(
+            prompt, self.provider, self.router.config.classifier_model
+        )
+        active_model = self.explicit_model or self.router.route_intent(intent_res)
+        logger.info(
+            "task_intent_classified",
+            session_id=sess_id,
+            intent=intent_res.intent_type,
+            complexity=intent_res.complexity,
+            model=active_model,
+            streaming=streaming,
+        )
+        root_span.set_attributes({"llm.model": active_model, "task.intent": intent_res.intent_type})
+
+        # Emit initial UserMessageEvent
+        user_ev = UserMessageEvent(session_id=sess_id, content=prompt)
+        await self._emit(user_ev)
+        accumulated_events.append(user_ev)
+
+        # 2. Few-Shot Memory Retrieval
+        few_shot_str = await self._retrieve_few_shot(intent_res.intent_type, sess_id)
+        self._episodic_few_shot = few_shot_str
+
+        # Assemble Layered System Prompt (re-assembled each step so persistent
+        # memory / AGENTS.md survive compaction — see _assemble_system_prompt).
+        system_prompt = self._assemble_system_prompt()
+
+        # 3. Plan Phase — LLM generates spec for MEDIUM/HIGH tasks
+        active_spec: TaskSpec | None = None
+        if intent_res.complexity in (
+            Complexity.MEDIUM,
+            Complexity.HIGH,
+        ):
+            active_spec = await self._generate_spec(prompt, active_model, system_prompt)
+            self.spec_validator.validate_spec(active_spec)
+            spec_ev = SpecCreatedEvent(
                 session_id=sess_id,
                 spec_id=active_spec.spec_id,
-                success=verified,
-                feedback=feedback,
+                title=active_spec.objective,
+                steps=tuple(active_spec.steps),
             )
-            await self._emit(verify_ev)
-            accumulated_events.append(verify_ev)
+            await self._emit(spec_ev)
+            accumulated_events.append(spec_ev)
+
+        # 4. Act Phase (ReAct Loop), wrapped in a verify-fix-reverify cycle
+        # (M12): a failed VERIFY re-enters Act with the feedback injected as a
+        # correction message, instead of terminating on the first miss.
+        step = 0
+        total_tokens = 0
+        final_text = ""
+        last_output = ""
+        completed = False
+        terminal_status: RunStatus | None = None
+        terminal_error: str | None = None
+        loop_detected = False
+        feedback: str | None = None
+        verify_failed = False
+        verify_attempt = 0
+
+        while True:
+            (
+                step,
+                total_tokens,
+                correction_budget,
+                final_text,
+                last_output,
+                completed,
+                terminal_status,
+                terminal_error,
+                loop_detected,
+            ) = await self._run_act_phase(
+                sess_id=sess_id,
+                accumulated_events=accumulated_events,
+                active_model=active_model,
+                active_spec=active_spec,
+                start_time=start_time,
+                streaming=streaming,
+                step=step,
+                total_tokens=total_tokens,
+                correction_budget=correction_budget,
+                system_prompt=system_prompt,
+            )
+
+            feedback = None
+            verify_failed = False
+            if completed and active_spec and terminal_status is None:
+                verified, feedback = await self.spec_validator.verify(
+                    active_spec,
+                    last_output,
+                    workspace_root=self.workspace_root,
+                    tools=self.tools,
+                )
+                verify_failed = not verified
+                verify_ev = SpecVerifiedEvent(
+                    session_id=sess_id,
+                    spec_id=active_spec.spec_id,
+                    success=verified,
+                    feedback=feedback,
+                )
+                await self._emit(verify_ev)
+                accumulated_events.append(verify_ev)
+
+            if not (
+                verify_failed
+                and verify_attempt < self.verify_retry_max
+                and step < self.max_steps
+                and terminal_status is None
+                and not loop_detected
+            ):
+                break
+
+            verify_attempt += 1
+            fix_ev = UserMessageEvent(
+                session_id=sess_id,
+                content=(
+                    f"[VERIFY-CORRECTION {verify_attempt}/{self.verify_retry_max}] "
+                    "The previous answer did not satisfy the task's acceptance "
+                    f"criteria: {feedback}\n"
+                    "Fix the issues above, then provide a new final answer."
+                ),
+            )
+            await self._emit(fix_ev)
+            accumulated_events.append(fix_ev)
+            completed = False
 
         # Resolve final status. Terminal-resource failures win; otherwise a
         # completed run is "success" unless verification failed, a detected
