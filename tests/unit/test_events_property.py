@@ -5,10 +5,13 @@ from hypothesis import given
 from hypothesis import strategies as st
 from nullain.events import (
     BaseEvent,
+    CompactionEvent,
     Conversation,
     EventBus,
     EventStore,
+    IncrementalFold,
     ModelResponseEvent,
+    ToolResultEvent,
     UserMessageEvent,
 )
 from nullain.llm import TokenUsage
@@ -98,3 +101,88 @@ def test_hypothesis_event_fold_property(user_texts: list[str]) -> None:
     for m1, m2 in zip(original_state.messages, refolded_state.messages, strict=True):
         assert m1.role == m2.role
         assert m1.content == m2.content
+
+
+@st.composite
+def event_sequence(draw: st.DrawFn) -> list[BaseEvent]:
+    """Generate an arbitrary sequence of fold-relevant events.
+
+    Includes UserMessage / ModelResponse / ToolResult content events and
+    Compaction events that compact a random subset of the content events seen so
+    far, so the incremental fold's rebuild path is exercised.
+    """
+    session_id = "prop_session"
+    n = draw(st.integers(min_value=0, max_value=10))
+    events: list[BaseEvent] = []
+    content_ids: list[str] = []
+    for i in range(n):
+        kind = draw(st.sampled_from(["user", "model", "tool", "compaction"]))
+        if kind == "user":
+            ev: BaseEvent = UserMessageEvent(
+                session_id=session_id, content=draw(st.text(max_size=20))
+            )
+            content_ids.append(ev.id)
+        elif kind == "model":
+            ev = ModelResponseEvent(
+                session_id=session_id,
+                model="m",
+                content=draw(st.text(max_size=20)),
+                usage=draw(
+                    st.one_of(
+                        st.none(),
+                        st.builds(
+                            TokenUsage,
+                            prompt_tokens=st.integers(0, 50),
+                            completion_tokens=st.integers(0, 50),
+                            total_tokens=st.integers(0, 100),
+                        ),
+                    )
+                ),
+            )
+            content_ids.append(ev.id)
+        elif kind == "tool":
+            ev = ToolResultEvent(
+                session_id=session_id,
+                call_id=f"call{i}",
+                tool_name="t",
+                output=draw(st.text(max_size=20)),
+            )
+            content_ids.append(ev.id)
+        else:
+            compacted = (
+                draw(st.lists(st.sampled_from(content_ids), max_size=len(content_ids)))
+                if content_ids
+                else []
+            )
+            ev = CompactionEvent(
+                session_id=session_id,
+                summary=draw(st.text(max_size=20)),
+                compacted_event_ids=tuple(compacted),
+            )
+        events.append(ev)
+    return events
+
+
+@given(events=event_sequence())
+def test_incremental_fold_matches_full_fold(events: list[BaseEvent]) -> None:
+    """Property (M10 D3): incremental fold == full fold for any event sequence."""
+    session_id = "prop_session"
+    full = Conversation.fold(session_id, events)
+    inc = IncrementalFold(session_id)
+    inc.append(events)
+    assert inc.state == full
+
+
+@given(events=event_sequence())
+def test_incremental_fold_one_by_one_matches_full_fold(events: list[BaseEvent]) -> None:
+    """Property (M10 D3): appending events one at a time still equals the full fold.
+
+    Exercises the incremental apply path (including compaction rebuilds) rather
+    than a single bulk append.
+    """
+    session_id = "prop_session"
+    full = Conversation.fold(session_id, events)
+    inc = IncrementalFold(session_id)
+    for ev in events:
+        inc.append([ev])
+    assert inc.state == full

@@ -2,6 +2,7 @@
 
 from collections.abc import AsyncGenerator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from nullain.agent import AgentLoop
@@ -137,10 +138,100 @@ async def test_agent_loop_infinite_loop_prevention(tmp_path: Path) -> None:
 
     await agent.run("Do something infinite")
 
-    # Verify MaxStepsExceeded error event was emitted
-    error_events = [e for e in events_log if isinstance(e, ErrorEvent)]
-    assert len(error_events) == 1
-    assert "maximum step count" in error_events[0].message
+    # Verify MaxStepsExceeded error event was emitted. Each failed tool call
+    # (read_file on a missing path) also emits its own ErrorEvent, so filter for
+    # the max-steps guard specifically rather than counting all error events.
+    max_steps_events = [
+        e for e in events_log if isinstance(e, ErrorEvent) and e.error_type == "MaxStepsExceeded"
+    ]
+    assert len(max_steps_events) == 1
+    assert "maximum step count" in max_steps_events[0].message
+
+
+@pytest.mark.asyncio
+async def test_run_result_cancelled_returns_cancelled_status(tmp_path: Path) -> None:
+    """Regression (M10 D2): cancelling a run returns RunResult(status='cancelled')
+    instead of propagating a raw CancelledError."""
+    import asyncio
+
+    from anyio import sleep
+
+    class BlockingProvider(LLMProvider):
+        async def generate(self, request: CompletionRequest) -> CompletionChunk:
+            await sleep(3600)  # block until the task is cancelled
+            raise AssertionError("generate should have been cancelled")
+
+        async def stream(self, request: CompletionRequest) -> AsyncGenerator[CompletionChunk, None]:
+            yield await self.generate(request)
+
+        async def health_check(self) -> bool:
+            return True
+
+    registry = ToolRegistry()
+    register_default_tools(registry, tmp_path)
+    agent = AgentLoop(provider=BlockingProvider(), tools=registry)
+
+    task = asyncio.create_task(agent.run_result("do something"))
+    await sleep(0.05)
+    task.cancel()
+    result = await task
+
+    assert result.status == "cancelled"
+    assert not result.success
+    assert "cancelled" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_streaming_tool_call_arguments_merged_across_chunks() -> None:
+    """Regression (M10 D4): streaming tool-call argument fragments split across
+    3+ chunks (mid-JSON-token) are merged into one complete call before the tool
+    executes, instead of each partial fragment being dispatched separately."""
+    from nullain.tools.decorator import tool
+
+    received: dict[str, Any] = {}
+
+    @tool(name="echo_args", description="echo args", read_only=True)
+    async def echo_args(path: str, limit: int) -> str:
+        received["path"] = path
+        received["limit"] = limit
+        return f"path={path} limit={limit}"
+
+    class FragmentedStreamProvider(LLMProvider):
+        def __init__(self) -> None:
+            self.step = 0
+
+        async def generate(self, request: CompletionRequest) -> CompletionChunk:
+            # Plan phase (MEDIUM intent) asks for a spec; return a minimal one.
+            return CompletionChunk(
+                delta_text=(
+                    '{"objective": "do it", "steps": ["do it"], '
+                    '"target_files": [], "acceptance_criteria": ["done"]}'
+                )
+            )
+
+        async def stream(self, request: CompletionRequest) -> AsyncGenerator[CompletionChunk, None]:
+            if self.step == 0:
+                self.step += 1
+                # Fragment the arguments JSON across 3 chunks, splitting mid-token.
+                for frag in ('{"path": "a.tx', 't", "limi', 't": 3}'):
+                    yield CompletionChunk(
+                        tool_calls=[ToolCall(id="call_1", name="echo_args", arguments=frag)]
+                    )
+            else:
+                yield CompletionChunk(delta_text="done", finish_reason="stop")
+
+        async def health_check(self) -> bool:
+            return True
+
+    registry = ToolRegistry()
+    registry.register(echo_args)
+    agent = AgentLoop(provider=FragmentedStreamProvider(), tools=registry)
+
+    result = await agent.run_streaming("do it")
+    # The tool executed once with the merged, parsed arguments (the regression:
+    # without the merge, each fragment would be dispatched as a separate call).
+    assert received == {"path": "a.txt", "limit": 3}
+    assert result == "done"
 
 
 @pytest.mark.asyncio
@@ -416,3 +507,63 @@ async def test_agent_loop_context_window_exhausted_thrash(tmp_path: Path) -> Non
 
     with pytest.raises(ContextWindowExhaustedError):
         await agent.run("Thrash test")
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_prefers_real_usage_over_estimate(tmp_path: Path) -> None:
+    """Regression (M10 D5): the compaction decision prefers the provider's real
+    ``usage`` token count over the ``len//4`` estimate. A long tool-call argument
+    inflates the estimate past the threshold, but the small real usage keeps the
+    context under it, so no compaction is triggered."""
+    from nullain.context import ContextManager
+    from nullain.events import CompactionEvent
+
+    registry = ToolRegistry()
+    register_default_tools(registry, tmp_path)
+
+    spec_chunk = CompletionChunk(
+        delta_text=(
+            '{"objective": "Real usage test", "steps": ["do it"], '
+            '"target_files": [], "acceptance_criteria": []}'
+        )
+    )
+    # Long argument inflates the len//4 estimate; real usage stays small.
+    # Threshold is 2000 (max_window_tokens=4000 * 0.5): above the ~1246-token
+    # system-prompt estimate (so step 0 does not compact) but far below the
+    # ~5000-token estimate of the long tool-call argument.
+    long_path = "x" * 20000
+    tool_chunk = CompletionChunk(
+        tool_calls=[
+            ToolCall(id="call_1", name="read_file", arguments={"path": long_path})
+        ],
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+    final_chunk = CompletionChunk(
+        delta_text="done",
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+
+    fake_provider = FakeSequenceProvider([spec_chunk, tool_chunk, final_chunk])
+    bus = EventBus()
+    events_log: list[BaseEvent] = []
+
+    async def track_events(ev: BaseEvent) -> None:
+        events_log.append(ev)
+
+    bus.subscribe("*", track_events)
+
+    agent = AgentLoop(
+        provider=fake_provider,
+        tools=registry,
+        event_bus=bus,
+        max_steps=5,
+        context_manager=ContextManager(max_window_tokens=4000, compaction_threshold=0.5),
+    )
+
+    await agent.run("Real usage test")
+
+    # The len//4 estimate of the long tool-call argument (~5000 tokens) would
+    # exceed the 2000-token threshold, but the real usage (10 prompt tokens)
+    # keeps the context under it — so the loop must NOT have compacted.
+    compactions = [e for e in events_log if isinstance(e, CompactionEvent)]
+    assert compactions == []

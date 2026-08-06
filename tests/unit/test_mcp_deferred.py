@@ -241,8 +241,8 @@ async def test_search_tools_tool_hydrates_matches() -> None:
     await register_deferred(registry, client)
     search = create_search_tools_tool(registry)
     out = await search.execute({"query": "commit"})
-    assert "mcp__github__get_commit" in out
-    assert "schema loaded" in out
+    assert "mcp__github__get_commit" in out.output
+    assert "schema loaded" in out.output
     # The matched tool is now hydrated and visible to list_specs().
     assert registry.get_tool("mcp__github__get_commit").is_hydrated is True
     assert [s.function.name for s in registry.list_specs()] == ["mcp__github__get_commit"]
@@ -256,7 +256,7 @@ async def test_search_tools_tool_no_match() -> None:
     await register_deferred(registry, client)
     search = create_search_tools_tool(registry)
     out = await search.execute({"query": "zzz"})
-    assert "No tools match" in out
+    assert "No tools match" in out.output
     await client.close()
 
 

@@ -6,10 +6,11 @@ import uuid
 from pathlib import Path
 from typing import Any
 
+from anyio import get_cancelled_exc_class
 from pydantic import ValidationError
 
 from nullain.agent.result import RunResult, RunStatus
-from nullain.agent.spec import BASH_NONZERO_PREFIX, SpecValidator, TaskSpec
+from nullain.agent.spec import SpecValidator, TaskSpec
 from nullain.authority import Authority, Capability
 from nullain.context.assembler import PromptAssembler
 from nullain.context.manager import ContextManager
@@ -22,10 +23,11 @@ from nullain.errors import (
 )
 from nullain.events import (
     BaseEvent,
-    Conversation,
+    ConversationState,
     ErrorEvent,
     EventBus,
     EventStore,
+    IncrementalFold,
     ModelResponseEvent,
     SpecCreatedEvent,
     SpecVerifiedEvent,
@@ -49,21 +51,9 @@ from nullain.router import Complexity, IntentParser, ModelRouter
 from nullain.telemetry import get_cost_tracker, get_logger
 from nullain.telemetry import span as telemetry_span
 from nullain.tools import PermissionLevel, PermissionPolicy, ToolRegistry
+from nullain.tools.result import ToolResult
 
 logger = get_logger(__name__)
-
-# Output prefixes that mark a tool execution as failed. Mirrors the contracts
-# of the bundled tools: filesystem returns "Error: ...", bash prefixes non-zero
-# exits with BASH_NONZERO_PREFIX ("Command exit code:"), and git_commit emits
-# "Git commit failed: ...". Detection must cover all of these so the Act loop
-# flags genuine failures instead of silently swallowing them as success.
-ERROR_OUTPUT_PREFIXES: tuple[str, ...] = (
-    "Error:",
-    "Error ",
-    BASH_NONZERO_PREFIX,
-    "Git commit failed:",
-)
-
 
 def _step_signature(tool_calls: list[ToolCall]) -> str:
     """Build a stable signature for one step's requested tool calls.
@@ -202,6 +192,12 @@ class AgentLoop:
         # loop-detection Gemini CLI uses to escape thrash.
         self.loop_detection_threshold = loop_detection_threshold
         self._compaction_attempts = 0
+        # Incremental conversation fold (M10 D3): a cached ConversationState
+        # updated by appending only new events, shared between the budget check
+        # and message building in the same step to avoid folding the whole
+        # history twice. Re-initialized per run in _run_pipeline_body.
+        self._fold: IncrementalFold | None = None
+        self._folded_count = 0
 
     async def _emit(self, event: BaseEvent) -> None:
         """Emit event to bus and persist to store if configured."""
@@ -301,15 +297,15 @@ class AgentLoop:
         self,
         tc: ToolCall,
         sess_id: str,
-    ) -> tuple[str, bool, str | None]:
-        """Execute one tool call, returning (output, is_error, error_type).
+    ) -> ToolResult:
+        """Execute one tool call, returning a structured :class:`ToolResult`.
 
-        Exceptions are normalized into error output strings so callers can
+        Exceptions are normalized into structural error results so callers can
         dispatch a batch concurrently without ``gather`` short-circuiting.
-        ``error_type`` is set when the failure warranted an ErrorEvent.
-        Emits a ``tool`` telemetry span tagged with the outcome, including
-        ``tool.blocked`` when execution was denied by the permission policy
-        or vetoed by a ``pre_tool`` hook.
+        ``error_type`` is set when the failure warranted an ErrorEvent. Emits a
+        ``tool`` telemetry span tagged with the outcome, including
+        ``tool.blocked`` when execution was denied by the permission policy or
+        vetoed by a ``pre_tool`` hook.
         """
         with telemetry_span("tool", **{"tool.name": tc.name}) as tool_span:
             # pre_tool hooks: exit 2 vetoes the call before it runs.
@@ -339,13 +335,20 @@ class AgentLoop:
                     tool_span.set_attributes(
                         {"tool.is_error": True, "tool.blocked": True, "tool.hook_blocked": True}
                     )
-                    return msg, True, "HookBlocked"
+                    return ToolResult(output=msg, is_error=True, error_type="HookBlocked")
 
             try:
-                res_output = await self.tools.execute(tc.name, tc.arguments)
-                is_err = any(res_output.startswith(prefix) for prefix in ERROR_OUTPUT_PREFIXES)
-                tool_span.set_attributes({"tool.is_error": is_err, "tool.blocked": False})
-                result: tuple[str, bool, str | None] = (res_output, is_err, None)
+                if isinstance(tc.arguments, str):
+                    # A call reaching execution must have complete, parsed
+                    # arguments (the streaming merge finalizes them); a raw
+                    # fragment here indicates an incomplete call.
+                    raise ToolError(
+                        f"Tool '{tc.name}' called with incomplete (unparsed) arguments"
+                    )
+                result = await self.tools.execute(tc.name, tc.arguments)
+                tool_span.set_attributes(
+                    {"tool.is_error": result.is_error, "tool.blocked": False}
+                )
             except ToolPermissionError as err:
                 logger.warning(
                     "tool_permission_denied",
@@ -354,10 +357,10 @@ class AgentLoop:
                     error=str(err),
                 )
                 tool_span.set_attributes({"tool.is_error": True, "tool.blocked": True})
-                result = (
-                    f"Tool Execution Error ({tc.name}): {err}",
-                    True,
-                    "ToolExecutionError",
+                result = ToolResult(
+                    output=f"Tool Execution Error ({tc.name}): {err}",
+                    is_error=True,
+                    error_type="ToolExecutionError",
                 )
             except ToolError as err:
                 logger.warning(
@@ -367,10 +370,10 @@ class AgentLoop:
                     error=str(err),
                 )
                 tool_span.set_attributes({"tool.is_error": True, "tool.blocked": False})
-                result = (
-                    f"Tool Execution Error ({tc.name}): {err}",
-                    True,
-                    "ToolExecutionError",
+                result = ToolResult(
+                    output=f"Tool Execution Error ({tc.name}): {err}",
+                    is_error=True,
+                    error_type="ToolExecutionError",
                 )
             except Exception as err:
                 logger.error(
@@ -380,10 +383,10 @@ class AgentLoop:
                     error=str(err),
                 )
                 tool_span.set_attributes({"tool.is_error": True, "tool.blocked": False})
-                result = (
-                    f"Unexpected Error ({tc.name}): {err}",
-                    True,
-                    "UnexpectedToolError",
+                result = ToolResult(
+                    output=f"Unexpected Error ({tc.name}): {err}",
+                    is_error=True,
+                    error_type="UnexpectedToolError",
                 )
 
             # post_tool hooks: notification only (no block semantics).
@@ -395,8 +398,8 @@ class AgentLoop:
                         "call_id": tc.id,
                         "tool_name": tc.name,
                         "arguments": tc.arguments,
-                        "output": result[0],
-                        "is_error": result[1],
+                        "output": result.output,
+                        "is_error": result.is_error,
                     },
                 )
             return result
@@ -441,12 +444,12 @@ class AgentLoop:
             outcomes = [await self._run_tool_call(tc, sess_id) for tc in tool_calls]
 
         last_output = ""
-        for tc, (res_output, is_err, error_type) in zip(tool_calls, outcomes, strict=True):
-            if error_type is not None:
+        for tc, res in zip(tool_calls, outcomes, strict=True):
+            if res.error_type is not None:
                 err_ev = ErrorEvent(
                     session_id=sess_id,
-                    error_type=error_type,
-                    message=res_output,
+                    error_type=res.error_type,
+                    message=res.output,
                 )
                 await self._emit(err_ev)
                 accumulated_events.append(err_ev)
@@ -455,21 +458,21 @@ class AgentLoop:
                 session_id=sess_id,
                 call_id=tc.id,
                 tool_name=tc.name,
-                output=res_output,
-                is_error=is_err,
+                output=res.output,
+                is_error=res.is_error,
             )
             await self._emit(res_ev)
             accumulated_events.append(res_ev)
-            last_output = res_output
+            last_output = res.output
 
             # Self-correction: inject reflection on error
-            if is_err and correction_budget > 0:
+            if res.is_error and correction_budget > 0:
                 correction_budget -= 1
                 reflection = UserMessageEvent(
                     session_id=sess_id,
                     content=(
                         f"[SELF-CORRECTION] Tool '{tc.name}' "
-                        f"failed: {res_output}\n"
+                        f"failed: {res.output}\n"
                         "Analyze this error. Was the input "
                         "malformed? Is there an alternative "
                         "approach? Try a different strategy."
@@ -507,6 +510,21 @@ class AgentLoop:
             await self._emit(err_ev)
             raise
 
+    def _sync_fold(self, sess_id: str, accumulated_events: list[BaseEvent]) -> ConversationState:
+        """Append newly-accumulated events to the incremental fold and return state.
+
+        Only the events not yet folded are applied, so the derived state is
+        shared (and updated once) across the budget check and message building
+        in the same step instead of folding the whole history twice.
+        """
+        if self._fold is None:
+            self._fold = IncrementalFold(sess_id)
+        new_events = accumulated_events[self._folded_count :]
+        if new_events:
+            self._fold.append(new_events)
+            self._folded_count = len(accumulated_events)
+        return self._fold.state
+
     def _build_messages(
         self,
         sess_id: str,
@@ -523,8 +541,9 @@ class AgentLoop:
         re-injecting CLAUDE.md after compaction) rather than being replaced by
         the recap.
         """
-        state = Conversation.fold(sess_id, accumulated_events)
-        messages = state.messages
+        state = self._sync_fold(sess_id, accumulated_events)
+        # Copy so the shared incremental state's message list is not mutated.
+        messages = list(state.messages)
         messages.insert(0, ChatMessage(role="system", content=system_prompt))
         return self.context_manager.reinject_instructions(messages, step)
 
@@ -555,11 +574,17 @@ class AgentLoop:
             await self._emit(err_ev)
             raise BudgetExceededError(f"Token budget of {self.max_tokens} exceeded")
 
-        # Compact based on actual context size, not cumulative
-        state = Conversation.fold(sess_id, accumulated_events)
-        messages = state.messages
-        messages.insert(0, ChatMessage(role="system", content=system_prompt))
-        ctx_tokens = self.context_manager.estimate_context_tokens(messages)
+        # Compact based on actual context size, not cumulative. Reuse the
+        # incremental fold shared with _build_messages (M10 D3). Prefer the
+        # provider-reported real prompt-token count (M10 D5) when available,
+        # falling back to the len//4 estimate otherwise.
+        state = self._sync_fold(sess_id, accumulated_events)
+        if state.last_prompt_tokens > 0:
+            ctx_tokens = state.last_prompt_tokens
+        else:
+            messages = list(state.messages)
+            messages.insert(0, ChatMessage(role="system", content=system_prompt))
+            ctx_tokens = self.context_manager.estimate_context_tokens(messages)
         if not self.context_manager.should_compact(ctx_tokens):
             # Context is under control again; reset the thrash counter.
             self._compaction_attempts = 0
@@ -648,6 +673,57 @@ class AgentLoop:
                 )
             )
 
+    @staticmethod
+    def _merge_tool_call_deltas(
+        accumulator: dict[str, ToolCall],
+        deltas: list[ToolCall],
+    ) -> None:
+        """Merge streaming tool-call argument fragments by id (M10 D4).
+
+        OpenAI-style streaming delivers a tool call's ``arguments`` as a sequence
+        of raw JSON string fragments across chunks (the id is present on the
+        first chunk and empty on the rest); Ollama native may deliver complete
+        dicts. Fragments for the same id are concatenated; a call is only
+        complete once its JSON parses or the stream ends (see
+        :meth:`_finalize_tool_calls`).
+        """
+        for delta in deltas:
+            key = delta.id or (next(reversed(accumulator)) if accumulator else "")
+            if not key:
+                continue
+            existing = accumulator.get(key)
+            if existing is None:
+                accumulator[key] = delta
+                continue
+            if isinstance(delta.arguments, str):
+                if isinstance(existing.arguments, str):
+                    existing.arguments = existing.arguments + delta.arguments
+                else:
+                    existing.arguments = str(existing.arguments) + delta.arguments
+            else:
+                # Complete dict delivered in one chunk (e.g. Ollama native).
+                existing.arguments = delta.arguments
+
+    @staticmethod
+    def _finalize_tool_calls(accumulator: dict[str, ToolCall]) -> list[ToolCall]:
+        """Parse any remaining string argument fragments into complete dicts.
+
+        A call whose JSON still does not parse at stream end is incomplete and
+        cannot be executed, so it is dropped.
+        """
+        finalized: list[ToolCall] = []
+        for tc in accumulator.values():
+            if isinstance(tc.arguments, str):
+                try:
+                    parsed: object = _json.loads(tc.arguments)
+                except _json.JSONDecodeError:
+                    continue
+                if not isinstance(parsed, dict):
+                    continue
+                tc.arguments = parsed
+            finalized.append(tc)
+        return finalized
+
     async def _generate_step_response(
         self,
         req: CompletionRequest,
@@ -668,7 +744,7 @@ class AgentLoop:
             start = self.clock.now()
             if streaming:
                 full_text = ""
-                all_tool_calls: list[ToolCall] = []
+                tool_call_acc: dict[str, ToolCall] = {}
                 usage: TokenUsage | None = None
                 ttft: float | None = None
                 try:
@@ -684,7 +760,9 @@ class AgentLoop:
                             )
                             await self._emit(delta_ev)
                         if chunk.tool_calls:
-                            all_tool_calls.extend(chunk.tool_calls)
+                            # Merge argument fragments by id (M10 D4) instead of
+                            # appending each partial call separately.
+                            self._merge_tool_call_deltas(tool_call_acc, chunk.tool_calls)
                         if chunk.usage:
                             usage = chunk.usage
                     self.router.circuit_breaker.record_success(active_model)
@@ -692,6 +770,7 @@ class AgentLoop:
                     self._record_llm_telemetry(
                         llm_span, tracker, active_model, sess_id, usage, ttft, latency_ms
                     )
+                    all_tool_calls = self._finalize_tool_calls(tool_call_acc)
                     return full_text, all_tool_calls, usage
                 except Exception as err:
                     self.router.circuit_breaker.record_failure(active_model)
@@ -711,6 +790,9 @@ class AgentLoop:
             else:
                 response = await self._call_provider(req, active_model, sess_id)
                 tool_calls = list(response.tool_calls) if response.tool_calls else []
+                # Non-streaming calls carry complete dict arguments; parse any
+                # delivered as a raw string (malformed JSON) for safety.
+                tool_calls = self._finalize_tool_calls({tc.id: tc for tc in tool_calls})
                 latency_ms = (self.clock.now() - start) * 1000.0
                 self._record_llm_telemetry(
                     llm_span, tracker, active_model, sess_id, response.usage, latency_ms, latency_ms
@@ -762,9 +844,24 @@ class AgentLoop:
         recorded as one trace, with child ``llm_request`` / ``tool`` spans.
         """
         with telemetry_span("agent.run") as root_span:
-            return await self._run_pipeline_body(
-                prompt, session_id, events_history, streaming, root_span
-            )
+            try:
+                return await self._run_pipeline_body(
+                    prompt, session_id, events_history, streaming, root_span
+                )
+            except get_cancelled_exc_class():
+                # Cancellation requested (e.g. daemon session.cancel or closed
+                # stdin). asyncio propagates the cancellation to in-flight child
+                # work (HTTP request, subprocess, subagent spawn) and awaits its
+                # cleanup; surface the outcome as a structured "cancelled"
+                # RunResult rather than a raw exception. (A bare anyio.CancelScope
+                # would re-raise on exit when the body returns normally, so the
+                # cancellation is caught directly here.)
+                return RunResult(
+                    session_id=session_id or str(uuid.uuid4()),
+                    status="cancelled",
+                    success=False,
+                    error="Agent run cancelled",
+                )
 
     async def _run_pipeline_body(
         self,
@@ -788,6 +885,9 @@ class AgentLoop:
         accumulated_events: list[BaseEvent] = list(events_history or [])
         correction_budget = self.self_correction_max
         self._compaction_attempts = 0
+        # Fresh incremental fold per run (M10 D3).
+        self._fold = None
+        self._folded_count = 0
 
         # 1. Intent Parsing & Model Routing
         intent_res = self.intent_parser.parse(prompt)
@@ -1127,6 +1227,10 @@ class AgentLoop:
             raise ContextWindowExhaustedError(result.error or "Context window exhausted")
         if result.status == "timeout":
             raise NullainError(result.error or "Agent loop timed out")
+        if result.status == "cancelled":
+            # Legacy run()/run_streaming() callers still observe cancellation
+            # as an exception; run_result() returns the structured status.
+            raise get_cancelled_exc_class()(result.error or "Agent run cancelled")
 
     async def spawn(
         self,

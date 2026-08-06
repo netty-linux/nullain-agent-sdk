@@ -207,8 +207,10 @@ class SpecValidator:
                     continue
                 try:
                     cmd_res = await tools.execute("bash", {"command_args": cmd_tokens})
-                    if cmd_res.startswith(BASH_NONZERO_PREFIX):
-                        failed_checks.append(f"Verification command '{cmd}' failed: {cmd_res}")
+                    if cmd_res.is_error:
+                        failed_checks.append(
+                            f"Verification command '{cmd}' failed: {cmd_res.output}"
+                        )
                 except Exception as err:
                     failed_checks.append(f"Verification command '{cmd}' execution error: {err}")
 

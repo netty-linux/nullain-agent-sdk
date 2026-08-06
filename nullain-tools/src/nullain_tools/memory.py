@@ -8,6 +8,7 @@ are re-injected into the system prompt and survive context compaction.
 from nullain.authority import Capability
 from nullain.memory import MemoryEntry, MemoryType, PersistentMemory
 from nullain.tools import RegisteredTool, tool
+from nullain.tools.result import ToolResult
 
 
 def create_memory_tools(persistent_memory: PersistentMemory) -> list[RegisteredTool]:
@@ -29,7 +30,7 @@ def create_memory_tools(persistent_memory: PersistentMemory) -> list[RegisteredT
         description: str,
         body: str,
         memory_type: str = "reference",
-    ) -> str:
+    ) -> str | ToolResult:
         try:
             mtype = MemoryType(memory_type)
         except ValueError:
@@ -40,7 +41,11 @@ def create_memory_tools(persistent_memory: PersistentMemory) -> list[RegisteredT
         try:
             pm.write(MemoryEntry(name=name, description=description, body=body, type=mtype))
         except ValueError as err:
-            return f"Error: {err}"
+            return ToolResult(
+                output=f"Error: {err}",
+                is_error=True,
+                error_type="ToolError",
+            )
         return f"Saved memory '{name}' ({mtype.value})."
 
     @tool(
@@ -52,7 +57,7 @@ def create_memory_tools(persistent_memory: PersistentMemory) -> list[RegisteredT
         read_only=True,
         requires=frozenset({Capability.READ}),
     )
-    async def read_memory(name: str = "") -> str:
+    async def read_memory(name: str = "") -> str | ToolResult:
         if not name:
             slugs = pm.list_entries()
             if not slugs:
@@ -60,7 +65,11 @@ def create_memory_tools(persistent_memory: PersistentMemory) -> list[RegisteredT
             return "Stored memories:\n" + "\n".join(f"- {s}" for s in slugs)
         body = pm.read(name)
         if body is None:
-            return f"Error: no memory named '{name}'."
+            return ToolResult(
+                output=f"Error: no memory named '{name}'.",
+                is_error=True,
+                error_type="ToolError",
+            )
         return body
 
     return [save_memory, read_memory]

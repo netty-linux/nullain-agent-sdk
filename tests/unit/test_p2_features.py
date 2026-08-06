@@ -98,7 +98,8 @@ async def test_web_fetch_rejects_non_http_url() -> None:
 
     tool = create_web_fetch_tool()
     out = await tool.func(url="file:///etc/passwd")
-    assert out.startswith("Error: URL must start")
+    assert out.is_error
+    assert out.output.startswith("Error: URL must start")
 
 
 def test_web_fetch_html_to_text_strips_tags() -> None:
@@ -135,7 +136,8 @@ async def test_ask_user_without_callback_degrades_gracefully() -> None:
 
     tool = create_ask_user_tool(None)
     out = await tool.func(question="what next?")
-    assert out.startswith("Error: ask_user is unavailable")
+    assert out.is_error
+    assert out.output.startswith("Error: ask_user is unavailable")
 
 
 # ---------------------------------------------------------------------------

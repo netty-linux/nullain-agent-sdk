@@ -10,6 +10,7 @@ import re
 import httpx
 from nullain.authority import Capability
 from nullain.tools import RegisteredTool, tool
+from nullain.tools.result import ToolResult
 
 _MAX_RESPONSE_CHARS = 50_000
 _REQUEST_TIMEOUT = 30.0
@@ -44,9 +45,13 @@ def create_web_fetch_tool() -> RegisteredTool:
         read_only=True,
         requires=frozenset({Capability.READ, Capability.NETWORK}),
     )
-    async def web_fetch(url: str) -> str:
+    async def web_fetch(url: str) -> str | ToolResult:
         if not url.startswith(("http://", "https://")):
-            return f"Error: URL must start with http:// or https:// (got '{url}')."
+            return ToolResult(
+                output=f"Error: URL must start with http:// or https:// (got '{url}').",
+                is_error=True,
+                error_type="ToolError",
+            )
 
         try:
             async with httpx.AsyncClient(
@@ -57,9 +62,17 @@ def create_web_fetch_tool() -> RegisteredTool:
                 response = await client.get(url)
                 response.raise_for_status()
         except httpx.HTTPStatusError as err:
-            return f"Error: HTTP {err.response.status_code} for '{url}'."
+            return ToolResult(
+                output=f"Error: HTTP {err.response.status_code} for '{url}'.",
+                is_error=True,
+                error_type="ToolError",
+            )
         except httpx.RequestError as err:
-            return f"Error: Request failed for '{url}': {err}."
+            return ToolResult(
+                output=f"Error: Request failed for '{url}': {err}.",
+                is_error=True,
+                error_type="ToolError",
+            )
 
         content_type = response.headers.get("content-type", "")
         body = response.text

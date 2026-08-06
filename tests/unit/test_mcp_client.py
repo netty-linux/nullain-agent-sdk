@@ -144,7 +144,8 @@ async def test_call_tool_returns_text_content() -> None:
     await client.initialize()
 
     out = await client.call_tool("search", {"query": "x"})
-    assert out == "hello world"
+    assert out.output == "hello world"
+    assert not out.is_error
     last = transport.requests[-1]
     assert last.method == "tools/call"
     assert last.params == {"name": "search", "arguments": {"query": "x"}}
@@ -162,9 +163,10 @@ async def test_call_tool_error_result_is_prefixed_as_failure() -> None:
     await client.initialize()
 
     out = await client.call_tool("search", {"query": "missing"})
-    # Prefixed with "Error:" so AgentLoop's error detection treats it as failed.
-    assert out.startswith("Error:")
-    assert "not found" in out
+    # Marked is_error so AgentLoop's error detection treats it as failed.
+    assert out.is_error
+    assert out.error_type == "ToolError"
+    assert "not found" in out.output
 
 
 @pytest.mark.asyncio
@@ -186,8 +188,8 @@ async def test_call_tool_non_text_content_rendered_as_placeholder() -> None:
     await client.initialize()
 
     out = await client.call_tool("fetch", {"id": "1"})
-    assert "caption" in out
-    assert "unsupported MCP content type: image" in out
+    assert "caption" in out.output
+    assert "unsupported MCP content type: image" in out.output
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +292,7 @@ async def test_registered_mcp_wrapper_proxies_call_to_client() -> None:
 
     # auto_approve=True so the registry executes without a permission callback.
     out = await registry.execute("mcp__fake__search", {"query": "x"})
-    assert out == "result-42"
+    assert out.output == "result-42"
     # The tools/call request carried the ORIGINAL (non-namespaced) tool name.
     call_req = next(r for r in transport.requests if r.method == "tools/call")
     assert call_req.params["name"] == "search"
@@ -401,7 +403,7 @@ async def test_stdio_transport_real_subprocess_handshake(tmp_path: Path) -> None
         tools = await client.list_tools()
         assert tools[0].name == "echo"
         out = await client.call_tool("echo", {"text": "roundtrip"})
-        assert out == "roundtrip"
+        assert out.output == "roundtrip"
     finally:
         await client.close()
         assert transport._proc is None  # type: ignore[reportPrivateUsage]

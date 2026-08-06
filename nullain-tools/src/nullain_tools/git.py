@@ -4,6 +4,7 @@ from pathlib import Path
 
 from nullain.authority import Capability
 from nullain.tools import RegisteredTool, execute_subprocess, tool
+from nullain.tools.result import ToolResult
 from nullain.tools.sandbox import Sandbox, SandboxOptions
 
 
@@ -20,7 +21,7 @@ def create_git_tools(
         read_only=True,
         requires=frozenset({Capability.READ}),
     )
-    async def git_status() -> str:
+    async def git_status() -> str | ToolResult:
         _, output = await execute_subprocess(
             ["git", "status"], cwd=root, sandbox=sandbox, sandbox_opts=sandbox_opts
         )
@@ -32,7 +33,7 @@ def create_git_tools(
         read_only=True,
         requires=frozenset({Capability.READ}),
     )
-    async def git_diff() -> str:
+    async def git_diff() -> str | ToolResult:
         _, output = await execute_subprocess(
             ["git", "diff"], cwd=root, sandbox=sandbox, sandbox_opts=sandbox_opts
         )
@@ -43,14 +44,18 @@ def create_git_tools(
         description="Stage specified or all changes and create a git commit.",
         requires=frozenset({Capability.WRITE}),
     )
-    async def git_commit(message: str, files: list[str] | None = None) -> str:
+    async def git_commit(message: str, files: list[str] | None = None) -> str | ToolResult:
         add_args = ["git", "add"] + (files if files else ["."])
         await execute_subprocess(add_args, cwd=root, sandbox=sandbox, sandbox_opts=sandbox_opts)
         ret, commit_output = await execute_subprocess(
             ["git", "commit", "-m", message], cwd=root, sandbox=sandbox, sandbox_opts=sandbox_opts
         )
         if ret != 0:
-            return f"Git commit failed: {commit_output}"
+            return ToolResult(
+                output=f"Git commit failed: {commit_output}",
+                is_error=True,
+                error_type="ToolError",
+            )
         return f"Git commit successful:\n{commit_output}"
 
     return [git_status, git_diff, git_commit]

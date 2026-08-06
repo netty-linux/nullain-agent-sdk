@@ -41,7 +41,7 @@ class ToolCallEvent(BaseEvent, frozen=True):
     event_type: Literal["tool_call"] = "tool_call"
     call_id: str
     tool_name: str
-    arguments: dict[str, Any] = Field(default_factory=dict)
+    arguments: dict[str, Any] | str = Field(default_factory=dict)
 
 
 class ToolResultEvent(BaseEvent, frozen=True):

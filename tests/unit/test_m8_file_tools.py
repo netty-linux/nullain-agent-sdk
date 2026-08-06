@@ -75,7 +75,7 @@ def test_read_file_truncates_absurdly_long_line(tmp_path: Path) -> None:
 def test_read_file_rejects_negative_offset(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("x")
     tools = _tools(tmp_path)
-    assert "offset must be >= 0" in tools["read_file"].func(path="a.txt", offset=-1)
+    assert "offset must be >= 0" in tools["read_file"].func(path="a.txt", offset=-1).output
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +87,7 @@ def test_edit_file_requires_prior_read(tmp_path: Path) -> None:
     (tmp_path / "a.txt").write_text("hello world")
     tools = _tools(tmp_path)
     out = tools["edit_file"].func(path="a.txt", old_str="hello", new_str="goodbye")
-    assert "has not been read" in out
+    assert "has not been read" in out.output
     # After reading, the edit succeeds.
     tools["read_file"].func(path="a.txt")
     out = tools["edit_file"].func(path="a.txt", old_str="hello", new_str="goodbye")
@@ -100,7 +100,7 @@ def test_edit_file_rejects_ambiguous_match(tmp_path: Path) -> None:
     tools = _tools(tmp_path)
     tools["read_file"].func(path="a.txt")
     out = tools["edit_file"].func(path="a.txt", old_str="foo", new_str="bar")
-    assert "appears 3 times" in out
+    assert "appears 3 times" in out.output
     # File unchanged.
     assert (tmp_path / "a.txt").read_text() == "foo foo foo"
 
@@ -119,7 +119,7 @@ def test_edit_file_rejects_noop(tmp_path: Path) -> None:
     tools = _tools(tmp_path)
     tools["read_file"].func(path="a.txt")
     out = tools["edit_file"].func(path="a.txt", old_str="hello", new_str="hello")
-    assert "no-op" in out
+    assert "no-op" in out.output
 
 
 def test_edit_file_returns_numbered_snippet(tmp_path: Path) -> None:
@@ -152,7 +152,7 @@ async def test_multi_edit_applies_all_edits(tmp_path: Path) -> None:
             ],
         },
     )
-    assert "Applied 3 edits" in out
+    assert "Applied 3 edits" in out.output
     assert (tmp_path / "a.txt").read_text() == "1 2 3"
 
 
@@ -171,7 +171,7 @@ async def test_multi_edit_rolls_back_on_failure(tmp_path: Path) -> None:
             ],
         },
     )
-    assert "edit #2" in out
+    assert "edit #2" in out.output
     # Nothing was written: the first edit is rolled back.
     assert (tmp_path / "a.txt").read_text() == "a b c"
 
@@ -192,7 +192,7 @@ async def test_multi_edit_chains_edits(tmp_path: Path) -> None:
             ],
         },
     )
-    assert "Applied 2 edits" in out
+    assert "Applied 2 edits" in out.output
     assert (tmp_path / "a.txt").read_text() == "abc"
 
 
@@ -203,7 +203,7 @@ async def test_multi_edit_requires_prior_read(tmp_path: Path) -> None:
     out = await reg.execute(
         "multi_edit", {"path": "a.txt", "edits": [{"old_str": "a", "new_str": "b"}]}
     )
-    assert "has not been read" in out
+    assert "has not been read" in out.output
 
 
 # ---------------------------------------------------------------------------
@@ -297,7 +297,7 @@ async def test_todo_write_rejects_multiple_in_progress(tmp_path: Path) -> None:
             ]
         },
     )
-    assert "at most one item may be 'in_progress'" in out
+    assert "at most one item may be 'in_progress'" in out.output
 
 
 @pytest.mark.asyncio
@@ -320,7 +320,7 @@ async def test_todo_write_emits_todo_event(tmp_path: Path) -> None:
             ]
         },
     )
-    assert "Todo list updated" in out
+    assert "Todo list updated" in out.output
     assert len(received) == 1
     assert received[0].session_id == "sess-1"
     assert received[0].items[0].content == "a"
@@ -331,7 +331,7 @@ async def test_todo_write_emits_todo_event(tmp_path: Path) -> None:
 async def test_todo_write_without_bus_still_validates(tmp_path: Path) -> None:
     reg = _registry(tmp_path)  # no event_bus
     out = await reg.execute("todo_write", {"items": [{"content": "a", "status": "completed"}]})
-    assert "Todo list updated" in out
+    assert "Todo list updated" in out.output
 
 
 # ---------------------------------------------------------------------------

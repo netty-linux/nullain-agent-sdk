@@ -113,13 +113,13 @@ async def test_memory_tools_save_and_read(tmp_path: Path) -> None:
             "memory_type": "project",
         },
     )
-    assert "Saved memory 'team-convention'" in saved
+    assert "Saved memory 'team-convention'" in saved.output
 
     listed = await registry.execute("read_memory", {"name": ""})
-    assert "team-convention" in listed
+    assert "team-convention" in listed.output
 
     body = await registry.execute("read_memory", {"name": "team-convention"})
-    assert "Always commit to master." in body
+    assert "Always commit to master." in body.output
 
 
 @pytest.mark.asyncio
@@ -138,7 +138,7 @@ async def test_memory_tool_rejects_invalid_type(tmp_path: Path) -> None:
             "memory_type": "bogus",
         },
     )
-    assert "invalid memory type" in out
+    assert "invalid memory type" in out.output
 
 
 @pytest.mark.asyncio

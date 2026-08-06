@@ -8,11 +8,16 @@ Role = Literal["system", "user", "assistant", "tool"]
 
 
 class ToolCall(BaseModel):
-    """Represents a tool execution request from the model."""
+    """Represents a tool execution request from the model.
+
+    During streaming, ``arguments`` may transiently hold a raw JSON *string
+    fragment* (OpenAI-style incremental tool-call deltas) that the loop merges
+    across chunks before execution; a complete call always carries a ``dict``.
+    """
 
     id: str = Field(description="Unique identifier for this tool invocation")
     name: str = Field(description="Name of the tool to execute")
-    arguments: dict[str, Any] = Field(
+    arguments: dict[str, Any] | str = Field(
         default_factory=dict, description="Arguments to pass to the tool"
     )
 

@@ -136,11 +136,16 @@ async def test_spec_validator_fails_when_verification_command_exits_nonzero(
     from nullain.agent.spec import BASH_NONZERO_PREFIX
     from nullain.tools import ToolRegistry
     from nullain.tools.decorator import tool
+    from nullain.tools.result import ToolResult
 
     @tool(name="bash", description="fake bash for verify", read_only=False)
-    async def fake_bash(command_args: list[str]) -> str:
+    async def fake_bash(command_args: list[str]) -> ToolResult:
         # Simulate a verification command that exits non-zero.
-        return f"{BASH_NONZERO_PREFIX} 1\nmake: *** No rule for target 'check'. Stop."
+        return ToolResult(
+            output=f"{BASH_NONZERO_PREFIX} 1\nmake: *** No rule for target 'check'. Stop.",
+            is_error=True,
+            error_type="ToolError",
+        )
 
     registry = ToolRegistry()
     registry.register(fake_bash)

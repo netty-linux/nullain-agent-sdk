@@ -11,6 +11,7 @@ from nullain.errors import ToolNotFoundError, ToolPermissionError
 from nullain.llm.types import ToolSpec
 from nullain.tools.decorator import RegisteredTool
 from nullain.tools.permissions import PermissionLevel, PermissionPolicy
+from nullain.tools.result import ToolResult
 
 # Async callback invoked when a tool action resolves to ASK. Receives the tool
 # name and a human-readable description of the action; resolves True to grant.
@@ -227,7 +228,7 @@ class ToolRegistry:
             return f"Read file: {target}"
         return f"Execute tool: {name}"
 
-    async def execute(self, name: str, arguments: dict[str, Any]) -> str:
+    async def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         """Execute registered tool by name with arguments dict.
 
         Authority gate (P4.24): when this registry carries an ``authority``
@@ -244,7 +245,7 @@ class ToolRegistry:
           (fail-closed) instead of silently allowing.
 
         Returns:
-            String output of execution.
+            Structured :class:`ToolResult` of the execution.
         """
         registered = self.get_tool(name)
         # Authority-intersection gate (subagents only; None = unrestricted root).
@@ -281,8 +282,7 @@ class ToolRegistry:
             if not granted:
                 raise ToolPermissionError(f"Tool '{name}' denied by user")
 
-        res = await registered.execute(arguments)
-        return str(res)
+        return await registered.execute(arguments)
 
 
 __all__ = ["PermissionCallback", "ToolRegistry", "ToolSearchResult"]

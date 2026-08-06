@@ -16,6 +16,7 @@ from typing import Literal
 from nullain.authority import Capability
 from nullain.events import EventBus, TodoEvent, TodoItem
 from nullain.tools import RegisteredTool, resolve_and_validate_path, tool
+from nullain.tools.result import ToolResult
 from pydantic import BaseModel
 
 #: Individual lines longer than this are truncated with an explicit marker so a
@@ -98,7 +99,7 @@ def _grep_python(
     glob_filter: str | None,
     case_insensitive: bool,
     head_limit: int,
-) -> str:
+) -> str | ToolResult:
     """Pure-Python grep fallback producing the same observable format as ripgrep.
 
     Content lines are ``relpath:linenum:line``; context lines use ``-`` as the
@@ -108,7 +109,11 @@ def _grep_python(
     try:
         regex = re.compile(pattern, flags)
     except re.error as err:
-        return f"Error: Invalid regex pattern '{pattern}': {err}"
+        return ToolResult(
+            output=f"Error: Invalid regex pattern '{pattern}': {err}",
+            is_error=True,
+            error_type="ToolError",
+        )
 
     glob_re = re.compile(glob_filter) if glob_filter else None
     matches: list[str] = []
@@ -167,7 +172,7 @@ async def _grep_with_rg(
     glob_filter: str | None,
     case_insensitive: bool,
     head_limit: int,
-) -> str:
+) -> str | ToolResult:
     """Run ripgrep by explicit argv (never shell) and format like the fallback."""
     args = [rg, "--no-heading", "--line-number"]
     if case_insensitive:
@@ -191,13 +196,25 @@ async def _grep_with_rg(
         )
         stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=RG_TIMEOUT)
     except TimeoutError:
-        return f"Error: ripgrep timed out after {RG_TIMEOUT}s for pattern '{pattern}'."
+        return ToolResult(
+            output=f"Error: ripgrep timed out after {RG_TIMEOUT}s for pattern '{pattern}'.",
+            is_error=True,
+            error_type="ToolError",
+        )
     except OSError as err:
-        return f"Error: failed to run ripgrep: {err}"
+        return ToolResult(
+            output=f"Error: failed to run ripgrep: {err}",
+            is_error=True,
+            error_type="ToolError",
+        )
 
     if proc.returncode not in (0, 1):
         err_text = stderr.decode("utf-8", errors="replace").strip()
-        return f"Error: ripgrep failed (exit {proc.returncode}): {err_text}"
+        return ToolResult(
+            output=f"Error: ripgrep failed (exit {proc.returncode}): {err_text}",
+            is_error=True,
+            error_type="ToolError",
+        )
 
     text = stdout.decode("utf-8", errors="replace")
     lines = [ln for ln in text.splitlines() if ln]
@@ -266,16 +283,32 @@ def create_filesystem_tools(
         read_only=True,
         requires=frozenset({Capability.READ}),
     )
-    def read_file(path: str, offset: int = 0, limit: int = DEFAULT_READ_LIMIT) -> str:
+    def read_file(path: str, offset: int = 0, limit: int = DEFAULT_READ_LIMIT) -> str | ToolResult:
         target = resolve_and_validate_path(root, path)
         if not target.exists():
-            return f"Error: File '{path}' does not exist."
+            return ToolResult(
+                output=f"Error: File '{path}' does not exist.",
+                is_error=True,
+                error_type="ToolError",
+            )
         if not target.is_file():
-            return f"Error: Path '{path}' is not a regular file."
+            return ToolResult(
+                output=f"Error: Path '{path}' is not a regular file.",
+                is_error=True,
+                error_type="ToolError",
+            )
         if offset < 0:
-            return f"Error: offset must be >= 0, got {offset}."
+            return ToolResult(
+                output=f"Error: offset must be >= 0, got {offset}.",
+                is_error=True,
+                error_type="ToolError",
+            )
         if limit < 1:
-            return f"Error: limit must be >= 1, got {limit}."
+            return ToolResult(
+                output=f"Error: limit must be >= 1, got {limit}.",
+                is_error=True,
+                error_type="ToolError",
+            )
 
         lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
         total = len(lines)
@@ -295,7 +328,7 @@ def create_filesystem_tools(
         description="Write text content to a file in the workspace.",
         requires=frozenset({Capability.WRITE}),
     )
-    def write_file(path: str, content: str) -> str:
+    def write_file(path: str, content: str) -> str | ToolResult:
         target = resolve_and_validate_path(root, path)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content, encoding="utf-8")
@@ -310,24 +343,49 @@ def create_filesystem_tools(
         ),
         requires=frozenset({Capability.WRITE}),
     )
-    def edit_file(path: str, old_str: str, new_str: str, replace_all: bool = False) -> str:
+    def edit_file(
+        path: str, old_str: str, new_str: str, replace_all: bool = False
+    ) -> str | ToolResult:
         target = resolve_and_validate_path(root, path)
         if not target.exists():
-            return f"Error: File '{path}' does not exist."
+            return ToolResult(
+                output=f"Error: File '{path}' does not exist.",
+                is_error=True,
+                error_type="ToolError",
+            )
         if not tracker.was_read(target):
-            return f"Error: File '{path}' has not been read in this session. Call read_file first."
+            return ToolResult(
+                output=(
+                    f"Error: File '{path}' has not been read in this session. "
+                    "Call read_file first."
+                ),
+                is_error=True,
+                error_type="ToolError",
+            )
         if old_str == new_str:
-            return "Error: old_str and new_str are identical — no-op edit rejected."
+            return ToolResult(
+                output="Error: old_str and new_str are identical — no-op edit rejected.",
+                is_error=True,
+                error_type="ToolError",
+            )
 
         content = target.read_text(encoding="utf-8")
         count = content.count(old_str)
         if count == 0:
-            return f"Error: Target string not found in '{path}'."
+            return ToolResult(
+                output=f"Error: Target string not found in '{path}'.",
+                is_error=True,
+                error_type="ToolError",
+            )
         if count > 1 and not replace_all:
-            return (
-                f"Error: Target string appears {count} times in '{path}'. "
-                "Set replace_all=True to replace all, or widen old_str to make "
-                "it unique."
+            return ToolResult(
+                output=(
+                    f"Error: Target string appears {count} times in '{path}'. "
+                    "Set replace_all=True to replace all, or widen old_str to make "
+                    "it unique."
+                ),
+                is_error=True,
+                error_type="ToolError",
             )
 
         if replace_all:
@@ -348,29 +406,56 @@ def create_filesystem_tools(
         ),
         requires=frozenset({Capability.WRITE}),
     )
-    def multi_edit(path: str, edits: list[FileEdit]) -> str:
+    def multi_edit(path: str, edits: list[FileEdit]) -> str | ToolResult:
         # Coerce raw dicts (from direct .func calls) to FileEdit models; the
         # registry passes arguments through without pydantic validation.
         edits = [FileEdit.model_validate(e) for e in edits]
         target = resolve_and_validate_path(root, path)
         if not target.exists():
-            return f"Error: File '{path}' does not exist."
+            return ToolResult(
+                output=f"Error: File '{path}' does not exist.",
+                is_error=True,
+                error_type="ToolError",
+            )
         if not tracker.was_read(target):
-            return f"Error: File '{path}' has not been read in this session. Call read_file first."
+            return ToolResult(
+                output=(
+                    f"Error: File '{path}' has not been read in this session. "
+                    "Call read_file first."
+                ),
+                is_error=True,
+                error_type="ToolError",
+            )
         if not edits:
-            return "Error: edits list is empty."
+            return ToolResult(
+                output="Error: edits list is empty.",
+                is_error=True,
+                error_type="ToolError",
+            )
 
         content = target.read_text(encoding="utf-8")
         for idx, edit in enumerate(edits):
             if edit.old_str == edit.new_str:
-                return f"Error: edit #{idx + 1} is a no-op (old_str == new_str)."
+                return ToolResult(
+                    output=f"Error: edit #{idx + 1} is a no-op (old_str == new_str).",
+                    is_error=True,
+                    error_type="ToolError",
+                )
             count = content.count(edit.old_str)
             if count == 0:
-                return f"Error: edit #{idx + 1} target string not found in '{path}'."
+                return ToolResult(
+                    output=f"Error: edit #{idx + 1} target string not found in '{path}'.",
+                    is_error=True,
+                    error_type="ToolError",
+                )
             if count > 1 and not edit.replace_all:
-                return (
-                    f"Error: edit #{idx + 1} target string appears {count} times "
-                    f"in '{path}'. Set replace_all=True or widen old_str."
+                return ToolResult(
+                    output=(
+                        f"Error: edit #{idx + 1} target string appears {count} times "
+                        f"in '{path}'. Set replace_all=True or widen old_str."
+                    ),
+                    is_error=True,
+                    error_type="ToolError",
                 )
             content = (
                 content.replace(edit.old_str, edit.new_str)
@@ -400,16 +485,32 @@ def create_filesystem_tools(
         glob_filter: str | None = None,
         case_insensitive: bool = False,
         head_limit: int = DEFAULT_GREP_HEAD_LIMIT,
-    ) -> str:
+    ) -> str | ToolResult:
         search_dir = resolve_and_validate_path(root, relative_dir)
         if not search_dir.is_dir():
-            return f"Error: Path '{relative_dir}' is not a directory."
+            return ToolResult(
+                output=f"Error: Path '{relative_dir}' is not a directory.",
+                is_error=True,
+                error_type="ToolError",
+            )
         if output_mode not in ("content", "files_with_matches", "count"):
-            return f"Error: invalid output_mode '{output_mode}'."
+            return ToolResult(
+                output=f"Error: invalid output_mode '{output_mode}'.",
+                is_error=True,
+                error_type="ToolError",
+            )
         if context_lines < 0:
-            return f"Error: context_lines must be >= 0, got {context_lines}."
+            return ToolResult(
+                output=f"Error: context_lines must be >= 0, got {context_lines}.",
+                is_error=True,
+                error_type="ToolError",
+            )
         if head_limit < 1:
-            return f"Error: head_limit must be >= 1, got {head_limit}."
+            return ToolResult(
+                output=f"Error: head_limit must be >= 1, got {head_limit}.",
+                is_error=True,
+                error_type="ToolError",
+            )
 
         rg = shutil.which("rg")
         if rg is not None:
@@ -444,10 +545,14 @@ def create_filesystem_tools(
         read_only=True,
         requires=frozenset({Capability.READ}),
     )
-    def glob(pattern: str, relative_dir: str = ".") -> str:
+    def glob(pattern: str, relative_dir: str = ".") -> str | ToolResult:
         search_dir = resolve_and_validate_path(root, relative_dir)
         if not search_dir.is_dir():
-            return f"Error: Path '{relative_dir}' is not a directory."
+            return ToolResult(
+                output=f"Error: Path '{relative_dir}' is not a directory.",
+                is_error=True,
+                error_type="ToolError",
+            )
 
         matches: list[str] = []
         try:
@@ -460,7 +565,11 @@ def create_filesystem_tools(
                     if len(matches) >= 200:
                         break
         except (ValueError, OSError) as err:
-            return f"Error: glob failed for pattern '{pattern}': {err}"
+            return ToolResult(
+                output=f"Error: glob failed for pattern '{pattern}': {err}",
+                is_error=True,
+                error_type="ToolError",
+            )
 
         if not matches:
             return f"No files matched pattern '{pattern}'."
@@ -475,12 +584,20 @@ def create_filesystem_tools(
         read_only=True,
         requires=frozenset({Capability.READ}),
     )
-    def list_directory(relative_dir: str = ".") -> str:
+    def list_directory(relative_dir: str = ".") -> str | ToolResult:
         target = resolve_and_validate_path(root, relative_dir)
         if not target.exists():
-            return f"Error: Path '{relative_dir}' does not exist."
+            return ToolResult(
+                output=f"Error: Path '{relative_dir}' does not exist.",
+                is_error=True,
+                error_type="ToolError",
+            )
         if not target.is_dir():
-            return f"Error: Path '{relative_dir}' is not a directory."
+            return ToolResult(
+                output=f"Error: Path '{relative_dir}' is not a directory.",
+                is_error=True,
+                error_type="ToolError",
+            )
 
         entries: list[str] = []
         for entry in sorted(target.iterdir()):
@@ -501,12 +618,16 @@ def create_filesystem_tools(
         read_only=False,
         requires=frozenset(),
     )
-    async def todo_write(items: list[TodoItem]) -> str:
+    async def todo_write(items: list[TodoItem]) -> str | ToolResult:
         # Coerce raw dicts (from direct .func calls) to TodoItem models.
         items = [TodoItem.model_validate(it) for it in items]
         in_progress = [it for it in items if it.status == "in_progress"]
         if len(in_progress) > 1:
-            return f"Error: at most one item may be 'in_progress', got {len(in_progress)}."
+            return ToolResult(
+                output=f"Error: at most one item may be 'in_progress', got {len(in_progress)}.",
+                is_error=True,
+                error_type="ToolError",
+            )
         if event_bus is not None:
             await event_bus.publish(TodoEvent(session_id=session_id, items=tuple(items)))
         rendered = "\n".join(f"- [{it.status}] {it.content}" for it in items)

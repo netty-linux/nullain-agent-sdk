@@ -5,8 +5,10 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from nullain.authority import Capability
+from nullain.errors import ToolError
 from nullain.llm.types import FunctionSpec, ToolSpec
 from nullain.tools.permissions import PermissionLevel
+from nullain.tools.result import ToolResult
 
 #: Loads a tool's full JSON input schema on demand (P4.26 deferred schemas).
 #: Returns the ``parameters`` dict for the tool's ``FunctionSpec``.
@@ -77,11 +79,22 @@ class RegisteredTool:
         self.spec.function.parameters = await self._schema_loader()
         self._hydrated = True
 
-    async def execute(self, kwargs: dict[str, Any]) -> Any:
-        """Execute tool function handling both sync and async functions."""
-        if self.is_async:
-            return await self.func(**kwargs)
-        return self.func(**kwargs)
+    async def execute(self, kwargs: dict[str, Any]) -> ToolResult:
+        """Execute the tool function, returning a structured :class:`ToolResult`.
+
+        Compatibility bridge: a tool that returns a plain ``str`` (legacy
+        plugins, MCP-backed tools) is wrapped in ``ToolResult(output=...,
+        is_error=False)``. A tool that already returns a ``ToolResult`` is
+        passed through unchanged. A raised ``ToolError`` is converted to a
+        structural error result so the loop never relies on string prefixes.
+        """
+        try:
+            raw = await self.func(**kwargs) if self.is_async else self.func(**kwargs)
+        except ToolError as err:
+            return ToolResult(output=str(err), is_error=True, error_type="ToolError")
+        if isinstance(raw, ToolResult):
+            return raw
+        return ToolResult(output=str(raw), is_error=False)
 
 
 def tool(

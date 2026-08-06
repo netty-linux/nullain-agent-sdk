@@ -23,6 +23,7 @@ RunStatus = Literal[
     "context_exhausted",
     "verification_failed",
     "loop_detected",
+    "cancelled",
     "error",
 ]
 
@@ -40,7 +41,10 @@ class RunResult(BaseModel):
             ``timeout`` and ``context_exhausted`` are terminal-resource
             failures. ``loop_detected`` means the agent repeated the same
             tool calls for several consecutive steps and was stopped.
-            ``error`` covers unexpected exceptions.
+            ``cancelled`` means the run was cancelled (e.g. via a daemon
+            ``session.cancel`` or closed stdin) and returned a structured
+            outcome instead of a raw exception. ``error`` covers unexpected
+            exceptions.
         success: Convenience boolean — True only for ``status == "success"``.
         final_text: The model's final answer text (may be empty on terminal
             failures before any final answer was produced).

@@ -136,7 +136,7 @@ class OllamaCloudProvider(LLMProvider):
                     tool_calls = []
                     for idx, tc in enumerate(response_native.message.tool_calls):
                         tc_id = tc.id or f"call_{idx}"
-                        parsed_args: dict[str, object] = {}
+                        parsed_args: dict[str, object] | str = {}
                         if isinstance(tc.function.arguments, dict):
                             parsed_args = tc.function.arguments
                         elif tc.function.arguments.strip():
@@ -145,8 +145,12 @@ class OllamaCloudProvider(LLMProvider):
                                 if isinstance(parsed, dict):
                                     parsed_dict = cast(dict[str, object], parsed)
                                     parsed_args = {str(k): v for k, v in parsed_dict.items()}
+                                else:
+                                    parsed_args = tc.function.arguments
                             except json.JSONDecodeError:
-                                pass
+                                # Streaming fragment: keep the raw string so the
+                                # loop can merge it with later chunks (M10 D4).
+                                parsed_args = tc.function.arguments
 
                         tool_calls.append(
                             ToolCall(
@@ -185,7 +189,7 @@ class OllamaCloudProvider(LLMProvider):
                         tool_calls = []
                         for idx, tc in enumerate(delta.tool_calls):
                             tc_id = tc.id or f"call_{idx}"
-                            parsed_args: dict[str, object] = {}
+                            parsed_args: dict[str, object] | str = {}
                             if isinstance(tc.function.arguments, dict):
                                 parsed_args = tc.function.arguments
                             elif tc.function.arguments.strip():
@@ -194,8 +198,12 @@ class OllamaCloudProvider(LLMProvider):
                                     if isinstance(parsed, dict):
                                         parsed_dict = cast(dict[str, object], parsed)
                                         parsed_args = {str(k): v for k, v in parsed_dict.items()}
+                                    else:
+                                        parsed_args = tc.function.arguments
                                 except json.JSONDecodeError:
-                                    pass
+                                    # Streaming fragment: keep the raw string so the
+                                    # loop can merge it with later chunks (M10 D4).
+                                    parsed_args = tc.function.arguments
 
                             tool_calls.append(
                                 ToolCall(

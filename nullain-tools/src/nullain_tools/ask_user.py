@@ -11,6 +11,7 @@ than hanging forever.
 from collections.abc import Awaitable, Callable
 
 from nullain.tools import RegisteredTool, tool
+from nullain.tools.result import ToolResult
 
 AskUserCallback = Callable[[str], Awaitable[str]]
 
@@ -23,16 +24,34 @@ def create_ask_user_tool(callback: AskUserCallback | None = None) -> RegisteredT
             "Use when critical information is missing and cannot be inferred."
         ),
     )
-    async def ask_user(question: str) -> str:
+    async def ask_user(question: str) -> str | ToolResult:
         if not question.strip():
-            return "Error: ask_user requires a non-empty question."
+            return ToolResult(
+                output="Error: ask_user requires a non-empty question.",
+                is_error=True,
+                error_type="ToolError",
+            )
         if callback is None:
-            return "Error: ask_user is unavailable (no user-interaction channel configured)."
+            return ToolResult(
+                output="Error: ask_user is unavailable (no user-interaction channel configured).",
+                is_error=True,
+                error_type="ToolError",
+            )
         try:
             answer = await callback(question)
         except Exception as err:
-            return f"Error: ask_user failed: {err}"
-        return answer if answer.strip() else "Error: ask_user received an empty answer."
+            return ToolResult(
+                output=f"Error: ask_user failed: {err}",
+                is_error=True,
+                error_type="ToolError",
+            )
+        if answer.strip():
+            return answer
+        return ToolResult(
+            output="Error: ask_user received an empty answer.",
+            is_error=True,
+            error_type="ToolError",
+        )
 
     return ask_user
 

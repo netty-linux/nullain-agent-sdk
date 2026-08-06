@@ -41,6 +41,7 @@ from nullain.mcp.transport import MCPTransport
 from nullain.tools.decorator import RegisteredTool
 from nullain.tools.permissions import PermissionLevel
 from nullain.tools.registry import ToolRegistry
+from nullain.tools.result import ToolResult
 
 
 class MCPClient:
@@ -149,12 +150,12 @@ class MCPClient:
             details={"name": name},
         )
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]) -> str:
-        """Invoke a remote tool and return its text content.
+    async def call_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+        """Invoke a remote tool and return a structured :class:`ToolResult`.
 
         Non-text content items are rendered as placeholders. If the server
-        signals ``isError``, the concatenated content is returned prefixed so
-        the Act loop's error-detection treats it as a failed tool call.
+        signals ``isError``, the result is marked ``is_error=True`` so the Act
+        loop detects the failure structurally rather than by string prefix.
         """
         result = await self._request(METHOD_TOOLS_CALL, {"name": name, "arguments": arguments})
         from nullain.mcp.protocol import MCPToolResult
@@ -162,10 +163,12 @@ class MCPClient:
         parsed = MCPToolResult.model_validate(result or {})
         rendered = "\n".join(item.render() for item in parsed.content).strip()
         if parsed.is_error:
-            # Mirror the bundled tools' failure convention so self-correction
-            # and loop-detection in AgentLoop recognize the failure.
-            return f"Error: MCP tool '{name}' returned an error: {rendered}"
-        return rendered
+            return ToolResult(
+                output=f"Error: MCP tool '{name}' returned an error: {rendered}",
+                is_error=True,
+                error_type="ToolError",
+            )
+        return ToolResult(output=rendered, is_error=False)
 
     async def close(self) -> None:
         """Tear down the underlying transport."""
@@ -283,7 +286,7 @@ async def register_mcp_tools(
         spec = _make_tool_spec(client.name, tool)
         remote_name = tool.name
 
-        async def _proxy(_remote: str = remote_name, **kwargs: Any) -> str:
+        async def _proxy(_remote: str = remote_name, **kwargs: Any) -> ToolResult:
             return await client.call_tool(_remote, dict(kwargs))
 
         if defer_schemas:
