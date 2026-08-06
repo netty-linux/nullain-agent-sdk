@@ -43,13 +43,21 @@ class EventStore:
         self._conn: aiosqlite.Connection | None = None
 
     async def initialize(self) -> None:
-        """Initialize database connection and schema."""
+        """Initialize database connection and schema.
+
+        ``seq`` is an autoincrementing insertion counter and is the authoritative
+        ordering key. ``timestamp`` alone is not: ``time.time()`` has ~15.6 ms
+        resolution on Windows, so consecutively appended events routinely share
+        one timestamp, and any tiebreaker on ``id`` (a random UUID) would order
+        them arbitrarily — silently corrupting the trajectory the agent replays.
+        """
         if self._conn is None:
             self._conn = await aiosqlite.connect(self.db_path)
             await self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS events (
-                    id TEXT PRIMARY KEY,
+                    seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT NOT NULL UNIQUE,
                     session_id TEXT NOT NULL,
                     timestamp REAL NOT NULL,
                     event_type TEXT NOT NULL,
@@ -88,17 +96,20 @@ class EventStore:
         await self._conn.commit()
 
     async def get_session_events(self, session_id: str) -> list[BaseEvent]:
-        """Fetch all events for a given session sorted by timestamp."""
+        """Fetch all events for a session in insertion order.
+
+        Ordering is by ``seq`` (the insertion counter), not by ``timestamp``:
+        the clock is too coarse on some platforms to separate consecutive
+        appends, and event sourcing requires the exact order events were
+        recorded in.
+        """
         if self._conn is None:
             await self.initialize()
 
         if self._conn is None:
             raise RuntimeError("Failed to initialize EventStore database connection")
 
-        query = (
-            "SELECT event_type, payload FROM events WHERE session_id = ? "
-            "ORDER BY timestamp ASC, id ASC"
-        )
+        query = "SELECT event_type, payload FROM events WHERE session_id = ? ORDER BY seq ASC"
         async with self._conn.execute(query, (session_id,)) as cursor:
             rows = await cursor.fetchall()
 
