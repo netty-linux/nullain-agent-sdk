@@ -199,9 +199,7 @@ async def test_agent_loop_verify_fix_reverify(tmp_path: Path) -> None:
         usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
     )
 
-    fake_provider = FakeSequenceProvider(
-        [spec_chunk, premature_final, fix_tool_call, fixed_final]
-    )
+    fake_provider = FakeSequenceProvider([spec_chunk, premature_final, fix_tool_call, fixed_final])
     bus = EventBus()
     events_log: list[BaseEvent] = []
 
