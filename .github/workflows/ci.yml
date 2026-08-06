@@ -6,12 +6,52 @@ on:
   pull_request:
     branches: [ main, master ]
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  check:
-    name: Lint, Typecheck & Test
+  # Lint and typecheck are platform-independent: running them once keeps the
+  # matrix fast, and a formatting or typing error is not OS-specific.
+  static:
+    name: Lint & Typecheck
     runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Ruff lint
+        run: uv run ruff check .
+
+      - name: Ruff format check
+        run: uv run ruff format --check .
+
+      - name: Pyright type check
+        run: uv run pyright
+
+  # The test matrix spans all three platforms because the sandbox adapters
+  # (landlock / seatbelt / Windows Job Object), the subprocess launcher and the
+  # path-validation logic differ per OS — a green Linux run proves nothing
+  # about the Windows Job Object adapter.
+  test:
+    name: Test (${{ matrix.os }}, py${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
@@ -29,16 +69,89 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-packages
 
-      - name: Run Ruff Lint & Format Check
-        run: |
-          uv run ruff check .
-          uv run ruff format --check .
+      - name: Install ripgrep (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ripgrep
 
-      - name: Run Pyright Type Check
-        run: uv run pyright
+      - name: Install ripgrep (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ripgrep
 
-      - name: Run Pytest
+      - name: Install ripgrep (Windows)
+        if: runner.os == 'Windows'
+        run: choco install ripgrep -y
+
+      # Coverage is gated on the primary combination only. Enforcing the
+      # threshold on every platform would fail runners where a platform's
+      # sandbox adapter is legitimately unreachable.
+      - name: Pytest with coverage
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        run: uv run pytest --cov --cov-report=term --cov-report=xml
+
+      - name: Pytest
+        if: matrix.os != 'ubuntu-latest' || matrix.python-version != '3.12'
         run: uv run pytest
 
-      - name: Run Pip Audit
+      - name: Upload coverage artifact
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-xml
+          path: coverage.xml
+          if-no-files-found: error
+
+  audit:
+    name: Dependency Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Pip audit
         run: uv run pip-audit
+
+  # Proves the three distributions actually build and that their metadata is
+  # valid for PyPI. Catches a broken package long before a release is cut.
+  build:
+    name: Build & Verify Distributions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build all distributions
+        run: |
+          uv build --package nullain-sdk --out-dir dist
+          uv build --package nullain-tools --out-dir dist
+          uv build --package nullain-agentd --out-dir dist
+
+      - name: Verify distribution metadata
+        run: uvx twine check dist/*
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/*
+          if-no-files-found: error
