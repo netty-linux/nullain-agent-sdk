@@ -22,6 +22,7 @@ ollama_base_url = "https://ollama.com"
 max_steps = 100
 max_tokens = 2000000
 timeout = 300.0
+bash_timeout = 300.0
 ```
 
 - `max_steps` — maximum ReAct loop iterations for one run. The default (100)
@@ -37,6 +38,10 @@ timeout = 300.0
   genuinely stuck loop is still caught by loop detection, not by token
   spend).
 - `timeout` — per-run wall-clock timeout in seconds.
+- `bash_timeout` — wall-clock timeout in seconds for a single bash/git
+  subprocess. The default (300s) is sized to let a real dependency install,
+  test run, or build finish rather than being killed mid-command; a
+  genuinely hung process is still killed at this cap.
 
 `nullain run --max-steps N` / `--max-tokens N` / `--unlimited-tokens`
 override these per invocation without editing the file. Passing `max_steps`/

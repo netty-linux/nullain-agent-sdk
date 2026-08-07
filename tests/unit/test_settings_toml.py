@@ -74,6 +74,10 @@ def test_load_settings_defaults_when_no_cwd_toml(
     assert settings.agent.max_steps == 100
     assert settings.agent.max_tokens == 2_000_000
     assert settings.agent.timeout == 300.0
+    # Default bash/git subprocess timeout (M20): 300s, not the old
+    # hardcoded 120s that killed real dependency installs, test suites,
+    # and builds mid-command.
+    assert settings.agent.bash_timeout == 300.0
 
 
 def test_load_settings_agent_section_from_toml(tmp_path: Path) -> None:
@@ -85,12 +89,14 @@ def test_load_settings_agent_section_from_toml(tmp_path: Path) -> None:
 max_steps = 50
 max_tokens = 5000000
 timeout = 600.0
+bash_timeout = 120.0
 """
     )
     settings = load_settings(toml)
     assert settings.agent.max_steps == 50
     assert settings.agent.max_tokens == 5_000_000
     assert settings.agent.timeout == 600.0
+    assert settings.agent.bash_timeout == 120.0
 
 
 def test_agent_config_max_tokens_none_disables_ceiling() -> None:

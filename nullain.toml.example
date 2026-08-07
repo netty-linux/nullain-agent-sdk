@@ -15,6 +15,10 @@ ollama_base_url = "https://ollama.com"
 max_steps = 100
 max_tokens = 2000000
 timeout = 300.0
+# Wall-clock timeout for a single bash/git subprocess. 300s gives a real
+# dependency install, test run, or build room to finish instead of being
+# killed mid-command; a genuinely hung process is still killed at this cap.
+bash_timeout = 300.0
 
 [router]
 fallback_chain = ["deep", "balanced", "fast"]
