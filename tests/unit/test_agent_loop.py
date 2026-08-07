@@ -843,7 +843,7 @@ def test_batch_by_conflict_disjoint_writes_run_together() -> None:
         ToolCall(id="c", name="write_file", arguments={"path": "c.txt", "content": "C"}),
     ]
 
-    batches = AgentLoop._batch_by_conflict(calls, registry)
+    batches = AgentLoop._batch_by_conflict(calls, registry)  # type: ignore[reportPrivateUsage]
     assert len(batches) == 1
     assert {tc.id for tc in batches[0]} == {"a", "b", "c"}
 
@@ -858,7 +858,7 @@ def test_batch_by_conflict_same_file_write_write_serializes() -> None:
         ToolCall(id="b", name="write_file", arguments={"path": "same.txt", "content": "B"}),
     ]
 
-    batches = AgentLoop._batch_by_conflict(calls, registry)
+    batches = AgentLoop._batch_by_conflict(calls, registry)  # type: ignore[reportPrivateUsage]
     assert [{tc.id for tc in b} for b in batches] == [{"a"}, {"b"}]
 
 
@@ -872,7 +872,7 @@ def test_batch_by_conflict_read_then_write_same_file_serializes() -> None:
         ToolCall(id="w", name="write_file", arguments={"path": "same.txt", "content": "X"}),
     ]
 
-    batches = AgentLoop._batch_by_conflict(calls, registry)
+    batches = AgentLoop._batch_by_conflict(calls, registry)  # type: ignore[reportPrivateUsage]
     assert [{tc.id for tc in b} for b in batches] == [{"r"}, {"w"}]
 
 
@@ -886,7 +886,7 @@ def test_batch_by_conflict_all_read_only_disjoint_paths_run_together() -> None:
         ToolCall(id="r2", name="read_file", arguments={"path": "b.txt"}),
     ]
 
-    batches = AgentLoop._batch_by_conflict(calls, registry)
+    batches = AgentLoop._batch_by_conflict(calls, registry)  # type: ignore[reportPrivateUsage]
     assert len(batches) == 1
     assert {tc.id for tc in batches[0]} == {"r1", "r2"}
 
@@ -902,7 +902,7 @@ def test_batch_by_conflict_bash_calls_serialize_with_each_other() -> None:
         ToolCall(id="b2", name="bash", arguments={"command_args": ["echo", "2"]}),
     ]
 
-    batches = AgentLoop._batch_by_conflict(calls, registry)
+    batches = AgentLoop._batch_by_conflict(calls, registry)  # type: ignore[reportPrivateUsage]
     assert [{tc.id for tc in b} for b in batches] == [{"b1"}, {"b2"}]
 
 
