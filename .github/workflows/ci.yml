@@ -110,6 +110,11 @@ jobs:
           name: coverage-data-${{ matrix.os }}-${{ matrix.python-version }}
           path: .coverage.${{ matrix.os }}.${{ matrix.python-version }}
           if-no-files-found: error
+          # upload-artifact excludes dotfiles by default — the renamed data
+          # file (.coverage.<os>.<py>) still starts with "." and was
+          # silently uploaded as an empty artifact without this, which
+          # `coverage combine` then had nothing to merge.
+          include-hidden-files: true
 
   # Merges every platform's coverage data into one report so the sandbox
   # adapters (landlock on Linux, seatbelt on macOS, windows_job on Windows) —
