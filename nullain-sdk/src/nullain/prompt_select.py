@@ -27,19 +27,29 @@ else:
 
 
 def _read_key_windows() -> str:
-    """Read one keypress on Windows, returning a normalized key name."""
-    ch = msvcrt.getch()
+    """Read one keypress on Windows, returning a normalized key name.
+
+    pyright type-checks this repo against a single host platform (no
+    ``pythonPlatform`` pin in ``pyproject.toml``): on Linux/macOS CI runners
+    this whole branch is dead code as far as static analysis is concerned
+    and ``msvcrt`` is unresolvable — the Windows CI runner (and Windows dev
+    machines) type-check it for real. Ignored rather than worked around so a
+    real regression on that platform still fails CI.
+    """
+    # fmt: off
+    ch = msvcrt.getch()  # pyright: ignore[reportUndefinedVariable, reportUnknownVariableType, reportUnknownMemberType]
     if ch in (b"\x00", b"\xe0"):  # arrow/function key prefix
-        ch2 = msvcrt.getch()
-        return {b"H": "up", b"P": "down"}.get(ch2, "")
+        ch2 = msvcrt.getch()  # pyright: ignore[reportUndefinedVariable, reportUnknownVariableType, reportUnknownMemberType]
+        return {b"H": "up", b"P": "down"}.get(ch2, "")  # pyright: ignore[reportUnknownArgumentType]
     if ch == b"\r":
         return "enter"
     if ch == b"\x03":  # Ctrl-C
         raise KeyboardInterrupt
     try:
-        return ch.decode("utf-8", errors="ignore")
+        return ch.decode("utf-8", errors="ignore")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType]
     except UnicodeDecodeError:
         return ""
+    # fmt: on
 
 
 def _read_key_posix() -> str:
