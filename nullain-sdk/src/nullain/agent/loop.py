@@ -24,6 +24,7 @@ from nullain.errors import (
     BudgetExceededError,
     ContextWindowExhaustedError,
     NullainError,
+    ProviderError,
     ToolError,
     ToolPermissionError,
 )
@@ -1302,6 +1303,15 @@ class AgentLoop:
         except ContextWindowExhaustedError as err:
             terminal_status = "context_exhausted"
             terminal_error = str(err)
+        except ProviderError as err:
+            # A provider/API failure (bad request, auth, rate limit, ...)
+            # that exhausted the provider's own retries. Reported distinctly
+            # from "timeout" — this is not a step-budget or wall-clock issue,
+            # it is the provider rejecting or failing the request itself, and
+            # collapsing it into "timeout" (as the broader NullainError catch
+            # below used to) hid the real cause from RunResult.error.
+            terminal_status = "error"
+            terminal_error = str(err)
         except NullainError as err:
             # Timeout (raised as a plain NullainError) and any other domain
             # failure surfaced from the act phase.
@@ -1419,7 +1429,28 @@ class AgentLoop:
             Complexity.MEDIUM,
             Complexity.HIGH,
         ):
-            active_spec = await self._generate_spec(prompt, active_model, system_prompt)
+            # A provider failure during Plan (e.g. the API rejecting the
+            # request, or exhausted-retry auth/rate-limit errors) must not
+            # propagate as a raw exception — run_result() promises to always
+            # return a structured RunResult for domain failures, and this
+            # call sits outside the Act phase's own ProviderError handling.
+            try:
+                active_spec = await self._generate_spec(prompt, active_model, system_prompt)
+            except ProviderError as err:
+                err_ev = ErrorEvent(
+                    session_id=sess_id,
+                    error_type="ProviderError",
+                    message=f"Plan phase failed: {err}",
+                )
+                await self._emit(err_ev)
+                return RunResult(
+                    session_id=sess_id,
+                    status="error",
+                    success=False,
+                    model=active_model,
+                    intent=intent_res.intent_type,
+                    error=str(err),
+                )
             self.spec_validator.validate_spec(active_spec)
             spec_ev = SpecCreatedEvent(
                 session_id=sess_id,
@@ -1721,6 +1752,8 @@ class AgentLoop:
             raise ContextWindowExhaustedError(result.error or "Context window exhausted")
         if result.status == "timeout":
             raise NullainError(result.error or "Agent loop timed out")
+        if result.status == "error":
+            raise ProviderError(result.error or "Agent run failed with a provider error")
         if result.status == "cancelled":
             # Legacy run()/run_streaming() callers still observe cancellation
             # as an exception; run_result() returns the structured status.

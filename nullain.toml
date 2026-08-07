@@ -1,0 +1,35 @@
+# Nullain Agent SDK — Active Configuration
+#
+# Ollama Cloud API key is read from the OLLAMA_API_KEY environment variable
+# (or NULLAIN_OLLAMA_API_KEY), never committed here.
+
+ollama_base_url = "https://ollama.com"
+
+[router]
+fallback_chain = ["deep", "balanced", "fast"]
+# Classifies task intent/complexity when the deterministic heuristics are not
+# confident. Using the fast-tier model keeps classification cheap.
+classifier_model = "deepseek-v4-flash:0731-cloud"
+
+[router.tiers.fast]
+# Quick classification / low-complexity tasks. deepseek-v4-flash is fast and
+# codes well, making it a good default for LOW-complexity work.
+models = ["deepseek-v4-flash:0731-cloud"]
+max_context = 64000
+
+[router.tiers.balanced]
+# Most coding tasks land here. glm-5.2 has strong tool-calling and long-horizon
+# task handling — the tier that matters most for agentic coding work.
+models = ["glm-5.2:cloud"]
+max_context = 128000
+
+[router.tiers.deep]
+# High-complexity tasks, and anything touching images/computer vision.
+models = ["gemma4:31b-cloud"]
+max_context = 128000
+
+[sandbox]
+enabled = true
+required = true
+allow_paths = []
+deny_network = true

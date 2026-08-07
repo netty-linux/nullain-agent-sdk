@@ -1,5 +1,6 @@
 """Nullain Agent SDK — LLM Data Types and Schemas."""
 
+import json
 from typing import Any, Literal
 
 from pydantic import BaseModel, Field
@@ -57,7 +58,18 @@ class ChatMessage(BaseModel):
     tool_call_id: str | None = None
 
     def to_api_dict(self) -> dict[str, Any]:
-        """Convert to dict matching standard API format."""
+        """Convert to dict matching standard API format.
+
+        The OpenAI-compatible chat-completions schema (which Ollama Cloud
+        implements) requires ``function.arguments`` to be a JSON-encoded
+        *string*, never a raw object — sending an object there is rejected
+        with a 400 ("cannot unmarshal object into ... arguments of type
+        string"). ``ToolCall.arguments`` is a ``dict | str`` internally (a
+        dict once parsed/executed; occasionally a raw string mid-stream), so
+        it must be re-serialized to a string here regardless of which form
+        it is currently in before round-tripping an assistant turn's
+        tool_calls back into the next request's message history.
+        """
         data: dict[str, Any] = {"role": self.role}
         if self.content is not None:
             data["content"] = self.content
@@ -70,7 +82,14 @@ class ChatMessage(BaseModel):
                 {
                     "id": tc.id,
                     "type": "function",
-                    "function": {"name": tc.name, "arguments": tc.arguments},
+                    "function": {
+                        "name": tc.name,
+                        "arguments": (
+                            tc.arguments
+                            if isinstance(tc.arguments, str)
+                            else json.dumps(tc.arguments)
+                        ),
+                    },
                 }
                 for tc in self.tool_calls
             ]

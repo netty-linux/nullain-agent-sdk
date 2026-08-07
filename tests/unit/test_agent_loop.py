@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 from nullain.agent import AgentLoop, SpawnTask
 from nullain.authority import Authority
-from nullain.errors import BudgetExceededError
+from nullain.errors import BudgetExceededError, ProviderError
 from nullain.events import BaseEvent, ErrorEvent, EventBus
 from nullain.llm import (
     CompletionChunk,
@@ -1326,3 +1326,39 @@ async def test_agent_loop_step_extension_disabled_by_zero_ratio(tmp_path: Path) 
     result = await agent.run_result("Create FACTS.txt file")
     assert result.status == "max_steps"
     assert result.steps == 3
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_provider_error_surfaces_as_error_not_timeout(tmp_path: Path) -> None:
+    """Regression: found via live testing — a ProviderError (e.g. the API
+    rejecting a malformed request, or exhausted-retry auth/rate-limit
+    failures) used to be caught by the generic `except NullainError` in
+    _run_act_phase and reported as status="timeout", hiding the real cause
+    from RunResult.error. It must now surface as its own status="error" with
+    the provider's message preserved."""
+
+    class FailingProvider(LLMProvider):
+        async def generate(self, request: CompletionRequest) -> CompletionChunk:
+            raise ProviderError("Provider request failed with status 400 (bad request)")
+
+        async def stream(self, request: CompletionRequest):
+            raise ProviderError("Provider request failed with status 400 (bad request)")
+            yield  # pragma: no cover - unreachable, satisfies async generator typing
+
+        async def health_check(self) -> bool:
+            return True
+
+    registry = ToolRegistry()
+    register_default_tools(registry, tmp_path)
+    agent = AgentLoop(provider=FailingProvider(), tools=registry, model="m")
+
+    result = await agent.run_result("Do something")
+    assert result.status == "error"
+    assert result.error is not None
+    assert "400" in result.error
+
+    # run() (the exception-raising legacy path) must re-raise ProviderError
+    # specifically, not the generic NullainError timeout re-raise.
+    agent2 = AgentLoop(provider=FailingProvider(), tools=registry, model="m")
+    with pytest.raises(ProviderError):
+        await agent2.run("Do something")

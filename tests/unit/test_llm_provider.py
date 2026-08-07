@@ -8,7 +8,7 @@ from nullain.errors import (
     ProviderRateLimitError,
     ProviderTimeoutError,
 )
-from nullain.llm import ChatMessage, CompletionRequest, OllamaCloudProvider
+from nullain.llm import ChatMessage, CompletionRequest, OllamaCloudProvider, ToolCall
 
 
 @pytest.mark.asyncio
@@ -269,3 +269,93 @@ async def test_native_health_check() -> None:
 
     provider = OllamaCloudProvider(base_url="https://ollama.com", endpoint_type="native")
     assert await provider.health_check() is True
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_ollama_timeout_is_retried_then_succeeds() -> None:
+    """Regression: a request timeout must be retried, not immediately fatal.
+
+    Found via live testing against Ollama Cloud: httpx.TimeoutException was
+    converted straight to ProviderTimeoutError inside the retried block, so
+    tenacity's retry_if_exception_type(TransientHttpError) never matched it
+    and a single slow response aborted the whole call even with
+    max_retries > 1 configured. A route that times out once then succeeds
+    must now return the successful response instead of raising.
+    """
+    route = respx.post("https://ollama.com/v1/chat/completions")
+    route.side_effect = [
+        httpx.TimeoutException("Request timeout"),
+        httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {"role": "assistant", "content": "Recovered!"},
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+        ),
+    ]
+
+    provider = OllamaCloudProvider(base_url="https://ollama.com", max_retries=3)
+    req = CompletionRequest(model="test-model", messages=[ChatMessage(role="user", content="Hi")])
+
+    chunk = await provider.generate(req)
+    assert chunk.delta_text == "Recovered!"
+    assert route.call_count == 2
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_ollama_timeout_raises_after_retries_exhausted() -> None:
+    """A timeout on every attempt still surfaces as ProviderTimeoutError once
+    max_retries is exhausted, distinct from the generic ProviderError used
+    for exhausted network-error retries."""
+    from nullain.errors import ProviderTimeoutError
+
+    respx.post("https://ollama.com/v1/chat/completions").side_effect = httpx.TimeoutException(
+        "Request timeout"
+    )
+
+    provider = OllamaCloudProvider(base_url="https://ollama.com", max_retries=2)
+    req = CompletionRequest(model="test-model", messages=[ChatMessage(role="user", content="Hi")])
+
+    with pytest.raises(ProviderTimeoutError):
+        await provider.generate(req)
+
+
+def test_chat_message_to_api_dict_serializes_tool_call_arguments_as_string() -> None:
+    """Regression: found via live testing against Ollama Cloud, which rejected
+    a follow-up request with HTTP 400 ("cannot unmarshal object into ...
+    arguments of type string"). The OpenAI-compatible schema requires
+    function.arguments to be a JSON-encoded string, but ChatMessage.to_api_dict
+    was passing ToolCall.arguments through as a raw dict when rebuilding an
+    assistant turn's tool_calls for the next request's message history —
+    breaking any multi-step tool-calling conversation on the second turn."""
+    msg = ChatMessage(
+        role="assistant",
+        content=None,
+        tool_calls=[
+            ToolCall(id="call_1", name="write_file", arguments={"path": "a.txt", "content": "hi"})
+        ],
+    )
+    data = msg.to_api_dict()
+    args = data["tool_calls"][0]["function"]["arguments"]
+    assert isinstance(args, str)
+    import json
+
+    assert json.loads(args) == {"path": "a.txt", "content": "hi"}
+
+
+def test_chat_message_to_api_dict_passes_through_string_arguments_unchanged() -> None:
+    """A ToolCall whose arguments are already a string (e.g. mid-stream
+    fragment) should not be double-encoded."""
+    msg = ChatMessage(
+        role="assistant",
+        content=None,
+        tool_calls=[ToolCall(id="call_1", name="write_file", arguments='{"path": "a.txt"}')],
+    )
+    data = msg.to_api_dict()
+    assert data["tool_calls"][0]["function"]["arguments"] == '{"path": "a.txt"}'

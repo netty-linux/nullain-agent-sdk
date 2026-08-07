@@ -38,6 +38,19 @@ class TransientHttpError(Exception):
     pass
 
 
+class TransientTimeoutError(Exception):
+    """Internal exception for retriable request timeouts.
+
+    Kept distinct from :class:`TransientHttpError` so exhausted retries can
+    still surface the right domain exception (:class:`ProviderTimeoutError`
+    vs. the generic :class:`ProviderError`) while both are retried the same
+    way — a single slow response is exactly as recoverable as a single
+    network blip and should not abort the call while retry budget remains.
+    """
+
+    pass
+
+
 class OllamaCloudProvider(LLMProvider):
     """Adapter for Ollama Cloud and OpenAI-compatible Chat APIs."""
 
@@ -259,7 +272,7 @@ class OllamaCloudProvider(LLMProvider):
                 data = cast(dict[str, Any], response.json())
                 return self._parse_chunk_data(data)
             except (httpx.TimeoutException, httpx.ConnectTimeout) as e:
-                raise ProviderTimeoutError(f"Request timed out: {e}") from e
+                raise TransientTimeoutError(f"Request timed out: {e}") from e
             except (httpx.NetworkError, httpx.ConnectError) as e:
                 raise TransientHttpError(f"Network error: {e}") from e
             finally:
@@ -271,10 +284,18 @@ class OllamaCloudProvider(LLMProvider):
                 reraise=True,
                 stop=stop_after_attempt(self.max_retries),
                 wait=wait_random_exponential(min=0.1, max=2.0),
-                retry=retry_if_exception_type(TransientHttpError),
+                # Both a slow response (TransientTimeoutError) and a network
+                # error (TransientHttpError) are worth retrying — a single
+                # timed-out request should not abort the call when
+                # max_retries allows another attempt. Retrying on
+                # ProviderTimeoutError directly would not work here since
+                # that is raised only after retries are exhausted, below.
+                retry=retry_if_exception_type((TransientHttpError, TransientTimeoutError)),
             ):
                 with attempt:
                     return await _make_request()
+        except TransientTimeoutError as err:
+            raise ProviderTimeoutError(f"Retries exhausted: {err}") from err
         except TransientHttpError as err:
             raise ProviderError(f"Transient retries exhausted: {err}") from err
 

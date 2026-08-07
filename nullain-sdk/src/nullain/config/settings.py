@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from nullain.hooks import HooksConfig
@@ -127,6 +127,13 @@ class NullainSettings(BaseSettings):
         env_prefix="NULLAIN_",
         env_nested_delimiter="__",
         extra="ignore",
+        # Required for ollama_api_key's AliasChoices below to still accept
+        # the plain field name ("ollama_api_key") when settings are loaded
+        # from a nullain.toml dict via model_validate() rather than from
+        # environment variables — without this, a validation_alias makes the
+        # field only reachable by that alias, breaking `ollama_api_key = ...`
+        # in the TOML file itself.
+        populate_by_name=True,
     )
 
     router: RouterConfig = Field(default_factory=RouterConfig)
@@ -135,7 +142,14 @@ class NullainSettings(BaseSettings):
     lsp: LSPConfig = Field(default_factory=LSPConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
-    ollama_api_key: str | None = None
+    # Accepts both the prefixed env var (NULLAIN_OLLAMA_API_KEY, consistent
+    # with every other setting here) and the bare OLLAMA_API_KEY — the name
+    # docs/configuration.md always documented and the one other CLIs' API-key
+    # env vars follow (e.g. ANTHROPIC_API_KEY, no tool-specific prefix). The
+    # prefixed alias is listed first so it wins if both happen to be set.
+    ollama_api_key: str | None = Field(
+        default=None, validation_alias=AliasChoices("NULLAIN_OLLAMA_API_KEY", "OLLAMA_API_KEY")
+    )
     ollama_base_url: str = "https://ollama.com"
 
 
