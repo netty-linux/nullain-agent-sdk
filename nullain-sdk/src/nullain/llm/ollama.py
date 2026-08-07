@@ -28,6 +28,7 @@ from nullain.llm.types import (
     ToolCall,
 )
 from nullain.telemetry import get_logger
+from nullain.telemetry import span as telemetry_span
 
 logger: BoundLogger = get_logger("nullain.llm.ollama")
 
@@ -243,6 +244,11 @@ class OllamaCloudProvider(LLMProvider):
     def _handle_error_response(self, response: httpx.Response) -> None:
         status = response.status_code
         text = response.text
+        # A structured log line per non-200 response — previously this
+        # branch only raised, with no observable trace of which status
+        # code came back or why. Truncated so a large HTML/JSON error body
+        # doesn't blow out a log line.
+        logger.warning("llm_http_error_response", status_code=status, body=text[:500])
         if status in (401, 403):
             raise ProviderAuthenticationError(
                 f"Authentication failed with status {status}", details={"response": text}
@@ -260,24 +266,48 @@ class OllamaCloudProvider(LLMProvider):
         payload = self._format_request_payload(request, stream=False)
         url = self._get_url()
         headers = self._get_headers()
+        attempt_count = 0
 
         async def _make_request() -> CompletionChunk:
+            nonlocal attempt_count
+            attempt_count += 1
             client = self._client or httpx.AsyncClient(timeout=self.timeout)
             should_close = self._client is None
-            try:
-                response = await client.post(url, json=payload, headers=headers)
-                if response.status_code != 200:
-                    self._handle_error_response(response)
+            # A span per HTTP attempt (distinct from the loop-level
+            # llm_request span, which covers the whole call including all
+            # retries as one unit): without this, a failure buried inside
+            # AsyncRetrying was invisible in traces — only the final
+            # exhausted-retries error surfaced, with no way to tell from
+            # telemetry alone whether it was one slow request or three
+            # retried 500s before it gave up.
+            with telemetry_span(
+                "llm_http_attempt",
+                **{"llm.model": request.model, "llm.attempt": attempt_count},
+            ) as attempt_span:
+                try:
+                    response = await client.post(url, json=payload, headers=headers)
+                    attempt_span.set_attribute("http.status_code", response.status_code)
+                    if response.status_code != 200:
+                        self._handle_error_response(response)
 
-                data = cast(dict[str, Any], response.json())
-                return self._parse_chunk_data(data)
-            except (httpx.TimeoutException, httpx.ConnectTimeout) as e:
-                raise TransientTimeoutError(f"Request timed out: {e}") from e
-            except (httpx.NetworkError, httpx.ConnectError) as e:
-                raise TransientHttpError(f"Network error: {e}") from e
-            finally:
-                if should_close:
-                    await client.aclose()
+                    data = cast(dict[str, Any], response.json())
+                    return self._parse_chunk_data(data)
+                except (httpx.TimeoutException, httpx.ConnectTimeout) as e:
+                    logger.warning(
+                        "llm_http_attempt_timeout", model=request.model, attempt=attempt_count
+                    )
+                    raise TransientTimeoutError(f"Request timed out: {e}") from e
+                except (httpx.NetworkError, httpx.ConnectError) as e:
+                    logger.warning(
+                        "llm_http_attempt_network_error",
+                        model=request.model,
+                        attempt=attempt_count,
+                        error=str(e),
+                    )
+                    raise TransientHttpError(f"Network error: {e}") from e
+                finally:
+                    if should_close:
+                        await client.aclose()
 
         try:
             async for attempt in AsyncRetrying(
@@ -295,8 +325,20 @@ class OllamaCloudProvider(LLMProvider):
                 with attempt:
                     return await _make_request()
         except TransientTimeoutError as err:
+            logger.error(
+                "llm_request_retries_exhausted",
+                model=request.model,
+                attempts=attempt_count,
+                reason="timeout",
+            )
             raise ProviderTimeoutError(f"Retries exhausted: {err}") from err
         except TransientHttpError as err:
+            logger.error(
+                "llm_request_retries_exhausted",
+                model=request.model,
+                attempts=attempt_count,
+                reason="network_error",
+            )
             raise ProviderError(f"Transient retries exhausted: {err}") from err
 
         # Unreachable: AsyncRetrying(reraise=True) either returns from the loop
@@ -334,8 +376,10 @@ class OllamaCloudProvider(LLMProvider):
                     except json.JSONDecodeError:
                         logger.warning("Skipping invalid JSON stream chunk", line=line_str)
         except (httpx.TimeoutException, httpx.ConnectTimeout) as e:
+            logger.error("llm_stream_timeout", model=request.model)
             raise ProviderTimeoutError(f"Stream timed out: {e}") from e
         except (httpx.NetworkError, httpx.ConnectError) as e:
+            logger.error("llm_stream_network_error", model=request.model, error=str(e))
             raise ProviderError(f"Stream network error: {e}") from e
         finally:
             if should_close:

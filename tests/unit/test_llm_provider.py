@@ -326,6 +326,72 @@ async def test_ollama_timeout_raises_after_retries_exhausted() -> None:
         await provider.generate(req)
 
 
+@pytest.mark.asyncio
+@respx.mock
+async def test_ollama_error_response_logs_status_and_body(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (M20): _handle_error_response only ever raised — no
+    structured log line recorded which status code came back or why,
+    making a 400/401/429 failure invisible in telemetry until the raised
+    exception's message was read from application logs."""
+    from nullain.llm import ollama as ollama_module
+
+    respx.post("https://ollama.com/v1/chat/completions").respond(
+        status_code=400, json={"error": {"message": "invalid request"}}
+    )
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def _spy(event: str, **kwargs: object) -> None:
+        calls.append((event, kwargs))
+
+    monkeypatch.setattr(ollama_module.logger, "warning", _spy)
+
+    provider = OllamaCloudProvider(base_url="https://ollama.com", max_retries=1)
+    req = CompletionRequest(model="test-model", messages=[ChatMessage(role="user", content="Hi")])
+
+    with pytest.raises(Exception):  # noqa: B017  (ProviderError subclass — any is fine here)
+        await provider.generate(req)
+
+    logged = [c for c in calls if c[0] == "llm_http_error_response"]
+    assert len(logged) == 1
+    assert logged[0][1]["status_code"] == 400
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_ollama_retries_exhausted_logs_attempt_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression (M20): exhausting retries on a persistent timeout raised
+    ProviderTimeoutError with no observable record of how many attempts
+    were made before giving up."""
+    from nullain.llm import ollama as ollama_module
+
+    respx.post("https://ollama.com/v1/chat/completions").side_effect = httpx.TimeoutException(
+        "Request timeout"
+    )
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def _spy(event: str, **kwargs: object) -> None:
+        calls.append((event, kwargs))
+
+    monkeypatch.setattr(ollama_module.logger, "error", _spy)
+
+    provider = OllamaCloudProvider(base_url="https://ollama.com", max_retries=2)
+    req = CompletionRequest(model="test-model", messages=[ChatMessage(role="user", content="Hi")])
+
+    with pytest.raises(ProviderTimeoutError):
+        await provider.generate(req)
+
+    logged = [c for c in calls if c[0] == "llm_request_retries_exhausted"]
+    assert len(logged) == 1
+    assert logged[0][1]["attempts"] == 2
+    assert logged[0][1]["reason"] == "timeout"
+
+
 def test_chat_message_to_api_dict_serializes_tool_call_arguments_as_string() -> None:
     """Regression: found via live testing against Ollama Cloud, which rejected
     a follow-up request with HTTP 400 ("cannot unmarshal object into ...
