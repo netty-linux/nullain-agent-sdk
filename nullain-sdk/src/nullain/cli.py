@@ -19,12 +19,14 @@ import os
 import re
 import shutil
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
 from nullain import __version__
 from nullain.agent import Agent, RunResult
 from nullain.config import load_settings
+from nullain.events import EventStore
 from nullain.llm import OllamaCloudProvider
 from nullain.tools.sandbox import select_sandbox
 from nullain.tui import TUIRenderer
@@ -152,6 +154,30 @@ def _edit_mcp_server(
 # ---------------------------------------------------------------------------
 
 
+async def _resolve_session_id(
+    workspace: str, *, session_id: str | None, continue_session: bool
+) -> str | None:
+    """Resolve the effective session id for ``run``/``chat`` (M16).
+
+    - An explicit ``--session <id>`` always wins.
+    - ``--continue`` looks up the most recently used session id in this
+      workspace's event store (``<workspace>/.nullain/sessions.db``) and
+      resumes it; with no prior sessions, falls through to a fresh one
+      (there is nothing to continue, so this is not an error).
+    - Otherwise ``None`` — a fresh session id is generated internally by the
+      loop, matching the pre-M16 default of always starting empty.
+    """
+    if session_id:
+        return session_id
+    if not continue_session:
+        return None
+    store = EventStore(Path(workspace).resolve() / ".nullain" / "sessions.db")
+    try:
+        return await store.get_latest_session_id()
+    finally:
+        await store.close()
+
+
 async def _run(
     prompt: str,
     *,
@@ -159,6 +185,8 @@ async def _run(
     workspace: str,
     max_steps: int,
     json_output: bool,
+    session_id: str | None = None,
+    continue_session: bool = False,
 ) -> RunResult:
     """Execute a single prompt and return the structured result.
 
@@ -168,11 +196,19 @@ async def _run(
     for scripts; otherwise the Rich ``TUIRenderer`` renders live (streamed
     text, tool-call spinners, colored diffs) instead of a bare final-text
     print, matching Claude Code / Gemini CLI's terminal UX.
+
+    Session persistence (M16): a resolved session id (explicit ``--session``
+    or the latest one via ``--continue``) is passed through to
+    ``agent.stream()``, which resumes that session's history from the
+    workspace's on-disk event store when it has prior events.
     """
     agent = Agent(workspace_root=workspace, model=model, max_steps=max_steps)
+    resolved_session = await _resolve_session_id(
+        workspace, session_id=session_id, continue_session=continue_session
+    )
     result: RunResult | None = None
     renderer = None if json_output else TUIRenderer()
-    async for item in agent.stream(prompt):
+    async for item in agent.stream(prompt, session_id=resolved_session):
         if isinstance(item, RunResult):
             result = item
             if json_output:
@@ -201,13 +237,23 @@ async def _run(
 # ---------------------------------------------------------------------------
 
 
-async def _chat(*, model: str | None, workspace: str) -> int:
+async def _chat(*, model: str | None, workspace: str, continue_session: bool = False) -> int:
     """Run an interactive multi-turn session with TTY permission approval.
 
     Each turn is driven through ``agent.stream()`` and rendered live via
     ``TUIRenderer`` — streamed text, tool-call spinners, and colored
     write_file/edit_file diffs — instead of only printing the final answer
     once the whole turn has finished.
+
+    Session persistence (M16): every turn shares one ``session_id`` for the
+    duration of this chat process, so turn 2 sees turn 1's exchange in its
+    context (previously each turn generated its own fresh id — a chat
+    session's later turns never actually saw earlier ones). With
+    ``continue_session``, that shared id is the workspace's most recently
+    used session instead of a new one, so a chat opened yesterday can be
+    picked back up. The session id is echoed at startup so the user can
+    pass it to ``nullain run --session <id>`` later if they want a
+    non-interactive continuation.
     """
     agent = Agent(
         workspace_root=workspace,
@@ -215,8 +261,15 @@ async def _chat(*, model: str | None, workspace: str) -> int:
         permission_callback=_tty_permission,
         ask_user_callback=_tty_ask_user,
     )
+    session_id = await _resolve_session_id(
+        workspace, session_id=None, continue_session=continue_session
+    )
+    resuming = session_id is not None
+    if session_id is None:
+        session_id = str(uuid.uuid4())
     renderer = TUIRenderer()
     print("Nullain chat. Type 'exit' or Ctrl-D to quit.")
+    print(f"Session: {session_id}{' (resumed)' if resuming else ''}")
     while True:
         try:
             prompt = input("> ")
@@ -228,7 +281,7 @@ async def _chat(*, model: str | None, workspace: str) -> int:
         if prompt.strip().lower() in ("exit", "quit"):
             return EXIT_OK
         renderer.reset()
-        async for item in agent.stream(prompt):
+        async for item in agent.stream(prompt, session_id=session_id):
             renderer.handle(item)
         renderer.finish()
 
@@ -361,11 +414,28 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--workspace", default=".", help="Workspace root")
     p_run.add_argument("--max-steps", type=int, default=25, help="Max ReAct steps")
     p_run.add_argument("--json", action="store_true", help="Emit NDJSON for piping")
+    p_run.add_argument(
+        "--session",
+        default=None,
+        help="Resume a specific session id (see nullain chat's startup line)",
+    )
+    p_run.add_argument(
+        "--continue",
+        dest="continue_session",
+        action="store_true",
+        help="Resume the workspace's most recently used session",
+    )
     p_run.set_defaults(handler=_run_handler)
 
     p_chat = sub.add_parser("chat", help="Start an interactive multi-turn session")
     p_chat.add_argument("--model", default=None, help="Model override")
     p_chat.add_argument("--workspace", default=".", help="Workspace root")
+    p_chat.add_argument(
+        "--continue",
+        dest="continue_session",
+        action="store_true",
+        help="Resume the workspace's most recently used session instead of starting fresh",
+    )
     p_chat.set_defaults(handler=_chat_handler)
 
     p_doctor = sub.add_parser("doctor", help="Run environment and health checks")
@@ -405,6 +475,8 @@ def _run_handler(args: argparse.Namespace) -> int:
             workspace=args.workspace,
             max_steps=args.max_steps,
             json_output=args.json,
+            session_id=args.session,
+            continue_session=args.continue_session,
         )
     )
     return EXIT_OK if result.success else EXIT_RUNTIME
@@ -412,7 +484,9 @@ def _run_handler(args: argparse.Namespace) -> int:
 
 def _chat_handler(args: argparse.Namespace) -> int:
     """Handler for ``nullain chat``."""
-    return asyncio.run(_chat(model=args.model, workspace=args.workspace))
+    return asyncio.run(
+        _chat(model=args.model, workspace=args.workspace, continue_session=args.continue_session)
+    )
 
 
 def _doctor_handler(args: argparse.Namespace) -> int:

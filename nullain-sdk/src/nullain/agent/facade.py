@@ -89,8 +89,13 @@ class Agent:
             ask_user_callback: Async callback backing the ``ask_user`` tool.
                 When None, ``ask_user`` returns an error when invoked.
             event_bus: Event bus; when None, a fresh one is created.
-            event_store: Persistent event store; when None, an in-memory one is
-                created and initialized on first run.
+            event_store: Persistent event store; when None, a SQLite store at
+                ``<workspace_root>/.nullain/sessions.db`` is created (and
+                initialized on first run), so a session's trajectory survives
+                the process exiting — the same directory persistent memory
+                and checkpoints already use. Pass ``EventStore(":memory:")``
+                explicitly to opt out (e.g. for tests, or one-shot scripting
+                where nothing should be written to disk).
             episodic_memory: Episodic memory; when None, a default SQLite one is
                 created and initialized on first run.
             persistent_memory: Persistent memory; when None, one is created
@@ -110,7 +115,9 @@ class Agent:
         )
         self._sandbox: Sandbox = select_sandbox(self._settings.sandbox)
         self.event_bus = event_bus or EventBus()
-        self._event_store = event_store or EventStore()
+        self._event_store = event_store or EventStore(
+            Path(self._workspace_root).resolve() / ".nullain" / "sessions.db"
+        )
         self._episodic_memory = episodic_memory or EpisodicMemory()
         self._persistent_memory = persistent_memory or PersistentMemory(
             workspace_root=self._workspace_root
@@ -277,6 +284,13 @@ class Agent:
     async def run(self, prompt: str, session_id: str | None = None) -> RunResult:
         """Run the agent on a single prompt and return the structured result.
 
+        When ``session_id`` names a session with prior events already in the
+        event store, those events are loaded as ``events_history`` so the run
+        continues the conversation (the model sees prior turns, tool
+        results, etc.) instead of starting fresh with the same id — matching
+        what "continuing a session" means. A ``session_id`` with no prior
+        events (including a fresh, unset one) starts empty as before.
+
         Args:
             prompt: The user prompt to act on.
             session_id: Optional session identifier; a fresh one is generated
@@ -287,8 +301,16 @@ class Agent:
         """
         await self._event_store.initialize()
         await self._episodic_memory.initialize()
+        events_history = await self._load_session_history(session_id)
         loop = self._build_loop(session_id)
-        return await loop.run_result(prompt, session_id=session_id)
+        return await loop.run_result(prompt, session_id=session_id, events_history=events_history)
+
+    async def _load_session_history(self, session_id: str | None) -> list[BaseEvent] | None:
+        """Load prior events for ``session_id`` from the event store, if any."""
+        if session_id is None:
+            return None
+        events = await self._event_store.get_session_events(session_id)
+        return events or None
 
     async def stream(
         self, prompt: str, session_id: str | None = None
@@ -301,7 +323,9 @@ class Agent:
 
         Args:
             prompt: The user prompt to act on.
-            session_id: Optional session identifier.
+            session_id: Optional session identifier. As with :meth:`run`, a
+                session_id with prior events in the event store resumes that
+                conversation (see :meth:`run` for details).
 
         Yields:
             :class:`BaseEvent` instances during the run, then the final
@@ -309,6 +333,7 @@ class Agent:
         """
         await self._event_store.initialize()
         await self._episodic_memory.initialize()
+        events_history = await self._load_session_history(session_id)
         queue: asyncio.Queue[BaseEvent] = asyncio.Queue()
 
         async def forward(ev: BaseEvent) -> None:
@@ -317,7 +342,9 @@ class Agent:
         self.event_bus.subscribe("*", forward)
         try:
             loop = self._build_loop(session_id)
-            task = asyncio.create_task(loop.run_result(prompt, session_id=session_id))
+            task = asyncio.create_task(
+                loop.run_result(prompt, session_id=session_id, events_history=events_history)
+            )
             while not task.done():
                 try:
                     ev = await asyncio.wait_for(queue.get(), timeout=0.1)

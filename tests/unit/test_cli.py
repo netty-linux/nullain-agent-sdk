@@ -30,18 +30,22 @@ class _FakeAgent:
     def __init__(self, result: RunResult) -> None:
         self._result = result
         self._stream_items: list[Any] = []
+        self.seen_session_ids: list[str | None] = []
 
     async def run(self, prompt: str, session_id: str | None = None) -> RunResult:
         return self._result
 
     async def stream(self, prompt: str, session_id: str | None = None):
+        self.seen_session_ids.append(session_id)
         for item in self._stream_items:
             yield item
         yield self._result
 
 
 def _fake_agent_factory(
-    result: RunResult, stream_items: list[Any] | None = None
+    result: RunResult,
+    stream_items: list[Any] | None = None,
+    created: list[_FakeAgent] | None = None,
 ) -> Callable[..., _FakeAgent]:
     """Return a factory that builds a ``_FakeAgent``, ignoring constructor kwargs.
 
@@ -49,12 +53,17 @@ def _fake_agent_factory(
     what ``Agent.stream()`` actually emits (e.g. a ``ModelResponseEvent``
     carrying the final answer's text) — the real ``TUIRenderer``-driven
     ``_run``/``_chat`` render text from those events, not from
-    ``RunResult.final_text`` directly.
+    ``RunResult.final_text`` directly. When ``created`` is given, every
+    ``_FakeAgent`` instance the factory builds is appended to it, so a test
+    can inspect (e.g.) which ``session_id`` each ``stream()`` call received
+    across multiple ``_run``/``_chat`` invocations.
     """
 
     def factory(**kw: object) -> _FakeAgent:
         agent = _FakeAgent(result)
         agent._stream_items = list(stream_items or [])
+        if created is not None:
+            created.append(agent)
         return agent
 
     return factory
@@ -112,6 +121,96 @@ def test_run_handler_exit_code_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "Agent", _fake_agent_factory(_failure_result()))
     args = cli._build_parser().parse_args(["run", "hi"])
     assert cli._run_handler(args) == cli.EXIT_RUNTIME
+
+
+# ---------------------------------------------------------------------------
+# session persistence (M16): --session / --continue
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_resolve_session_id_explicit_session_wins(tmp_path: Path) -> None:
+    """--session <id> is used as-is, no event store lookup needed."""
+    resolved = await cli._resolve_session_id(
+        str(tmp_path), session_id="explicit-id", continue_session=True
+    )
+    assert resolved == "explicit-id"
+
+
+@pytest.mark.asyncio
+async def test_resolve_session_id_no_flags_returns_none(tmp_path: Path) -> None:
+    """Neither --session nor --continue: a fresh session id is left to the
+    loop to generate, matching the pre-M16 default."""
+    resolved = await cli._resolve_session_id(str(tmp_path), session_id=None, continue_session=False)
+    assert resolved is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_session_id_continue_with_no_prior_sessions(tmp_path: Path) -> None:
+    """--continue with an empty/nonexistent event store falls through to
+    None (fresh session) rather than erroring — nothing to continue yet."""
+    resolved = await cli._resolve_session_id(str(tmp_path), session_id=None, continue_session=True)
+    assert resolved is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_session_id_continue_finds_latest_session(tmp_path: Path) -> None:
+    """--continue looks up the most recently appended session in
+    <workspace>/.nullain/sessions.db."""
+    from nullain.events import EventStore, UserMessageEvent
+
+    store = EventStore(tmp_path / ".nullain" / "sessions.db")
+    await store.initialize()
+    await store.append(UserMessageEvent(session_id="older-session", content="hi"))
+    await store.append(UserMessageEvent(session_id="newer-session", content="hi again"))
+    await store.close()
+
+    resolved = await cli._resolve_session_id(str(tmp_path), session_id=None, continue_session=True)
+    assert resolved == "newer-session"
+
+
+@pytest.mark.asyncio
+async def test_run_passes_resolved_session_id_to_agent_stream(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """cli._run threads the resolved session id through to agent.stream()."""
+    created: list[_FakeAgent] = []
+    monkeypatch.setattr(cli, "Agent", _fake_agent_factory(_success_result("ok"), created=created))
+    await cli._run(
+        "hi",
+        model=None,
+        workspace=str(tmp_path),
+        max_steps=5,
+        json_output=True,
+        session_id="my-session",
+    )
+    assert created[0].seen_session_ids == ["my-session"]
+
+
+@pytest.mark.asyncio
+async def test_chat_reuses_one_session_id_across_turns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: each chat turn previously generated its own fresh session
+    id internally (session_id=None passed to every stream() call), so turn 2
+    never actually saw turn 1's exchange despite being in the "same" chat.
+    All turns in one chat process must now share one session id."""
+    created: list[_FakeAgent] = []
+    monkeypatch.setattr(cli, "Agent", _fake_agent_factory(_success_result("ok"), created=created))
+
+    inputs = iter(["first turn", "second turn", "exit"])
+
+    def _fake_input(prompt: str = "") -> str:
+        return next(inputs)
+
+    monkeypatch.setattr("builtins.input", _fake_input)
+
+    await cli._chat(model=None, workspace=str(tmp_path))
+
+    seen = created[0].seen_session_ids
+    assert len(seen) == 2
+    assert seen[0] == seen[1]
+    assert seen[0] is not None
 
 
 def test_version_handler(
