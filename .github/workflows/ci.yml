@@ -81,23 +81,78 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install ripgrep -y
 
-      # Coverage is gated on the primary combination only. Enforcing the
-      # threshold on every platform would fail runners where a platform's
-      # sandbox adapter is legitimately unreachable.
-      - name: Pytest with coverage
+      # The fail_under gate stays on the primary combination only (see
+      # pyproject.toml's [tool.coverage.report] comment): a platform's
+      # sandbox adapter (landlock/seatbelt/windows_job) is legitimately
+      # unreachable on the other two OSes, so gating there would fail CI on
+      # normal per-platform variation, not a real regression.
+      #
+      # Every platform still *measures* coverage (ungated) and uploads it as
+      # a per-OS artifact — the merged report (see the coverage-combine job
+      # below) is what actually proves the sandbox adapters are exercised
+      # somewhere in the matrix, instead of just assuming it from a single
+      # Linux run.
+      - name: Pytest with coverage (gated)
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         run: uv run pytest --cov --cov-report=term --cov-report=xml
 
-      - name: Pytest
+      - name: Pytest with coverage (ungated)
         if: matrix.os != 'ubuntu-latest' || matrix.python-version != '3.12'
-        run: uv run pytest
+        run: uv run pytest --cov --cov-report=term
+        continue-on-error: false
 
-      - name: Upload coverage artifact
-        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
+      - name: Rename coverage data file for this platform
+        run: mv .coverage ".coverage.${{ matrix.os }}.${{ matrix.python-version }}"
+
+      - name: Upload coverage data
         uses: actions/upload-artifact@v4
         with:
-          name: coverage-xml
-          path: coverage.xml
+          name: coverage-data-${{ matrix.os }}-${{ matrix.python-version }}
+          path: .coverage.${{ matrix.os }}.${{ matrix.python-version }}
+          if-no-files-found: error
+
+  # Merges every platform's coverage data into one report so the sandbox
+  # adapters (landlock on Linux, seatbelt on macOS, windows_job on Windows) —
+  # each unreachable on the other two OSes — are all provably exercised
+  # *somewhere* in the matrix, instead of the single-platform gated report
+  # silently showing 0% for two of the three and nobody noticing.
+  coverage-combine:
+    name: Combine Coverage (all platforms)
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Download all coverage data
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-data-*
+          merge-multiple: true
+
+      - name: Combine and report
+        run: |
+          uv run coverage combine
+          uv run coverage report --show-missing
+          uv run coverage html
+
+      - name: Upload combined HTML report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html-combined
+          path: htmlcov/
           if-no-files-found: error
 
   audit:

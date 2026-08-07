@@ -62,6 +62,11 @@ pythonpath = ["nullain-sdk/src", "nullain-tools/src", "nullain-agentd/src"]
 [tool.coverage.run]
 source = ["nullain", "nullain_tools", "nullain_agentd"]
 branch = true
+# Coverage data is combined across CI's OS matrix (Linux/Windows/macOS) in
+# the coverage-combine job — relative (not absolute) file paths are required
+# for `coverage combine` to match up the same source file recorded under
+# different absolute paths (and path separators) on each runner.
+relative_files = true
 omit = [
     # Launched as a separate process by the Windows sandbox adapter; its
     # coverage is not attributable to the parent test process.
