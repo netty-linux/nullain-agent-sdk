@@ -45,6 +45,7 @@ dependencies = [
     "opentelemetry-api>=1.24.0",
     "opentelemetry-sdk>=1.24.0",
     "rich>=13.7.0",
+    "nullain-tools>=0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -61,6 +62,13 @@ Issues = "https://github.com/netty-linux/nullain-agent-sdk/issues"
 
 [project.scripts]
 nullain = "nullain.cli:app"
+
+[tool.uv.sources]
+# Resolved from the sibling workspace member during local/editable installs
+# (uv tool install --editable, `uv run` inside the monorepo). Once
+# nullain-tools has its own PyPI release, a real version constraint on the
+# `dependencies` entry takes over for `pip install nullain-sdk` installs.
+nullain-tools = { workspace = true }
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/nullain"]
