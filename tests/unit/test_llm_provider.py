@@ -359,3 +359,33 @@ def test_chat_message_to_api_dict_passes_through_string_arguments_unchanged() ->
     )
     data = msg.to_api_dict()
     assert data["tool_calls"][0]["function"]["arguments"] == '{"path": "a.txt"}'
+
+
+def test_chat_message_to_api_dict_includes_null_content_for_tool_call_only_assistant_turn() -> None:
+    """Regression: found via live testing against Ollama Cloud. A pure
+    tool-call assistant turn (content=None, only tool_calls set — the
+    common case) used to *omit* the "content" key entirely when replayed
+    into a later request's message history. Ollama Cloud's compat shim
+    rejected that later request with HTTP 400 ("invalid message content
+    type: <nil>") — its server-side unmarshal needs the key present as
+    JSON null, matching the real OpenAI spec for this case, rather than
+    absent. Every other role's content is always a required, non-None
+    string, so only the assistant/content=None case is affected."""
+    msg = ChatMessage(
+        role="assistant",
+        content=None,
+        tool_calls=[ToolCall(id="call_1", name="bash", arguments={"command_args": ["ls"]})],
+    )
+    data = msg.to_api_dict()
+    assert "content" in data
+    assert data["content"] is None
+
+
+def test_chat_message_to_api_dict_omits_content_for_non_assistant_none() -> None:
+    """Non-assistant roles keep the prior omit-when-None behavior — every
+    other role's content is a required non-None string in practice, so
+    this only documents that the assistant-specific fix above is scoped
+    correctly and doesn't change other roles' serialization."""
+    msg = ChatMessage(role="system", content=None)
+    data = msg.to_api_dict()
+    assert "content" not in data
