@@ -46,6 +46,10 @@ dependencies = [
     "opentelemetry-sdk>=1.24.0",
     "rich>=13.7.0",
     "nullain-tools>=0.1.0",
+    # structlog's ConsoleRenderer(colors=True) raises SystemError on Windows
+    # without colorama installed to translate ANSI escapes for the console;
+    # every other platform's terminal handles them natively.
+    "colorama>=0.4.6; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
