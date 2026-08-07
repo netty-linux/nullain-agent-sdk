@@ -684,6 +684,7 @@ source = { editable = "nullain-sdk" }
 dependencies = [
     { name = "aiosqlite" },
     { name = "anyio" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
     { name = "httpx" },
     { name = "nullain-tools" },
     { name = "opentelemetry-api" },
@@ -704,6 +705,7 @@ signing = [
 requires-dist = [
     { name = "aiosqlite", specifier = ">=0.20.0" },
     { name = "anyio", specifier = ">=4.3.0" },
+    { name = "colorama", marker = "sys_platform == 'win32'", specifier = ">=0.4.6" },
     { name = "cryptography", marker = "extra == 'signing'", specifier = ">=42.0.0" },
     { name = "httpx", specifier = ">=0.27.0" },
     { name = "nullain-tools", editable = "nullain-tools" },
