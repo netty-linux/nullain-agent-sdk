@@ -500,3 +500,76 @@ def test_ed25519_rejects_unknown_key_id() -> None:
     verifier = Ed25519Verifier()
     # trusted_keys has the key under a different id => refuse
     assert verifier.verify(manifest, {"other": pub_b64}) is False
+
+
+def test_no_verifier_verify_always_refuses() -> None:
+    """NoVerifier.verify is the fail-closed terminal case: it never returns
+    True regardless of what's passed, matching its docstring's contract
+    ("never verifies")."""
+    manifest = _manifest()
+    assert NoVerifier().verify(manifest, {"any": "key"}) is False
+
+
+@pytest.mark.skipif(not _HAS_CRYPTO, reason="cryptography extra not installed")
+def test_ed25519_rejects_non_ed25519_algorithm() -> None:
+    """A manifest whose signature declares an algorithm other than ed25519
+    is refused before any key lookup or cryptographic verification —
+    Ed25519Verifier only ever speaks its own algorithm."""
+    manifest = _manifest(signature=PluginSignature(algorithm="rsa", key_id="k1", value="x"))
+    verifier = Ed25519Verifier()
+    assert verifier.verify(manifest, {"k1": "irrelevant"}) is False
+
+
+@pytest.mark.skipif(not _HAS_CRYPTO, reason="cryptography extra not installed")
+def test_ed25519_rejects_malformed_public_key_bytes() -> None:
+    """A trusted key that isn't valid base64/valid Ed25519 public key bytes
+    is refused rather than raising — the verifier's job is to say yes/no,
+    never to crash the plugin loader on a malformed trust store entry."""
+    priv, _ = _ed25519_keypair()
+    manifest = _manifest()
+    _sign_manifest(priv, manifest, "k1")
+    verifier = Ed25519Verifier()
+    assert verifier.verify(manifest, {"k1": "not-valid-base64-key!!"}) is False
+
+
+def test_select_verifier_falls_back_to_no_verifier_when_ed25519_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """select_verifier's fail-closed fallback path: even when cryptography
+    IS installed, if Ed25519Verifier.available() reports False for any
+    reason, the selector still returns NoVerifier rather than an
+    unusable verifier."""
+
+    def _unavailable(self: Ed25519Verifier) -> bool:
+        return False
+
+    monkeypatch.setattr(Ed25519Verifier, "available", _unavailable)
+    verifier = select_verifier()
+    assert verifier.name == "none"
+    assert isinstance(verifier, NoVerifier)
+
+
+@pytest.mark.skipif(not _HAS_CRYPTO, reason="cryptography extra not installed")
+def test_ed25519_refuses_when_import_fails_after_available_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive fallback: available() probes via importlib.util.find_spec,
+    but verify() actually imports the submodules with importlib.import_module
+    a moment later — a TOCTOU gap (e.g. a broken install where find_spec
+    succeeds but the module itself fails to import) must refuse rather than
+    raise ImportError out of the loader's trust boundary."""
+    priv, pub_bytes = _ed25519_keypair()
+    pub_b64 = base64.b64encode(pub_bytes).decode("ascii")
+    manifest = _manifest()
+    _sign_manifest(priv, manifest, "k1")
+
+    real_import_module = importlib.import_module
+
+    def _boom(name: str, *args: object, **kwargs: object) -> object:
+        if name.startswith("cryptography"):
+            raise ImportError("simulated broken install")
+        return real_import_module(name, *args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("nullain.plugins.signing.importlib.import_module", _boom)
+    verifier = Ed25519Verifier()
+    assert verifier.verify(manifest, {"k1": pub_b64}) is False
