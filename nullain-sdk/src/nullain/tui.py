@@ -14,8 +14,14 @@ only the public event stream, so it stays decoupled from engine changes.
 
 from __future__ import annotations
 
+import contextlib
 import difflib
-from typing import Any, cast
+import io
+import sys
+from typing import TYPE_CHECKING, Any, cast
+
+if TYPE_CHECKING:
+    from typing import TextIO
 
 from rich.console import Console, Group
 from rich.live import Live
@@ -44,6 +50,35 @@ _FILE_WRITE_TOOLS = frozenset({"write_file", "edit_file", "multi_edit"})
 _PATH_ARG_KEYS = ("file_path", "target_file", "path")
 
 
+def _legacy_safe_stdout() -> TextIO:
+    """Return stdout, reconfigured to tolerate unencodable characters.
+
+    A legacy Windows console's codepage (e.g. cp1252) cannot encode most
+    emoji or many Unicode symbols — and unlike the glyphs this module
+    controls itself (spinner frames, ✓/✗/⚠, chosen based on
+    ``Console.legacy_windows`` at call sites), the *model's own output* can
+    contain any character. Rich's default stdout write would raise
+    ``UnicodeEncodeError`` and crash the whole CLI on an emoji in an
+    otherwise-successful response — an unacceptable failure mode for text
+    this module has no control over.
+
+    Reconfigures stdout's error handler to ``"replace"`` (unencodable
+    characters become ``?``) when the encoding is not already
+    Unicode-capable (UTF-8, or any UTF variant) and stdout supports
+    reconfiguration (a plain ``io.TextIOWrapper`` — true for the standard
+    interpreter's real stdout, not necessarily for one replaced by a test
+    harness or an unusual embedding). A real UTF-8 terminal, or a
+    non-reconfigurable stdout, is returned unchanged — Rich's own error
+    handling is the fallback in that case.
+    """
+    stream = sys.stdout
+    encoding = (stream.encoding or "").lower().replace("-", "")
+    if not encoding.startswith("utf") and isinstance(stream, io.TextIOWrapper):
+        with contextlib.suppress(AttributeError, ValueError, io.UnsupportedOperation):
+            stream.reconfigure(errors="replace")
+    return cast("TextIO", stream)
+
+
 def _tool_call_arg_path(arguments: dict[str, Any] | str) -> str | None:
     if not isinstance(arguments, dict):
         return None
@@ -70,13 +105,17 @@ class TUIRenderer:
     """
 
     def __init__(self, console: Console | None = None) -> None:
-        self.console = console or Console()
+        self.console = console or Console(file=_legacy_safe_stdout())
         # Legacy Windows consoles (cmd.exe / older PowerShell without UTF-8
         # mode) use a codepage like cp1252 that cannot encode Braille spinner
         # frames or the ✓/✗/⚠ glyphs — printing them crashes with a
         # UnicodeEncodeError rather than degrading gracefully. Detect via the
         # same signal Rich itself uses for legacy Windows rendering and fall
-        # back to ASCII-safe equivalents.
+        # back to ASCII-safe equivalents for the glyphs this module controls.
+        # _legacy_safe_stdout() (above) separately covers text this module
+        # does NOT control — the model's own output, which can contain any
+        # emoji or Unicode character — by replacing unencodable characters
+        # instead of raising.
         ascii_only = self.console.legacy_windows
         self._spinner_name = "line" if ascii_only else "dots"
         self._ok_marker = "OK" if ascii_only else "✓"
