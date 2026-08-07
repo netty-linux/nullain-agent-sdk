@@ -8,6 +8,7 @@ todo list that mirrors progress to the client via ``TodoEvent``.
 
 import asyncio
 import contextlib
+import os
 import re
 import shutil
 from pathlib import Path
@@ -43,16 +44,30 @@ _IGNORED_DIRS = {
 
 
 class FileAccessTracker:
-    """Tracks which workspace files have been read in a session (M8).
+    """Tracks which workspace files have been read in a session (M8) and
+    caches read_file's rendered page (M14).
 
     ``read_file`` marks a resolved path as read; ``edit_file``/``multi_edit``
     require the target to have been read first, so the model only edits files it
     has actually seen. A fresh instance is created per toolset by default; the
     daemon injects one per session so the read-set is scoped to the session.
+
+    The read cache (M14) keys a rendered page on ``(path, offset, limit,
+    mtime_ns, size)``: a repeated ``read_file`` call with the same arguments
+    returns the cached page without touching disk, but the mtime/size
+    componenets of the key mean any change to the file — whether from this
+    session's own ``write_file``/``edit_file``/``multi_edit``, a ``bash``
+    command, or an external process — silently misses the cache and falls
+    through to a real read, rather than requiring every writer to remember to
+    invalidate a separate cache explicitly. This mirrors Claude Code's
+    session-scoped file read cache used to avoid re-paying the token/latency
+    cost of re-reading files the model has already seen and that have not
+    changed.
     """
 
     def __init__(self) -> None:
         self._read: set[str] = set()
+        self._page_cache: dict[tuple[str, int, int, int, int], str] = {}
 
     def mark_read(self, path: Path) -> None:
         """Record that ``path`` (already resolved) was read this session."""
@@ -61,6 +76,34 @@ class FileAccessTracker:
     def was_read(self, path: Path) -> bool:
         """Whether ``path`` (already resolved) was read this session."""
         return str(path) in self._read
+
+    @staticmethod
+    def _page_key(
+        path: Path, offset: int, limit: int, stat: "os.stat_result"
+    ) -> tuple[str, int, int, int, int]:
+        return (str(path), offset, limit, stat.st_mtime_ns, stat.st_size)
+
+    def get_page(self, path: Path, offset: int, limit: int) -> str | None:
+        """Return the cached rendered page for this exact read, if still fresh.
+
+        Returns ``None`` on a cache miss — including when the file's mtime or
+        size has changed since it was cached, or when ``path`` no longer
+        exists (stat failure), so the caller always falls back to a real read
+        rather than risking a stale result.
+        """
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        return self._page_cache.get(self._page_key(path, offset, limit, stat))
+
+    def put_page(self, path: Path, offset: int, limit: int, rendered: str) -> None:
+        """Cache a rendered page, keyed on the file's mtime/size at cache time."""
+        try:
+            stat = path.stat()
+        except OSError:
+            return
+        self._page_cache[self._page_key(path, offset, limit, stat)] = rendered
 
 
 class FileEdit(BaseModel):
@@ -318,17 +361,23 @@ def create_filesystem_tools(
                 error_type="ToolError",
             )
 
+        tracker.mark_read(target)
+
+        cached = tracker.get_page(target, offset, limit)
+        if cached is not None:
+            return cached
+
         lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
         total = len(lines)
         start = offset
         end = min(offset + limit, total)
-        tracker.mark_read(target)
 
         numbered = [f"{i + 1}\t{_truncate_line(lines[i])}" for i in range(start, end)]
         body = "\n".join(numbered)
         remaining = total - end
         if remaining > 0:
             body += f"\n... ({remaining} more lines; call read_file with offset={end} to continue)"
+        tracker.put_page(target, offset, limit, body)
         return body
 
     @tool(

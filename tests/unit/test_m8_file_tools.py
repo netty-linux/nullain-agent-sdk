@@ -79,6 +79,80 @@ def test_read_file_rejects_negative_offset(tmp_path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# read_file: session read-page cache (M14)
+# ---------------------------------------------------------------------------
+
+
+def test_read_file_repeat_call_hits_cache(tmp_path: Path) -> None:
+    """A second identical read_file call with no change in between is served
+    from the cache — verified via FileAccessTracker.get_page directly, since
+    an out-of-band disk mutation would itself change the mtime/size cache key
+    and is a separate, correctly-handled case (see the invalidation test)."""
+    target = tmp_path / "a.txt"
+    target.write_text("one\ntwo\nthree\n")
+    tracker = FileAccessTracker()
+    tools = _tools(tmp_path, file_access_tracker=tracker)
+
+    first = tools["read_file"].func(path="a.txt")
+    assert tracker.get_page(target.resolve(), 0, 2000) == first  # 2000 = DEFAULT_READ_LIMIT
+
+    second = tools["read_file"].func(path="a.txt")
+    assert first == second
+
+
+def test_read_file_cache_miss_after_mtime_change(tmp_path: Path) -> None:
+    """A file change (different mtime/size) invalidates the cached page."""
+    target = tmp_path / "a.txt"
+    target.write_text("one\ntwo\nthree\n")
+    tracker = FileAccessTracker()
+    tools = _tools(tmp_path, file_access_tracker=tracker)
+
+    first = tools["read_file"].func(path="a.txt")
+    assert "one" in first
+
+    target.write_text("uno\ndos\ntres\n")
+    second = tools["read_file"].func(path="a.txt")
+
+    assert "uno" in second
+    assert "one" not in second
+
+
+def test_read_file_cache_is_keyed_by_offset_and_limit(tmp_path: Path) -> None:
+    """Different (offset, limit) pairs on the same file are cached independently."""
+    target = tmp_path / "a.txt"
+    target.write_text("\n".join(f"line{i}" for i in range(10)))
+    tracker = FileAccessTracker()
+    tools = _tools(tmp_path, file_access_tracker=tracker)
+
+    page1 = tools["read_file"].func(path="a.txt", offset=0, limit=3)
+    page2 = tools["read_file"].func(path="a.txt", offset=3, limit=3)
+
+    assert page1 != page2
+    assert "line0" in page1
+    assert "line3" in page2
+
+
+def test_read_file_cache_miss_after_edit_file(tmp_path: Path) -> None:
+    """edit_file changes the file's mtime, so a subsequent read misses the
+    stale cached page rather than returning pre-edit content."""
+    target = tmp_path / "a.txt"
+    target.write_text("hello world\n")
+    tracker = FileAccessTracker()
+    tools = _tools(tmp_path, file_access_tracker=tracker)
+
+    first = tools["read_file"].func(path="a.txt")
+    assert "hello world" in first
+
+    import asyncio
+
+    asyncio.run(tools["edit_file"].func(path="a.txt", old_str="hello", new_str="goodbye"))
+
+    second = tools["read_file"].func(path="a.txt")
+    assert "goodbye world" in second
+    assert "hello world" not in second
+
+
+# ---------------------------------------------------------------------------
 # edit_file: safe edits
 # ---------------------------------------------------------------------------
 
