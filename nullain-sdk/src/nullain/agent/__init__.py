@@ -1,5 +1,6 @@
 """Nullain Agent SDK — Agent Loop and Spec Module."""
 
+from nullain.agent.checkpoint import RewindPoint, list_rewind_points, rewind_events
 from nullain.agent.facade import Agent
 from nullain.agent.loop import AgentLoop, SpawnOutcome, SpawnTask
 from nullain.agent.result import RunResult, RunStatus
@@ -9,10 +10,13 @@ __all__ = [
     "BASH_NONZERO_PREFIX",
     "Agent",
     "AgentLoop",
+    "RewindPoint",
     "RunResult",
     "RunStatus",
     "SpawnOutcome",
     "SpawnTask",
     "SpecValidator",
     "TaskSpec",
+    "list_rewind_points",
+    "rewind_events",
 ]
