@@ -21,6 +21,7 @@ from typing import Any
 import nullain.cli as cli
 import pytest
 from nullain.agent import RunResult
+from nullain.events import ModelResponseEvent
 
 
 class _FakeAgent:
@@ -39,11 +40,22 @@ class _FakeAgent:
         yield self._result
 
 
-def _fake_agent_factory(result: RunResult) -> Callable[..., _FakeAgent]:
-    """Return a factory that builds a ``_FakeAgent``, ignoring constructor kwargs."""
+def _fake_agent_factory(
+    result: RunResult, stream_items: list[Any] | None = None
+) -> Callable[..., _FakeAgent]:
+    """Return a factory that builds a ``_FakeAgent``, ignoring constructor kwargs.
+
+    ``stream_items`` are yielded before the terminal ``RunResult``, mirroring
+    what ``Agent.stream()`` actually emits (e.g. a ``ModelResponseEvent``
+    carrying the final answer's text) — the real ``TUIRenderer``-driven
+    ``_run``/``_chat`` render text from those events, not from
+    ``RunResult.final_text`` directly.
+    """
 
     def factory(**kw: object) -> _FakeAgent:
-        return _FakeAgent(result)
+        agent = _FakeAgent(result)
+        agent._stream_items = list(stream_items or [])
+        return agent
 
     return factory
 
@@ -65,7 +77,13 @@ def _failure_result() -> RunResult:
 async def test_run_success_prints_final_text(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr(cli, "Agent", _fake_agent_factory(_success_result("hello")))
+    """The TUIRenderer renders the final answer from the ModelResponseEvent
+    Agent.stream() emits, not from RunResult.final_text directly — so the
+    fake stream must include that event to exercise the real render path."""
+    final_response = ModelResponseEvent(session_id="s1", model="m", content="hello")
+    monkeypatch.setattr(
+        cli, "Agent", _fake_agent_factory(_success_result("hello"), [final_response])
+    )
     result = await cli._run("hi", model=None, workspace=".", max_steps=25, json_output=False)
     assert result.success
     captured = capsys.readouterr()

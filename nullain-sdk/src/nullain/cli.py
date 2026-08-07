@@ -27,6 +27,7 @@ from nullain.agent import Agent, RunResult
 from nullain.config import load_settings
 from nullain.llm import OllamaCloudProvider
 from nullain.tools.sandbox import select_sandbox
+from nullain.tui import TUIRenderer
 
 EXIT_OK = 0
 EXIT_RUNTIME = 1
@@ -159,26 +160,39 @@ async def _run(
     max_steps: int,
     json_output: bool,
 ) -> RunResult:
-    """Execute a single prompt and return the structured result."""
+    """Execute a single prompt and return the structured result.
+
+    Always drives the run through ``agent.stream()`` — a single pass over the
+    event stream — rather than a separate ``agent.run()`` call, so the run
+    executes exactly once regardless of output mode. ``--json`` emits NDJSON
+    for scripts; otherwise the Rich ``TUIRenderer`` renders live (streamed
+    text, tool-call spinners, colored diffs) instead of a bare final-text
+    print, matching Claude Code / Gemini CLI's terminal UX.
+    """
     agent = Agent(workspace_root=workspace, model=model, max_steps=max_steps)
-    if json_output:
-        async for item in agent.stream(prompt):
-            if isinstance(item, RunResult):
+    result: RunResult | None = None
+    renderer = None if json_output else TUIRenderer()
+    async for item in agent.stream(prompt):
+        if isinstance(item, RunResult):
+            result = item
+            if json_output:
                 print(json.dumps({"type": "result", **item.model_dump()}))
-            else:
-                print(
-                    json.dumps(
-                        {
-                            "type": "event",
-                            "event_type": item.event_type,
-                            "data": json.loads(item.model_dump_json()),
-                        }
-                    )
+            continue
+        if json_output:
+            print(
+                json.dumps(
+                    {
+                        "type": "event",
+                        "event_type": item.event_type,
+                        "data": json.loads(item.model_dump_json()),
+                    }
                 )
-        return await agent.run(prompt)
-    result = await agent.run(prompt)
-    if result.final_text:
-        print(result.final_text)
+            )
+        elif renderer is not None:
+            renderer.handle(item)
+    if renderer is not None:
+        renderer.finish()
+    assert result is not None  # agent.stream() always yields a terminal RunResult
     return result
 
 
@@ -188,13 +202,20 @@ async def _run(
 
 
 async def _chat(*, model: str | None, workspace: str) -> int:
-    """Run an interactive multi-turn session with TTY permission approval."""
+    """Run an interactive multi-turn session with TTY permission approval.
+
+    Each turn is driven through ``agent.stream()`` and rendered live via
+    ``TUIRenderer`` — streamed text, tool-call spinners, and colored
+    write_file/edit_file diffs — instead of only printing the final answer
+    once the whole turn has finished.
+    """
     agent = Agent(
         workspace_root=workspace,
         model=model,
         permission_callback=_tty_permission,
         ask_user_callback=_tty_ask_user,
     )
+    renderer = TUIRenderer()
     print("Nullain chat. Type 'exit' or Ctrl-D to quit.")
     while True:
         try:
@@ -206,11 +227,10 @@ async def _chat(*, model: str | None, workspace: str) -> int:
             continue
         if prompt.strip().lower() in ("exit", "quit"):
             return EXIT_OK
-        result = await agent.run(prompt)
-        if result.final_text:
-            print(result.final_text)
-        elif result.error:
-            print(f"Error: {result.error}", file=sys.stderr)
+        renderer.reset()
+        async for item in agent.stream(prompt):
+            renderer.handle(item)
+        renderer.finish()
 
 
 async def _tty_permission(tool_name: str, description: str) -> bool:
