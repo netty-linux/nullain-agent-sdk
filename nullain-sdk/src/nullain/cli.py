@@ -28,6 +28,7 @@ from nullain import __version__
 from nullain.agent import Agent, RunResult
 from nullain.config import load_settings
 from nullain.events import EventStore
+from nullain.input_history import InputHistory
 from nullain.llm import OllamaCloudProvider
 from nullain.prompt_select import select
 from nullain.tools.sandbox import select_sandbox
@@ -289,11 +290,12 @@ async def _chat(*, model: str | None, workspace: str, continue_session: bool = F
     if session_id is None:
         session_id = str(uuid.uuid4())
     renderer = TUIRenderer()
+    history = InputHistory()
     print("Nullain chat. Type 'exit' or Ctrl-D to quit.")
     print(f"Session: {session_id}{' (resumed)' if resuming else ''}")
     while True:
         try:
-            prompt = input("> ")
+            prompt = history.prompt("> ")
         except EOFError:
             print()
             return EXIT_OK
