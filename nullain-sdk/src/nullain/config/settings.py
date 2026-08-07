@@ -1,5 +1,6 @@
 """Nullain Agent SDK — Declarative Settings Loader."""
 
+import os
 from pathlib import Path
 
 from pydantic import AliasChoices, BaseModel, Field
@@ -154,7 +155,27 @@ class NullainSettings(BaseSettings):
 
 
 def load_settings(config_path: str | Path | None = None) -> NullainSettings:
-    """Load settings from optional nullain.toml or environment."""
+    """Load settings from a nullain.toml file, or the environment alone.
+
+    ``config_path`` resolution, in order:
+
+    1. The explicit argument, if given.
+    2. ``NULLAIN_CONFIG``, if set.
+    3. ``./nullain.toml`` (relative to the current working directory), if it
+       exists.
+
+    A ``config_path`` that does not resolve to an existing file (including
+    when none of the above applies) falls back to environment-only settings
+    — this is not an error, since a deployment may configure everything via
+    env vars and have no TOML file at all. Every caller building an
+    ``Agent`` (or anything else that touches ``ollama_api_key``) should call
+    this the same way — the previous default of "only look at env vars
+    unless a path is explicitly passed" meant most call sites silently never
+    read a ``nullain.toml`` the wizard or a `mcp add` had just written.
+    """
+    if config_path is None:
+        env_path = os.environ.get("NULLAIN_CONFIG")
+        config_path = env_path if env_path else "nullain.toml"
     if config_path and Path(config_path).exists():
         import tomllib
 

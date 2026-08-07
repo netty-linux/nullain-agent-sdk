@@ -56,14 +56,50 @@ args = ["mcp-server-git"]
     assert settings.mcp.servers["git"].auto_approve is False
 
 
-def test_load_settings_defaults_when_no_path() -> None:
-    """With no config path, defaults are used (cwd toml is NOT auto-read here)."""
+def test_load_settings_defaults_when_no_cwd_toml(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With no config path and no ./nullain.toml in cwd, defaults are used."""
+    monkeypatch.delenv("NULLAIN_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)  # empty dir — no nullain.toml here
     settings = load_settings(None)
     assert settings.ollama_base_url == "https://ollama.com"
     assert settings.ollama_api_key is None
     assert settings.mcp.servers == {}
     # Default router tiers are populated.
     assert "fast" in settings.router.tiers
+
+
+def test_load_settings_no_path_reads_cwd_toml(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: load_settings(None) previously never read ./nullain.toml,
+    so every caller that didn't pass an explicit path (Agent's default,
+    `nullain doctor`, `nullain mcp list`) silently ignored a nullain.toml
+    the user (or the first-run setup wizard) had just written in the
+    current directory. It must now be read the same way _find_config_path's
+    CLI helpers already resolve it: NULLAIN_CONFIG, else ./nullain.toml."""
+    monkeypatch.delenv("NULLAIN_CONFIG", raising=False)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "nullain.toml").write_text('ollama_api_key = "from-cwd-toml"\n', encoding="utf-8")
+
+    settings = load_settings(None)
+    assert settings.ollama_api_key == "from-cwd-toml"
+
+
+def test_load_settings_no_path_respects_nullain_config_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """NULLAIN_CONFIG still takes precedence over ./nullain.toml when both
+    could apply."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "nullain.toml").write_text('ollama_api_key = "from-cwd"\n', encoding="utf-8")
+    other = tmp_path / "elsewhere.toml"
+    other.write_text('ollama_api_key = "from-env-path"\n', encoding="utf-8")
+    monkeypatch.setenv("NULLAIN_CONFIG", str(other))
+
+    settings = load_settings(None)
+    assert settings.ollama_api_key == "from-env-path"
 
 
 def test_mcp_server_config_defaults() -> None:

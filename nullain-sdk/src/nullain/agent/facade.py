@@ -14,6 +14,7 @@ scripts that wraps ``asyncio.run``.
 from __future__ import annotations
 
 import asyncio
+import os
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
@@ -103,8 +104,21 @@ class Agent:
             hooks: Lifecycle hooks; a ``HooksConfig`` is wrapped in a
                 ``HookManager``. When None, ``settings.hooks`` is used.
         """
-        self._settings = settings or load_settings()
         self._workspace_root = str(workspace_root)
+        # Resolve settings relative to workspace_root, not the process's own
+        # cwd: load_settings(None) only checks NULLAIN_CONFIG then
+        # ./nullain.toml relative to cwd, which silently misses a
+        # nullain.toml in workspace_root whenever the two differ (e.g. a
+        # daemon or long-lived process operating on a workspace other than
+        # where it was launched from). NULLAIN_CONFIG is resolved here first
+        # so it still wins, matching load_settings(None)'s own precedence.
+        if settings is not None:
+            self._settings = settings
+        else:
+            config_path = os.environ.get("NULLAIN_CONFIG") or str(
+                Path(self._workspace_root).resolve() / "nullain.toml"
+            )
+            self._settings = load_settings(config_path)
         self._model = model
         self._max_steps = max_steps
         self._timeout = timeout

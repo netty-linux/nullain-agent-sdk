@@ -392,13 +392,17 @@ def _needs_setup(workspace: str) -> bool:
     """Whether the first-run wizard should run before ``chat``/``run``.
 
     True only when no Ollama Cloud API key is resolvable from any source
-    (workspace ``nullain.toml``, ``NULLAIN_CONFIG``, or the
+    (``NULLAIN_CONFIG`` if set, else ``<workspace>/nullain.toml``, or the
     ``OLLAMA_API_KEY``/``NULLAIN_OLLAMA_API_KEY`` env vars) — i.e. the
     agent could not actually make a request yet. A key present anywhere in
     that chain skips the wizard, so an already-configured workspace (or one
-    relying on a global env var) is never interrupted.
+    relying on a global env var) is never interrupted. Resolution always
+    keys off the given ``workspace``, never the process's own cwd — this
+    matters when ``workspace`` differs from where the CLI happens to be
+    invoked from (e.g. ``nullain run --workspace ../other-project ...``).
     """
-    config_path = Path(workspace) / "nullain.toml" if workspace != "." else _find_config_path()
+    env_path = os.environ.get("NULLAIN_CONFIG")
+    config_path = Path(env_path) if env_path else Path(workspace) / "nullain.toml"
     try:
         settings = load_settings(config_path if config_path.exists() else None)
     except Exception:

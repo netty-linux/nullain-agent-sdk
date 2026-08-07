@@ -51,5 +51,6 @@ coverage.xml
 
 # Project specific
 ~/.nullain/
+.nullain/
 schema/
 scratch/

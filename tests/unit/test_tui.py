@@ -1,7 +1,10 @@
 """Unit tests for the Rich-based TUIRenderer (M15)."""
 
+import io
+import sys
 from pathlib import Path
 
+import pytest
 from nullain.agent import RunResult
 from nullain.events import (
     ErrorEvent,
@@ -13,7 +16,7 @@ from nullain.events import (
     ToolResultEvent,
 )
 from nullain.llm import ToolCall
-from nullain.tui import TUIRenderer
+from nullain.tui import TUIRenderer, _legacy_safe_stdout  # type: ignore[reportPrivateUsage]
 from rich.console import Console
 
 
@@ -312,3 +315,32 @@ def test_legacy_windows_console_uses_ascii_safe_markers() -> None:
     out = _text_out(console)
     assert "OK" in out
     assert "✓" not in out  # the Unicode checkmark must not appear
+
+
+def test_legacy_safe_stdout_does_not_crash_on_unencodable_model_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: found via live testing — a model response containing an
+    emoji (text this module has no control over, unlike the fixed ✓/✗/⚠
+    glyphs) crashed the whole CLI with UnicodeEncodeError on a legacy
+    Windows console (cp1252), even after the marker/spinner ASCII fallback.
+    _legacy_safe_stdout() must reconfigure a non-UTF-8 stdout to replace
+    unencodable characters instead of raising."""
+    fake_stdout = io.TextIOWrapper(io.BytesIO(), encoding="cp1252", errors="strict")
+    monkeypatch.setattr(sys, "stdout", fake_stdout)
+
+    safe = _legacy_safe_stdout()
+    # Writing an emoji must not raise, and must produce output (not silently
+    # drop the whole write).
+    safe.write("Hi there! \U0001f44b\n")
+    safe.flush()
+
+
+def test_legacy_safe_stdout_leaves_utf8_stdout_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A real UTF-8 terminal is not touched — no unnecessary reconfiguration."""
+    fake_stdout = io.TextIOWrapper(io.BytesIO(), encoding="utf-8", errors="strict")
+    monkeypatch.setattr(sys, "stdout", fake_stdout)
+
+    safe = _legacy_safe_stdout()
+    assert safe is fake_stdout
+    assert safe.errors == "strict"
