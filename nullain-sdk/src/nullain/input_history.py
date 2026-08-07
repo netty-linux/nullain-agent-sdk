@@ -25,7 +25,13 @@ import sys
 if sys.platform == "win32":
     import msvcrt
 else:
-    import readline as _readline  # noqa: F401  (imported for its input() side effect)
+    # Imported for its side effect on input(): readline patches input()
+    # itself to add line editing and Up/Down history recall. Never
+    # referenced directly, hence the lint/typecheck suppressions — ruff's
+    # F401 (unused import) and pyright's reportUnusedImport both flag it
+    # otherwise, with no way to express "imported for its side effect"
+    # more directly for a stdlib module.
+    import readline as _readline  # noqa: F401  # pyright: ignore[reportUnusedImport]
 
 
 class InputHistory:
@@ -125,7 +131,7 @@ def _prompt_windows(prompt: str, history: list[str]) -> str:
                 redraw()
             continue
         try:
-            decoded = ch.decode("utf-8")  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportUnknownArgumentType]
+            decoded: str = ch.decode("utf-8")  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
         except UnicodeDecodeError:
             continue
         if decoded.isprintable():
