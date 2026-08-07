@@ -659,6 +659,76 @@ class AgentLoop:
 
         return last_output, correction_budget
 
+    def _step_touched_target_file(
+        self, tool_calls: list[ToolCall], active_spec: TaskSpec | None
+    ) -> bool:
+        """Whether this step's calls wrote/edited one of the spec's target_files.
+
+        Used to gate incremental verification (M14): running
+        ``spec.verification_commands`` (e.g. a test suite) is only worth its
+        cost right after a write that could plausibly satisfy or break them,
+        not on every step (which would re-run the command uselessly on
+        read-only exploration steps) and not only once at the very end (which
+        is what full-run VERIFY already does).
+        """
+        if active_spec is None or not active_spec.target_files:
+            return False
+        target_set = set(active_spec.target_files)
+        for tc in tool_calls:
+            if self.tools.is_read_only(tc.name):
+                continue
+            resource = self._resource_key(tc)
+            if resource is not None and resource in target_set:
+                return True
+        return False
+
+    async def _run_incremental_verify(
+        self,
+        active_spec: TaskSpec,
+        sess_id: str,
+        accumulated_events: list[BaseEvent],
+    ) -> None:
+        """Run spec.verification_commands right after a target-file write (M14).
+
+        Unlike the end-of-run VERIFY phase, this only runs
+        ``verification_commands`` (a test suite, a linter, ...) — not the
+        target-file-exists check or the acceptance-criteria judge, both of
+        which are meaningful only once the model believes it is done. A
+        failure here is reported the same way a tool error is: as a
+        [SELF-CORRECTION]-style reflection, so the model learns it broke
+        something several steps before it would otherwise find out at the
+        final VERIFY — mirroring Claude Code running tests as it goes rather
+        than only at the end of a task.
+
+        Silently no-ops when there are no ``verification_commands`` to run.
+        """
+        if not active_spec.verification_commands:
+            return
+        failed: list[str] = []
+        for cmd in active_spec.verification_commands:
+            cmd_tokens = cmd.strip().split()
+            if not cmd_tokens:
+                continue
+            try:
+                cmd_res = await self.tools.execute("bash", {"command_args": cmd_tokens})
+                if cmd_res.is_error:
+                    failed.append(f"'{cmd}' failed: {cmd_res.output}")
+            except Exception as err:
+                failed.append(f"'{cmd}' execution error: {err}")
+
+        if not failed:
+            return
+        reflection = UserMessageEvent(
+            session_id=sess_id,
+            content=(
+                "[INCREMENTAL-VERIFY] Running the task's verification commands "
+                f"after your last change found a problem: {'; '.join(failed)}\n"
+                "Fix this before continuing."
+            ),
+        )
+        await self._emit(reflection)
+        accumulated_events.append(reflection)
+
     async def _call_provider(
         self,
         req: CompletionRequest,
@@ -1164,6 +1234,15 @@ class AgentLoop:
                     accumulated_events,
                     correction_budget,
                 )
+
+                # Incremental verification (M14): a write to one of the
+                # spec's target_files runs verification_commands right away
+                # instead of waiting for the end-of-run VERIFY phase, so a
+                # broken test/lint surfaces while there are still steps left
+                # to fix it.
+                if self._step_touched_target_file(tool_calls, active_spec):
+                    assert active_spec is not None  # guaranteed by the check above
+                    await self._run_incremental_verify(active_spec, sess_id, accumulated_events)
         except BudgetExceededError as err:
             terminal_status = "budget"
             terminal_error = str(err)

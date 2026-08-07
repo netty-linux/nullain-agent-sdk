@@ -1046,3 +1046,110 @@ async def test_agent_loop_disjoint_writes_execute_concurrently(tmp_path: Path) -
     assert result.status == "success"
     assert (workspace / "a.txt").read_text() == "A"
     assert (workspace / "b.txt").read_text() == "B"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_incremental_verify_flags_broken_command_before_final_answer(
+    tmp_path: Path,
+) -> None:
+    """A write to a target_file runs verification_commands right away (M14).
+
+    A fake bash tool fails the first time (right after the target file is
+    written) and succeeds the second time. The failure must be surfaced as
+    an [INCREMENTAL-VERIFY] reflection mid-run — before the model's final
+    answer — not only discovered by the end-of-run VERIFY phase.
+    """
+    from nullain.agent.spec import BASH_NONZERO_PREFIX
+    from nullain.tools.decorator import tool as tool_decorator
+    from nullain.tools.result import ToolResult
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    registry = ToolRegistry()
+    register_default_tools(registry, workspace)
+
+    call_count = {"n": 0}
+
+    @tool_decorator(name="bash", description="fake bash for incremental verify", read_only=False)
+    async def fake_bash(command_args: list[str]) -> ToolResult:
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            return ToolResult(
+                output=f"{BASH_NONZERO_PREFIX} 1\nAssertionError: expected 3 facts, got 1",
+                is_error=True,
+                error_type="ToolError",
+            )
+        return ToolResult(output="3 passed", is_error=False)
+
+    registry.register(fake_bash)
+
+    spec_chunk = CompletionChunk(
+        delta_text=(
+            '{"objective": "Create FACTS.txt file", '
+            '"steps": ["Write 3 facts"], '
+            '"target_files": ["FACTS.txt"], '
+            '"acceptance_criteria": [], '
+            '"verification_commands": ["pytest"]}'
+        )
+    )
+    write_chunk = CompletionChunk(
+        tool_calls=[
+            ToolCall(id="w1", name="write_file", arguments={"path": "FACTS.txt", "content": "1."}),
+        ],
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
+    )
+    fix_chunk = CompletionChunk(
+        tool_calls=[
+            ToolCall(
+                id="w2",
+                name="write_file",
+                arguments={"path": "FACTS.txt", "content": "1.\n2.\n3."},
+            )
+        ],
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
+    )
+    final_chunk = CompletionChunk(
+        delta_text="Fixed: FACTS.txt has 3 facts.",
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+
+    fake_provider = FakeSequenceProvider([spec_chunk, write_chunk, fix_chunk, final_chunk])
+    bus = EventBus()
+    events_log: list[BaseEvent] = []
+
+    async def track_events(ev: BaseEvent) -> None:
+        events_log.append(ev)
+
+    bus.subscribe("*", track_events)
+
+    agent = AgentLoop(
+        provider=fake_provider,
+        tools=registry,
+        event_bus=bus,
+        max_steps=10,
+        workspace_root=workspace,
+    )
+
+    result = await agent.run_result("Create FACTS.txt file")
+    assert result.status == "success"
+    # 2 incremental runs (fail after first write, pass after fix) + 1 more
+    # from the end-of-run VERIFY phase re-running verification_commands.
+    assert call_count["n"] == 3
+
+    user_msgs = [e for e in events_log if e.event_type == "user_message"]
+    incremental_msgs = [m for m in user_msgs if "[INCREMENTAL-VERIFY]" in getattr(m, "content", "")]
+    assert len(incremental_msgs) == 1
+    assert "expected 3 facts" in getattr(incremental_msgs[0], "content", "")
+
+    # The incremental-verify reflection must appear before the model's final
+    # answer, not after — it should influence the next step, not just be
+    # logged post-hoc.
+    def _is_final_answer(e: BaseEvent) -> bool:
+        return e.event_type == "model_response" and "Fixed: FACTS.txt" in (
+            getattr(e, "content", "") or ""
+        )
+
+    final_answer_idx = next(i for i, e in enumerate(events_log) if _is_final_answer(e))
+    incremental_idx = events_log.index(incremental_msgs[0])
+    assert incremental_idx < final_answer_idx
