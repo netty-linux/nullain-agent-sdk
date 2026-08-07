@@ -7,6 +7,7 @@ import shutil
 import tempfile
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, cast
 
@@ -108,6 +109,39 @@ def _project_authority_policy(
         # the meet with Authority.from_policy(base).
         deny_patterns=sorted(effective.deny_patterns),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class SpawnTask:
+    """One sub-agent task for :meth:`AgentLoop.spawn_many` (M13).
+
+    Mirrors :meth:`AgentLoop.spawn`'s per-call arguments so a fan-out is just
+    a list of the same options ``spawn`` already accepts individually.
+    """
+
+    prompt: str
+    tools: "ToolRegistry | None" = None
+    model: str | None = None
+    max_steps: int | None = None
+    authority: "Authority | None" = None
+    isolation: Literal["worktree", None] = None
+
+
+@dataclass(frozen=True, slots=True)
+class SpawnOutcome:
+    """Result of one task from :meth:`AgentLoop.spawn_many`.
+
+    ``error`` is set (and ``text`` is empty) when the task's ``spawn`` call
+    raised a domain error (e.g. worktree setup failure, authority denial) —
+    captured per-task so one failing sub-agent does not cancel its siblings.
+    """
+
+    text: str
+    error: str | None = None
+
+    @property
+    def success(self) -> bool:
+        return self.error is None
 
 
 class AgentLoop:
@@ -472,6 +506,73 @@ class AgentLoop:
                 )
             return result
 
+    @staticmethod
+    def _resource_key(tc: ToolCall) -> str | None:
+        """Derive the filesystem resource a tool call targets, if any.
+
+        Mirrors the path-argument heuristic ``ToolRegistry._evaluate_permission``
+        already uses for permission checks (``file_path`` / ``target_file`` /
+        ``path``). Returns ``None`` when the call's arguments are unparsed
+        (streaming fragment) or carry no recognizable path — such calls are
+        treated as touching an tool-scoped resource (see ``_batch_by_conflict``)
+        rather than assumed independent, since a tool like ``bash`` can touch
+        anything.
+        """
+        args = tc.arguments
+        if not isinstance(args, dict):
+            return None
+        for key in ("file_path", "target_file", "path"):
+            value = args.get(key)
+            if isinstance(value, str) and value:
+                return value
+        return None
+
+    @classmethod
+    def _batch_by_conflict(
+        cls, tool_calls: list[ToolCall], tools: ToolRegistry
+    ) -> list[list[ToolCall]]:
+        """Group tool calls into ordered batches that can run concurrently.
+
+        Two calls conflict — and must land in different batches, preserving
+        submission order between them — when they are not both read-only AND
+        they touch the same resource. A call whose resource cannot be
+        determined (no recognizable path argument, e.g. ``bash``) is treated
+        as touching a resource scoped to its own tool name, so two ``bash``
+        calls still serialize with each other while a ``bash`` call runs
+        alongside unrelated file edits.
+
+        This subsumes the previous read-only-only concurrency rule: batches
+        of read-only calls with no path in common, or read/write calls on
+        disjoint files, now run in parallel too — matching Claude Code's
+        finer-grained parallel tool dispatch instead of an all-or-nothing gate.
+        """
+        batches: list[list[ToolCall]] = []
+        # For each batch, the resources already claimed by a non-read-only
+        # call in it (so a later read-only call on the same resource still
+        # conflicts and must wait for the next batch).
+        batch_resources: list[dict[str, bool]] = []  # resource -> is_write
+
+        for tc in tool_calls:
+            read_only = tools.is_read_only(tc.name)
+            resource = cls._resource_key(tc) or f"__tool__:{tc.name}"
+
+            placed = False
+            for batch, resources in zip(batches, batch_resources, strict=True):
+                existing_is_write = resources.get(resource)
+                conflicts = existing_is_write is not None and (existing_is_write or not read_only)
+                if conflicts:
+                    continue
+                batch.append(tc)
+                resources[resource] = resources.get(resource, False) or not read_only
+                placed = True
+                break
+
+            if not placed:
+                batches.append([tc])
+                batch_resources.append({resource: not read_only})
+
+        return batches
+
     async def _execute_tools(
         self,
         tool_calls: list[ToolCall],
@@ -481,10 +582,12 @@ class AgentLoop:
     ) -> tuple[str, int]:
         """Execute tool calls with self-correction injection on errors.
 
-        Dispatch policy: when every call in the batch targets a read-only
-        tool (and there is more than one), the calls run concurrently via
-        ``asyncio.gather``. Mixed or side-effecting batches run sequentially
-        to preserve ordering and avoid races on shared filesystem state.
+        Dispatch policy (M13): calls are grouped into conflict-free batches
+        via ``_batch_by_conflict`` — same-resource writes and any write
+        sharing a resource with a read stay ordered relative to each other,
+        while independent calls (disjoint files, or all read-only) run
+        concurrently within a batch. Batches themselves run in submission
+        order so a later batch never starts before an earlier one settles.
 
         Returns:
             Tuple of (last_output, remaining_correction_budget).
@@ -501,15 +604,20 @@ class AgentLoop:
             await self._emit(tc_ev)
             accumulated_events.append(tc_ev)
 
-        all_read_only = len(tool_calls) > 1 and all(
-            self.tools.is_read_only(tc.name) for tc in tool_calls
-        )
-        if all_read_only:
-            outcomes = await asyncio.gather(
-                *(self._run_tool_call(tc, sess_id) for tc in tool_calls)
-            )
-        else:
-            outcomes = [await self._run_tool_call(tc, sess_id) for tc in tool_calls]
+        batches = self._batch_by_conflict(tool_calls, self.tools)
+        outcomes_by_id: dict[str, ToolResult] = {}
+        for batch in batches:
+            if len(batch) > 1:
+                batch_outcomes = await asyncio.gather(
+                    *(self._run_tool_call(tc, sess_id) for tc in batch)
+                )
+            else:
+                batch_outcomes = [await self._run_tool_call(batch[0], sess_id)]
+            for tc, res in zip(batch, batch_outcomes, strict=True):
+                outcomes_by_id[tc.id] = res
+        # Restore submission order regardless of batch grouping, so events are
+        # emitted (and self-correction budget consumed) deterministically.
+        outcomes = [outcomes_by_id[tc.id] for tc in tool_calls]
 
         last_output = ""
         for tc, res in zip(tool_calls, outcomes, strict=True):
@@ -1468,9 +1576,9 @@ class AgentLoop:
             The sub-agent's final answer text.
 
         Note:
-            v1 is synchronous-in-place: the parent blocks until the sub-agent
-            finishes. Background worktrees / concurrent sub-agents are deferred
-            to a later milestone.
+            This call is synchronous-in-place: the parent blocks until the
+            sub-agent finishes. Use :meth:`spawn_many` to run several
+            sub-agents concurrently (M13).
         """
         if isolation == "worktree":
             return await self._spawn_worktree(prompt, tools, model, max_steps, authority)
@@ -1494,6 +1602,51 @@ class AgentLoop:
         )
         result = await child.run_result(prompt=prompt)
         return result.final_text
+
+    async def spawn_many(self, tasks: "list[SpawnTask]") -> "list[SpawnOutcome]":
+        """Run several sub-agents concurrently and collect their outcomes (M13).
+
+        Each task runs via :meth:`spawn` inside its own ``asyncio`` coroutine;
+        every sub-agent already gets its own event bus, context window, and
+        (for ``isolation="worktree"``) its own detached git worktree, so
+        concurrent sub-agents do not share mutable state with each other.
+        A task's failure is captured in its own ``SpawnOutcome`` rather than
+        cancelling siblings — one bad subtask should not sink an otherwise
+        successful fan-out.
+
+        Requires this loop to carry the SPAWN capability (same rule as
+        ``spawn`` — enforced per-task by ``_child_registry``).
+
+        Args:
+            tasks: The sub-agent tasks to run, in the order results are
+                returned. Each entry pairs a prompt with :meth:`spawn`'s
+                per-task options.
+
+        Returns:
+            One :class:`SpawnOutcome` per task, in the same order as ``tasks``.
+            A task whose ``isolation="worktree"`` run raises is reported with
+            ``error`` set and ``text=""`` rather than propagating, so sibling
+            tasks are unaffected; a non-worktree run that raises for a reason
+            other than the domain errors ``spawn`` itself may raise (e.g. a
+            programming error in a hook) still propagates, matching ``spawn``'s
+            own behavior for the same failure.
+        """
+
+        async def _run_one(task: SpawnTask) -> SpawnOutcome:
+            try:
+                text = await self.spawn(
+                    prompt=task.prompt,
+                    tools=task.tools,
+                    model=task.model,
+                    max_steps=task.max_steps,
+                    authority=task.authority,
+                    isolation=task.isolation,
+                )
+                return SpawnOutcome(text=text, error=None)
+            except NullainError as err:
+                return SpawnOutcome(text="", error=str(err))
+
+        return list(await asyncio.gather(*(_run_one(t) for t in tasks)))
 
     def _child_registry(
         self, base_registry: ToolRegistry, authority: Authority | None
@@ -1624,4 +1777,4 @@ class AgentLoop:
         return output
 
 
-__all__ = ["AgentLoop"]
+__all__ = ["AgentLoop", "SpawnOutcome", "SpawnTask"]
