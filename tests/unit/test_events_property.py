@@ -1,5 +1,7 @@
 """Property-based tests and unit tests for Event Sourcing layer using Hypothesis."""
 
+import json
+
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
@@ -111,11 +113,16 @@ def test_hypothesis_event_fold_property(user_texts: list[str]) -> None:
 
     original_state = Conversation.fold(session_id, original_events)
 
-    # Roundtrip JSON serialization / deserialization
+    # Roundtrip JSON serialization / deserialization. Dispatch on the
+    # `event_type` field via json.loads, not a substring match on the raw
+    # JSON text — a UserMessageEvent whose *content* happens to contain the
+    # literal text "user_message" (a real case Hypothesis found) would
+    # otherwise be misidentified as a ModelResponseEvent and fail to
+    # validate.
     serialized = [ev.model_dump_json() for ev in original_events]
     deserialized = [
         UserMessageEvent.model_validate_json(s)
-        if "user_message" in s
+        if json.loads(s)["event_type"] == "user_message"
         else ModelResponseEvent.model_validate_json(s)
         for s in serialized
     ]
