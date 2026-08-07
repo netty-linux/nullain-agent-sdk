@@ -172,6 +172,8 @@ class AgentLoop:
         max_compaction_attempts: int = 3,
         loop_detection_threshold: int = 3,
         verify_retry_max: int = 2,
+        max_steps_extension_ratio: float = 0.5,
+        progress_window: int = 5,
         authority: Authority | None = None,
         tool_factory: Callable[[Path], ToolRegistry] | None = None,
     ) -> None:
@@ -208,6 +210,18 @@ class AgentLoop:
                 Claude Code's fix-and-reverify loop instead of surfacing a
                 single-shot "verification_failed" the caller must retry
                 itself.
+            max_steps_extension_ratio: Fraction of ``max_steps`` granted as a
+                single, one-time extension when the loop reaches ``max_steps``
+                but has shown real progress recently (M14) — a write to one
+                of the active spec's ``target_files`` within the last
+                ``progress_window`` steps. E.g. 0.5 with ``max_steps=25``
+                grants 12 extra steps (rounded down), once. A run stuck
+                without progress gets no extension: it hits ``max_steps`` as
+                before. Set to 0 to disable extensions entirely (strict fixed
+                cap, pre-M14 behavior).
+            progress_window: How many trailing steps count as "recent" for
+                the extension check above. A target-file write further back
+                than this does not qualify the run for an extension.
             authority: Authority enforced for this loop (P4.24). None = the
                 unrestricted trust root (no capability/allowed-tool gate). A
                 materialised Authority is set on spawned subagents by
@@ -251,8 +265,11 @@ class AgentLoop:
         # loop-detection Gemini CLI uses to escape thrash.
         self.loop_detection_threshold = loop_detection_threshold
         self.verify_retry_max = verify_retry_max
+        self.max_steps_extension_ratio = max_steps_extension_ratio
+        self.progress_window = progress_window
         self.tool_factory = tool_factory
         self._compaction_attempts = 0
+        self._step_extension_granted = False
         # Incremental conversation fold (M10 D3): a cached ConversationState
         # updated by appending only new events, shared between the budget check
         # and message building in the same step to avoid folding the whole
@@ -1120,9 +1137,15 @@ class AgentLoop:
         loop_detected = False
         last_step_signature: str | None = None
         repeat_count = 0
+        # Steps since a target-file write, for the adaptive extension check
+        # below. Starts at progress_window + 1 (i.e. "no recent progress")
+        # rather than 0, so a run that never touches a target file (no
+        # active_spec, or a task with none) never qualifies for an extension.
+        steps_since_progress = self.progress_window + 1
 
         try:
-            while step < self.max_steps:
+            effective_max_steps = self.max_steps
+            while step < effective_max_steps:
                 # Timeout check
                 elapsed = self.clock.now() - start_time
                 if elapsed > self.timeout:
@@ -1241,9 +1264,38 @@ class AgentLoop:
                 # instead of waiting for the end-of-run VERIFY phase, so a
                 # broken test/lint surfaces while there are still steps left
                 # to fix it.
-                if self._step_touched_target_file(tool_calls, active_spec):
+                touched_target = self._step_touched_target_file(tool_calls, active_spec)
+                if touched_target:
                     assert active_spec is not None  # guaranteed by the check above
                     await self._run_incremental_verify(active_spec, sess_id, accumulated_events)
+                    steps_since_progress = 0
+                else:
+                    steps_since_progress += 1
+
+                # Adaptive step budget (M14): reaching the cap with recent
+                # real progress (a target-file write within the last
+                # progress_window steps) grants a one-time extension instead
+                # of ending the run right where it was still moving forward.
+                # A run with no recent progress gets no extension — it hits
+                # max_steps as it always did. Granted at most once per run
+                # (across verify-fix-reverify cycles too, via the instance
+                # flag reset in _run_pipeline_body).
+                if (
+                    step >= effective_max_steps
+                    and not self._step_extension_granted
+                    and self.max_steps_extension_ratio > 0
+                    and steps_since_progress <= self.progress_window
+                ):
+                    extension = int(self.max_steps * self.max_steps_extension_ratio)
+                    if extension > 0:
+                        effective_max_steps += extension
+                        self._step_extension_granted = True
+                        logger.info(
+                            "step_budget_extended",
+                            session_id=sess_id,
+                            original_max_steps=self.max_steps,
+                            effective_max_steps=effective_max_steps,
+                        )
         except BudgetExceededError as err:
             terminal_status = "budget"
             terminal_error = str(err)
@@ -1323,6 +1375,9 @@ class AgentLoop:
         accumulated_events: list[BaseEvent] = list(events_history or [])
         correction_budget = self.self_correction_max
         self._compaction_attempts = 0
+        # Adaptive step budget (M14): the one-time extension is granted at
+        # most once per run, tracked across verify-fix-reverify cycles.
+        self._step_extension_granted = False
         # Fresh incremental fold per run (M10 D3).
         self._fold = None
         self._folded_count = 0
@@ -1474,10 +1529,15 @@ class AgentLoop:
             status = "loop_detected"
         elif not completed and step >= self.max_steps:
             status = "max_steps"
+            extension_note = (
+                f" (extended from {self.max_steps} via the adaptive step budget)"
+                if self._step_extension_granted
+                else ""
+            )
             err_ev = ErrorEvent(
                 session_id=sess_id,
                 error_type="MaxStepsExceeded",
-                message=f"Agent loop reached maximum step count ({self.max_steps})",
+                message=f"Agent loop reached maximum step count ({step}){extension_note}",
             )
             await self._emit(err_ev)
         elif verify_failed:

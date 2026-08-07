@@ -1153,3 +1153,176 @@ async def test_agent_loop_incremental_verify_flags_broken_command_before_final_a
     final_answer_idx = next(i for i, e in enumerate(events_log) if _is_final_answer(e))
     incremental_idx = events_log.index(incremental_msgs[0])
     assert incremental_idx < final_answer_idx
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_grants_one_time_extension_on_recent_progress(tmp_path: Path) -> None:
+    """Hitting max_steps with a recent target-file write grants one extension (M14).
+
+    max_steps=3, progress_window=5: step 1 writes the target file (recent
+    progress), steps 2-3 are unrelated reads that exhaust the original
+    budget. Because the write is within the progress window, the run gets a
+    one-time extension instead of failing with status="max_steps" — and
+    completes successfully once the model produces its final answer within
+    the extended budget.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    registry = ToolRegistry()
+    register_default_tools(registry, workspace)
+
+    spec_chunk = CompletionChunk(
+        delta_text=(
+            '{"objective": "Create FACTS.txt file", '
+            '"steps": ["Write facts"], '
+            '"target_files": ["FACTS.txt"], '
+            '"acceptance_criteria": []}'
+        )
+    )
+    write_chunk = CompletionChunk(
+        tool_calls=[
+            ToolCall(id="w1", name="write_file", arguments={"path": "FACTS.txt", "content": "1."})
+        ],
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
+    )
+    # Two filler reads that exhaust max_steps=3 (spec + write + 2 reads = 3
+    # ReAct steps after the write; the loop's step counter only counts Act
+    # phase iterations, not the Plan-phase spec call).
+    filler_chunks = [
+        CompletionChunk(
+            tool_calls=[ToolCall(id=f"r{i}", name="read_file", arguments={"path": f"f{i}.txt"})],
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+        for i in range(2)
+    ]
+    final_chunk = CompletionChunk(
+        delta_text="Done: FACTS.txt created.",
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+
+    fake_provider = FakeSequenceProvider([spec_chunk, write_chunk, *filler_chunks, final_chunk])
+    bus = EventBus()
+    events_log: list[BaseEvent] = []
+
+    async def track_events(ev: BaseEvent) -> None:
+        events_log.append(ev)
+
+    bus.subscribe("*", track_events)
+
+    agent = AgentLoop(
+        provider=fake_provider,
+        tools=registry,
+        event_bus=bus,
+        max_steps=3,
+        progress_window=5,
+        max_steps_extension_ratio=0.5,
+        workspace_root=workspace,
+    )
+
+    result = await agent.run_result("Create FACTS.txt file")
+    assert result.status == "success"
+    assert result.steps > 3  # ran past the original max_steps via the extension
+    assert agent._step_extension_granted is True  # type: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_no_extension_without_recent_progress(tmp_path: Path) -> None:
+    """No target-file write within progress_window: max_steps hits normally (M14).
+
+    Same shape as the extension test, but progress_window=1 and enough
+    filler reads after the write that by the time max_steps is reached, the
+    write is no longer "recent" — so no extension is granted and the run
+    ends with status="max_steps" exactly at the configured cap.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    registry = ToolRegistry()
+    register_default_tools(registry, workspace)
+
+    spec_chunk = CompletionChunk(
+        delta_text=(
+            '{"objective": "Create FACTS.txt file", '
+            '"steps": ["Write facts"], '
+            '"target_files": ["FACTS.txt"], '
+            '"acceptance_criteria": []}'
+        )
+    )
+    write_chunk = CompletionChunk(
+        tool_calls=[
+            ToolCall(id="w1", name="write_file", arguments={"path": "FACTS.txt", "content": "1."})
+        ],
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
+    )
+    # Distinct paths per filler read so loop detection does not fire before
+    # max_steps is reached — this test isolates the extension decision, not
+    # loop detection.
+    filler_chunks = [
+        CompletionChunk(
+            tool_calls=[ToolCall(id=f"r{i}", name="read_file", arguments={"path": f"f{i}.txt"})],
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+        for i in range(4)
+    ]
+
+    fake_provider = FakeSequenceProvider([spec_chunk, write_chunk, *filler_chunks])
+    agent = AgentLoop(
+        provider=fake_provider,
+        tools=registry,
+        max_steps=4,
+        progress_window=1,
+        max_steps_extension_ratio=0.5,
+        workspace_root=workspace,
+    )
+
+    result = await agent.run_result("Create FACTS.txt file")
+    assert result.status == "max_steps"
+    assert result.steps == 4
+    assert agent._step_extension_granted is False  # type: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_step_extension_disabled_by_zero_ratio(tmp_path: Path) -> None:
+    """max_steps_extension_ratio=0 preserves the strict pre-M14 fixed cap."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    registry = ToolRegistry()
+    register_default_tools(registry, workspace)
+
+    spec_chunk = CompletionChunk(
+        delta_text=(
+            '{"objective": "Create FACTS.txt file", '
+            '"steps": ["Write facts"], '
+            '"target_files": ["FACTS.txt"], '
+            '"acceptance_criteria": []}'
+        )
+    )
+    write_chunk = CompletionChunk(
+        tool_calls=[
+            ToolCall(id="w1", name="write_file", arguments={"path": "FACTS.txt", "content": "1."})
+        ],
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
+    )
+    filler_chunks = [
+        CompletionChunk(
+            tool_calls=[ToolCall(id=f"r{i}", name="read_file", arguments={"path": f"f{i}.txt"})],
+            usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+        for i in range(3)
+    ]
+
+    fake_provider = FakeSequenceProvider([spec_chunk, write_chunk, *filler_chunks])
+    agent = AgentLoop(
+        provider=fake_provider,
+        tools=registry,
+        max_steps=3,
+        progress_window=5,
+        max_steps_extension_ratio=0.0,
+        workspace_root=workspace,
+    )
+
+    result = await agent.run_result("Create FACTS.txt file")
+    assert result.status == "max_steps"
+    assert result.steps == 3
