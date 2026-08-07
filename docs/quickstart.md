@@ -6,7 +6,10 @@ From zero to a running agent in a few minutes.
 
 - Python 3.12+
 - [uv](https://github.com/astral-sh/uv)
-- An Ollama Cloud API key (set `OLLAMA_API_KEY`)
+- An [Ollama Cloud](https://ollama.com) API key — this is the only LLM
+  provider currently wired up. Sign up at ollama.com, generate an API key,
+  and either export it as `OLLAMA_API_KEY` or let the first-run setup
+  wizard below prompt you for it.
 
 ## Install
 
@@ -15,6 +18,10 @@ git clone https://github.com/netty-linux/nullain-agent-sdk.git
 cd nullain-agent-sdk
 uv sync
 ```
+
+If you'd rather not set the environment variable up front, skip ahead —
+running `nullain` with no configuration yet triggers a setup wizard that
+asks for the key interactively before opening chat.
 
 ## The one-liner
 

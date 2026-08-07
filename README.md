@@ -6,6 +6,7 @@
 
 **The Production-Grade Autonomous Agent Engine & SDK for Python**
 
+[![CI](https://github.com/netty-linux/nullain-agent-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/netty-linux/nullain-agent-sdk/actions/workflows/ci.yml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
 [![Architecture: Hexagonal](https://img.shields.io/badge/architecture-Hexagonal-purple.svg)](https://github.com/netty-linux/nullain-agent-sdk)
 [![Type Checker: Pyright Strict](https://img.shields.io/badge/pyright-strict-green.svg)](https://github.com/microsoft/pyright)
@@ -105,6 +106,11 @@ The repository is organized as a high-efficiency `uv` monorepo:
 
 - **Python 3.12+**
 - [**uv**](https://github.com/astral-sh/uv) (fast Python package installer)
+- An **[Ollama Cloud](https://ollama.com)** API key — the SDK talks to
+  Ollama Cloud's hosted models by default (no other provider is wired up
+  yet). Sign up and grab a key before your first run, or run `nullain`
+  with no arguments the first time and its setup wizard will walk you
+  through it.
 
 ### Setup
 
@@ -115,6 +121,9 @@ cd nullain-agent-sdk
 
 # Sync virtual environment & dependencies
 uv sync
+
+# Set your Ollama Cloud API key (or let `nullain`'s first-run wizard ask for it)
+export OLLAMA_API_KEY="your-key-here"
 ```
 
 ### CLI
@@ -170,9 +179,17 @@ print(result.final_text)
 - [docs/quickstart.md](docs/quickstart.md) — from zero to a running agent.
 - [docs/configuration.md](docs/configuration.md) — every `nullain.toml` section.
 - [docs/tools.md](docs/tools.md) — the built-in tools and their capabilities.
+- [docs/tui.md](docs/tui.md) — what the terminal UI actually looks like.
 - [docs/architecture.md](docs/architecture.md) — the pipeline and layers.
 - [docs/api-stability.md](docs/api-stability.md) — what is public API under SemVer.
+- [CHANGELOG.md](CHANGELOG.md) — notable changes across versions.
 - `examples/` — runnable examples: `01_basic_agent.py` … `05_mcp_server.py`.
+
+### Contributing
+
+- [CONTRIBUTING.md](CONTRIBUTING.md) — dev setup, workflow, code style.
+- [SECURITY.md](SECURITY.md) — how to report a vulnerability.
+- [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)
 
 ---
 
