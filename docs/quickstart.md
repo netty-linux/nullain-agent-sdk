@@ -39,8 +39,9 @@ uv run nullain run "list the python files" --json | jq '.type'
 uv run nullain chat
 ```
 
-Multi-turn session with streaming and TTY permission approval for `ASK`-level
-tool calls.
+Multi-turn session with streaming, an arrow-key permission menu for
+`ASK`-level tool calls, and Up/Down command history — see
+[tui.md](tui.md) for what it looks like.
 
 ## From Python
 
@@ -106,6 +107,8 @@ agent = Agent.from_config("path/to/nullain.toml")
 
 - [configuration.md](configuration.md) — every `nullain.toml` section.
 - [tools.md](tools.md) — the built-in tools and their capabilities.
+- [tui.md](tui.md) — what the terminal actually looks like: tool-call status
+  lines, permission prompts, command history, diffs.
 - [architecture.md](architecture.md) — how the pipeline fits together.
 - [api-stability.md](api-stability.md) — what is public API under SemVer.
 - `examples/` — runnable examples: `01_basic_agent.py` … `05_mcp_server.py`.
