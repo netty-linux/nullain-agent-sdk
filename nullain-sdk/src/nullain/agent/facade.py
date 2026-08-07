@@ -195,6 +195,7 @@ class Agent:
                     deny_network=self._settings.sandbox.deny_network,
                 ),
                 event_bus=self.event_bus,
+                bash_timeout=self._settings.agent.bash_timeout,
             )
 
     @classmethod

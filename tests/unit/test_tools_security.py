@@ -76,6 +76,18 @@ async def test_subprocess_timeout(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.asyncio
+async def test_bash_tool_honors_configured_timeout(tmp_path: Path) -> None:
+    """Regression (M20): create_bash_tool's timeout kwarg used to be ignored
+    — execute_subprocess was always called with the hardcoded 120.0 default,
+    so a shorter (or longer) configured bash_timeout never took effect."""
+    from nullain_tools.bash import create_bash_tool
+
+    bash_tool = create_bash_tool(tmp_path, timeout=0.5)
+    with pytest.raises(ToolExecutionError, match="timed out"):
+        await bash_tool.func(["python", "-c", "import time; time.sleep(5)"])
+
+
 @given(subpath=st.text(min_size=1, max_size=50))
 @settings(suppress_health_check=[HealthCheck.function_scoped_fixture])
 def test_hypothesis_path_safety(subpath: str, tmp_path: Path) -> None:

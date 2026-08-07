@@ -28,6 +28,7 @@ def register_default_tools(
     event_bus: EventBus | None = None,
     session_id: str = "default",
     checkpoint_store: CheckpointStore | None = None,
+    bash_timeout: float = 300.0,
 ) -> None:
     """Register all built-in tools into a ToolRegistry.
 
@@ -56,6 +57,10 @@ def register_default_tools(
             write tools snapshot pre-write state and an ``undo`` tool is
             registered. When None, writes proceed without snapshots (backward
             compatible).
+        bash_timeout: Wall-clock timeout (seconds) for each bash/git
+            subprocess (M20). Defaults to 300s — long enough for a real
+            dependency install, test run, or build to finish rather than
+            being killed mid-command.
     """
     tools: list[RegisteredTool] = []
     tools.extend(
@@ -67,8 +72,16 @@ def register_default_tools(
             checkpoint_store=checkpoint_store,
         )
     )
-    tools.append(create_bash_tool(workspace_root, sandbox=sandbox, sandbox_opts=sandbox_opts))
-    tools.extend(create_git_tools(workspace_root, sandbox=sandbox, sandbox_opts=sandbox_opts))
+    tools.append(
+        create_bash_tool(
+            workspace_root, sandbox=sandbox, sandbox_opts=sandbox_opts, timeout=bash_timeout
+        )
+    )
+    tools.extend(
+        create_git_tools(
+            workspace_root, sandbox=sandbox, sandbox_opts=sandbox_opts, timeout=bash_timeout
+        )
+    )
     tools.append(create_web_fetch_tool())
     tools.append(create_ask_user_tool(ask_user_callback))
     # Tool discovery (P4.26): lets the agent search for and hydrate deferred-

@@ -350,6 +350,7 @@ async def run_agentd(
         ask_user_callback=ask_user_callback,
         sandbox=sandbox,
         sandbox_opts=_sandbox_opts(settings, ws_root),
+        bash_timeout=settings.agent.bash_timeout,
     )
 
     def _build_worktree_registry(worktree_root: Path, sess_id: str) -> ToolRegistry:
@@ -377,6 +378,7 @@ async def run_agentd(
             event_bus=event_bus,
             session_id=sess_id,
             checkpoint_store=CheckpointStore(wt_root),
+            bash_timeout=settings.agent.bash_timeout,
         )
         return wt_registry
 
@@ -427,6 +429,7 @@ async def run_agentd(
                     # M11: a fresh checkpoint store per session so write tools
                     # snapshot pre-write state and the undo tool can restore it.
                     checkpoint_store=CheckpointStore(ws_root),
+                    bash_timeout=settings.agent.bash_timeout,
                 )
 
                 # Register each MCP server's tools into the fresh per-session

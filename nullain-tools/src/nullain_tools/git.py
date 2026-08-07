@@ -12,6 +12,7 @@ def create_git_tools(
     workspace_root: str | Path,
     sandbox: Sandbox | None = None,
     sandbox_opts: SandboxOptions | None = None,
+    timeout: float = 300.0,
 ) -> list[RegisteredTool]:
     root = Path(workspace_root).resolve()
 
@@ -23,7 +24,7 @@ def create_git_tools(
     )
     async def git_status() -> str | ToolResult:
         _, output = await execute_subprocess(
-            ["git", "status"], cwd=root, sandbox=sandbox, sandbox_opts=sandbox_opts
+            ["git", "status"], cwd=root, timeout=timeout, sandbox=sandbox, sandbox_opts=sandbox_opts
         )
         return output
 
@@ -35,7 +36,7 @@ def create_git_tools(
     )
     async def git_diff() -> str | ToolResult:
         _, output = await execute_subprocess(
-            ["git", "diff"], cwd=root, sandbox=sandbox, sandbox_opts=sandbox_opts
+            ["git", "diff"], cwd=root, timeout=timeout, sandbox=sandbox, sandbox_opts=sandbox_opts
         )
         return output or "No uncommitted changes."
 
@@ -46,9 +47,15 @@ def create_git_tools(
     )
     async def git_commit(message: str, files: list[str] | None = None) -> str | ToolResult:
         add_args = ["git", "add"] + (files if files else ["."])
-        await execute_subprocess(add_args, cwd=root, sandbox=sandbox, sandbox_opts=sandbox_opts)
+        await execute_subprocess(
+            add_args, cwd=root, timeout=timeout, sandbox=sandbox, sandbox_opts=sandbox_opts
+        )
         ret, commit_output = await execute_subprocess(
-            ["git", "commit", "-m", message], cwd=root, sandbox=sandbox, sandbox_opts=sandbox_opts
+            ["git", "commit", "-m", message],
+            cwd=root,
+            timeout=timeout,
+            sandbox=sandbox,
+            sandbox_opts=sandbox_opts,
         )
         if ret != 0:
             return ToolResult(

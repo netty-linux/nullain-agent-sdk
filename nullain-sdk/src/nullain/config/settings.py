@@ -36,6 +36,13 @@ class AgentConfig(BaseModel):
     max_steps: int = 100
     max_tokens: int | None = 2_000_000
     timeout: float = 300.0
+    # Wall-clock timeout for a single bash/git subprocess (M20). The 120s
+    # default `execute_subprocess` shipped with cuts off real coding-session
+    # commands early — dependency installs, full test suites, builds — well
+    # before they finish, well before the ReAct loop even gets a chance to
+    # decide the command is stuck. 300s gives those room; a genuinely hung
+    # process is still killed rather than left running forever.
+    bash_timeout: float = 300.0
 
 
 class TierConfig(BaseModel):

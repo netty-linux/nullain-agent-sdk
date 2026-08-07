@@ -12,6 +12,7 @@ def create_bash_tool(
     workspace_root: str | Path,
     sandbox: Sandbox | None = None,
     sandbox_opts: SandboxOptions | None = None,
+    timeout: float = 300.0,
 ) -> RegisteredTool:
     root = Path(workspace_root).resolve()
 
@@ -26,7 +27,7 @@ def create_bash_tool(
         returncode, output = await execute_subprocess(
             cmd_args=command_args,
             cwd=root,
-            timeout=120.0,
+            timeout=timeout,
             sandbox=sandbox,
             sandbox_opts=sandbox_opts,
         )
