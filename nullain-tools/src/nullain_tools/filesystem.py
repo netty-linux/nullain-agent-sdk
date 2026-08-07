@@ -54,15 +54,20 @@ class FileAccessTracker:
 
     The read cache (M14) keys a rendered page on ``(path, offset, limit,
     mtime_ns, size)``: a repeated ``read_file`` call with the same arguments
-    returns the cached page without touching disk, but the mtime/size
-    componenets of the key mean any change to the file — whether from this
-    session's own ``write_file``/``edit_file``/``multi_edit``, a ``bash``
-    command, or an external process — silently misses the cache and falls
-    through to a real read, rather than requiring every writer to remember to
-    invalidate a separate cache explicitly. This mirrors Claude Code's
-    session-scoped file read cache used to avoid re-paying the token/latency
-    cost of re-reading files the model has already seen and that have not
-    changed.
+    hits the cache without touching disk, but the mtime/size componenets of
+    the key mean any change to the file — whether from this session's own
+    ``write_file``/``edit_file``/``multi_edit``, a ``bash`` command, or an
+    external process — silently misses the cache and falls through to a
+    real read, rather than requiring every writer to remember to invalidate
+    a separate cache explicitly.
+
+    A cache hit (M20) returns a short pointer ("unchanged since your last
+    read...") instead of re-serving the cached body verbatim — the earlier
+    call already put that exact content in the model's context, so
+    resending it costs real tokens for information the model already has.
+    This mirrors Claude Code's session-scoped file read cache, which avoids
+    re-paying the token/latency cost of re-reading files the model has
+    already seen and that have not changed.
     """
 
     def __init__(self) -> None:
@@ -365,7 +370,18 @@ def create_filesystem_tools(
 
         cached = tracker.get_page(target, offset, limit)
         if cached is not None:
-            return cached
+            # The model already has this exact page's content earlier in
+            # this same conversation (the disk-read cache proves the file
+            # hasn't changed since). Re-sending the full body again costs
+            # real tokens for content the model has already seen and
+            # doesn't need repeated — return a short pointer instead,
+            # mirroring how a human developer would say "same as before"
+            # rather than re-pasting a file they already showed you.
+            return (
+                f"(unchanged since your last read_file('{path}', offset={offset}, "
+                f"limit={limit}) in this conversation — see that earlier result "
+                "for the content)"
+            )
 
         lines = target.read_text(encoding="utf-8", errors="replace").splitlines()
         total = len(lines)
