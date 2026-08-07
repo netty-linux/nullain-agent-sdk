@@ -81,3 +81,25 @@ def test_settings_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
     settings = NullainSettings()
     assert settings.ollama_api_key == "env-key"
     assert settings.ollama_base_url == "https://env.ollama.example"
+
+
+def test_settings_accepts_bare_ollama_api_key_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: docs/configuration.md documents OLLAMA_API_KEY (no prefix)
+    as the way to set the key, but every other setting requires the
+    NULLAIN_ prefix — the bare name silently did nothing. ollama_api_key now
+    accepts both via AliasChoices, matching the documented behavior and the
+    convention other CLIs use for their API-key env var (e.g.
+    ANTHROPIC_API_KEY, no tool-specific prefix)."""
+    monkeypatch.delenv("NULLAIN_OLLAMA_API_KEY", raising=False)
+    monkeypatch.setenv("OLLAMA_API_KEY", "bare-key")
+    settings = NullainSettings()
+    assert settings.ollama_api_key == "bare-key"
+
+
+def test_settings_prefixed_ollama_api_key_wins_over_bare(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When both env vars are set, the NULLAIN_-prefixed one takes precedence
+    (consistent with every other setting being NULLAIN_-prefixed)."""
+    monkeypatch.setenv("NULLAIN_OLLAMA_API_KEY", "prefixed-key")
+    monkeypatch.setenv("OLLAMA_API_KEY", "bare-key")
+    settings = NullainSettings()
+    assert settings.ollama_api_key == "prefixed-key"

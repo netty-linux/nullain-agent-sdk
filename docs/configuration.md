@@ -12,7 +12,8 @@ ollama_base_url = "https://ollama.com"
 
 - `ollama_base_url` — base URL of the Ollama Cloud endpoint.
 - `ollama_api_key` — API key (usually set via the `OLLAMA_API_KEY` env var
-  instead, so it never lands in a committed file).
+  instead, so it never lands in a committed file — `NULLAIN_OLLAMA_API_KEY`
+  also works and takes precedence if both are set).
 
 ## `[router]` — model routing
 
@@ -22,18 +23,18 @@ fallback_chain = ["deep", "balanced", "fast"]
 # Optional model used to classify a task's intent/complexity when the
 # deterministic heuristics are not confident (M11.3). When unset, the parser
 # stays heuristic-only.
-# classifier_model = "gpt-oss:20b"
+# classifier_model = "deepseek-v4-flash:0731-cloud"
 
 [router.tiers.fast]
-models = ["gpt-oss:20b"]
-max_context = 32000
+models = ["deepseek-v4-flash:0731-cloud"]
+max_context = 64000
 
 [router.tiers.balanced]
-models = ["qwen3-coder:480b-cloud", "gpt-oss:120b"]
+models = ["glm-5.2:cloud"]
 max_context = 128000
 
 [router.tiers.deep]
-models = ["deepseek-v4-pro"]
+models = ["gemma4:31b-cloud"]
 max_context = 128000
 ```
 
