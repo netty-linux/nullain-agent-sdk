@@ -162,15 +162,57 @@ class ContextManager:
         return current_tokens >= int(self.max_window_tokens * self.compaction_threshold)
 
     @staticmethod
+    def _compaction_boundary(events: Sequence[BaseEvent]) -> int:
+        """Index at which the "kept verbatim" tail starts.
+
+        A naive ``events[:-_RECENT_KEEP]`` positional slice can split a
+        ``ModelResponseEvent``'s ``tool_calls`` from the ``ToolResultEvent``(s)
+        that answer them — one lands in the compacted (summarized-away)
+        portion, the other in the kept tail. The resulting message history
+        then replays an orphaned ``tool`` message with no matching
+        ``assistant`` ``tool_calls`` message before it, which is invalid
+        per the OpenAI chat-completions schema (found live: Ollama Cloud's
+        compat shim rejects it with ``400 invalid message content type:
+        <nil>``, apparently failing an internal tool-call lookup rather
+        than reporting the real shape error).
+
+        Walks the naive boundary backward past any ``ToolResultEvent``
+        whose matching ``ModelResponseEvent`` (by ``call_id`` inside
+        ``tool_calls``) would otherwise be compacted away, so a tool-call
+        turn and all of its results are always compacted or kept together.
+        """
+        if len(events) <= _RECENT_KEEP:
+            return 0
+        boundary = len(events) - _RECENT_KEEP
+        # call_id -> index of the ModelResponseEvent that issued it, for
+        # every tool call anywhere in the trajectory.
+        call_origin: dict[str, int] = {}
+        for i, ev in enumerate(events):
+            if isinstance(ev, ModelResponseEvent) and ev.tool_calls:
+                for tc in ev.tool_calls:
+                    call_origin[tc.id] = i
+        while boundary > 0:
+            moved = False
+            for ev in events[boundary:]:
+                if isinstance(ev, ToolResultEvent):
+                    origin = call_origin.get(ev.call_id)
+                    if origin is not None and origin < boundary:
+                        boundary = origin
+                        moved = True
+                        break
+            if not moved:
+                break
+        return boundary
+
+    @staticmethod
     def _collect_compacted(events: Sequence[BaseEvent]) -> tuple[list[str], list[str], str]:
         """Split events into (compacted_ids, user_prompts, compacted_text)."""
         compacted_ids: list[str] = []
         user_prompts: list[str] = []
         text_parts: list[str] = []
 
-        compact_candidates: Sequence[BaseEvent] = (
-            events[:-_RECENT_KEEP] if len(events) > _RECENT_KEEP else []
-        )
+        boundary = ContextManager._compaction_boundary(events)
+        compact_candidates: Sequence[BaseEvent] = events[:boundary]
         for ev in compact_candidates:
             compacted_ids.append(ev.id)
             if isinstance(ev, UserMessageEvent):
