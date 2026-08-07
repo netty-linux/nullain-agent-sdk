@@ -14,6 +14,7 @@ from typing import Any, Literal, cast
 from anyio import get_cancelled_exc_class
 from pydantic import ValidationError
 
+from nullain.agent.checkpoint import RewindPoint, list_rewind_points, rewind_events
 from nullain.agent.result import RunResult, RunStatus
 from nullain.agent.spec import SpecValidator, TaskSpec
 from nullain.authority import Authority, Capability
@@ -1588,6 +1589,61 @@ class AgentLoop:
             prompt=prompt,
             session_id=session_id,
             events_history=events_history,
+            streaming=streaming,
+        )
+
+    def list_rewind_points(self, events_history: list[BaseEvent]) -> list[RewindPoint]:
+        """Enumerate the points a prior trajectory can be rewound to (M14).
+
+        Thin pass-through to :func:`nullain.agent.checkpoint.list_rewind_points`
+        exposed on ``AgentLoop`` so callers driving a rewind don't need a
+        separate import for the common case.
+        """
+        return list_rewind_points(events_history)
+
+    async def rewind_and_run(
+        self,
+        events_history: list[BaseEvent],
+        to_step: int,
+        prompt: str,
+        session_id: str | None = None,
+        streaming: bool = False,
+    ) -> RunResult:
+        """Truncate a trajectory back to ``to_step`` and resume with a new prompt (M14).
+
+        Equivalent to ``run_result(prompt, events_history=rewind_events(events_history,
+        to_step))`` — provided as one call since rewind-then-resume is always
+        done together in practice: a caller (a user saying "try that
+        differently", or a scripted retry policy) picks a step via
+        :meth:`list_rewind_points`, then wants the truncated trajectory acted
+        on immediately rather than juggling the intermediate event list
+        itself.
+
+        Args:
+            events_history: The full prior trajectory to rewind.
+            to_step: 1-indexed step number to rewind to (see
+                :func:`nullain.agent.checkpoint.rewind_events`).
+            prompt: The new instruction to run from the rewound context —
+                typically a correction or a different approach than what the
+                original step N attempted.
+            session_id: Session id for the resumed run. When None, a fresh id
+                is generated (matching ``run_result``'s default), which is
+                usually not what a rewind wants — pass the original session's
+                id to keep the resumed run in the same session's trajectory.
+            streaming: Whether to stream the resumed run.
+
+        Returns:
+            The resumed run's ``RunResult``.
+
+        Raises:
+            ValueError: if ``to_step`` is not a valid step number in
+                ``events_history`` (propagated from ``rewind_events``).
+        """
+        truncated = rewind_events(events_history, to_step)
+        return await self.run_result(
+            prompt=prompt,
+            session_id=session_id,
+            events_history=truncated,
             streaming=streaming,
         )
 
