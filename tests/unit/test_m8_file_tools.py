@@ -78,6 +78,22 @@ def test_read_file_rejects_negative_offset(tmp_path: Path) -> None:
     assert "offset must be >= 0" in tools["read_file"].func(path="a.txt", offset=-1).output
 
 
+def test_read_file_redacts_secrets(tmp_path: Path) -> None:
+    """Regression: read_file never applied redact_secrets (only bash's
+    execute_subprocess did), so reading a .env or credentials file sent the
+    raw secret straight to the model — and into any log/telemetry that
+    records tool output. redact_secrets is applied to read_file's output the
+    same way it already was for bash."""
+    (tmp_path / ".env").write_text(
+        "OLLAMA_API_KEY=sk-abcdef1234567890abcdef1234567890\nOTHER=fine\n"
+    )
+    tools = _tools(tmp_path)
+    out = tools["read_file"].func(path=".env")
+    assert "sk-abcdef" not in out
+    assert "[REDACTED_SECRET]" in out
+    assert "OTHER=fine" in out
+
+
 # ---------------------------------------------------------------------------
 # read_file: session read-page cache (M14)
 # ---------------------------------------------------------------------------
@@ -212,6 +228,22 @@ async def test_edit_file_returns_numbered_snippet(tmp_path: Path) -> None:
     assert "2\tCHANGED" in out
 
 
+@pytest.mark.asyncio
+async def test_edit_file_snippet_redacts_secrets(tmp_path: Path) -> None:
+    """edit_file's returned snippet (the post-edit content around the
+    change) must not leak a secret introduced by the edit itself."""
+    (tmp_path / ".env").write_text("PLACEHOLDER=x\n")
+    tools = _tools(tmp_path)
+    tools["read_file"].func(path=".env")
+    out = await tools["edit_file"].func(
+        path=".env",
+        old_str="PLACEHOLDER=x",
+        new_str="OLLAMA_API_KEY=sk-abcdef1234567890abcdef1234567890",
+    )
+    assert "sk-abcdef" not in out
+    assert "[REDACTED_SECRET]" in out
+
+
 # ---------------------------------------------------------------------------
 # multi_edit: atomic, chained (via registry to exercise dict->FileEdit coercion)
 # ---------------------------------------------------------------------------
@@ -315,6 +347,23 @@ async def test_grep_fallback_content_mode(tmp_path: Path, monkeypatch: pytest.Mo
     out = await tools["grep"].func(pattern="foo")
     assert "a.py:1:def foo():" in out
     assert "b.py" not in out
+
+
+@pytest.mark.asyncio
+async def test_grep_fallback_redacts_secrets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a grep match line containing a secret (e.g. a hardcoded
+    API key accidentally committed to a config file) must not leak the raw
+    value in grep's output — the same redact_secrets applied to bash/read_file
+    output. Uses a non-dotfile since _grep_python skips dotfiles like .env
+    entirely (a separate, intentional exclusion, not what this test covers)."""
+    (tmp_path / "config.py").write_text('OLLAMA_API_KEY = "sk-abcdef1234567890abcdef1234567890"\n')
+    tools = _tools(tmp_path)
+    monkeypatch.setattr("nullain_tools.filesystem.shutil.which", _which_none)
+    out = await tools["grep"].func(pattern="OLLAMA_API_KEY")
+    assert "sk-abcdef" not in out
+    assert "[REDACTED_SECRET]" in out
 
 
 @pytest.mark.asyncio

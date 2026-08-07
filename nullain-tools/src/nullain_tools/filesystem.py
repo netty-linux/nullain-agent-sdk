@@ -16,7 +16,7 @@ from typing import Literal
 
 from nullain.authority import Capability
 from nullain.events import EventBus, TodoEvent, TodoItem
-from nullain.tools import RegisteredTool, resolve_and_validate_path, tool
+from nullain.tools import RegisteredTool, redact_secrets, resolve_and_validate_path, tool
 from nullain.tools.result import ToolResult
 from pydantic import BaseModel
 
@@ -204,7 +204,7 @@ def _grep_python(
     body = "\n".join(matches[:head_limit])
     if total > head_limit:
         body += f"\n... (truncated: showing {head_limit} of {total} matches)"
-    return body
+    return redact_secrets(body)
 
 
 async def _grep_with_rg(
@@ -280,7 +280,7 @@ async def _grep_with_rg(
     body = "\n".join(rel_lines[:head_limit])
     if len(rel_lines) > head_limit:
         body += f"\n... (truncated: showing {head_limit} of {len(rel_lines)} matches)"
-    return body
+    return redact_secrets(body)
 
 
 def _rel_path(line: str, root: Path) -> str:
@@ -373,7 +373,7 @@ def create_filesystem_tools(
         end = min(offset + limit, total)
 
         numbered = [f"{i + 1}\t{_truncate_line(lines[i])}" for i in range(start, end)]
-        body = "\n".join(numbered)
+        body = redact_secrets("\n".join(numbered))
         remaining = total - end
         if remaining > 0:
             body += f"\n... ({remaining} more lines; call read_file with offset={end} to continue)"
@@ -462,7 +462,7 @@ def create_filesystem_tools(
             async with checkpoint_store.operation():
                 await checkpoint_store.snapshot(target)
                 target.write_text(updated, encoding="utf-8")
-        snippet = _numbered_snippet(updated, new_str)
+        snippet = redact_secrets(_numbered_snippet(updated, new_str))
         return f"Edited '{path}'.\n{snippet}"
 
     @tool(
@@ -539,7 +539,7 @@ def create_filesystem_tools(
             async with checkpoint_store.operation():
                 await checkpoint_store.snapshot(target)
                 target.write_text(content, encoding="utf-8")
-        snippet = _numbered_snippet(content, edits[-1].new_str)
+        snippet = redact_secrets(_numbered_snippet(content, edits[-1].new_str))
         return f"Applied {len(edits)} edits to '{path}'.\n{snippet}"
 
     @tool(
