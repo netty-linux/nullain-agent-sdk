@@ -64,6 +64,16 @@ def configure_telemetry(log_level: str = "INFO", json_format: bool = False) -> N
     root_logger.addHandler(handler)
     root_logger.setLevel(level)
 
+    # httpx/httpcore log one INFO line per outbound HTTP request via the
+    # stdlib `logging` module (not structlog), which propagates straight to
+    # the root handler above — printing "HTTP Request: POST ... 200 OK" into
+    # the middle of the interactive TUI's tool-call stream, entirely outside
+    # Rich's control. Wanted for debugging with a raised log level, not for
+    # normal interactive use, so it's raised to WARNING here regardless of
+    # the configured `level` (a real HTTP failure still logs at ERROR).
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+
     _configured = True
 
 

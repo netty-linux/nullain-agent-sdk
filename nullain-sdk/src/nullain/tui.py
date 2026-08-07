@@ -208,23 +208,24 @@ class TUIRenderer:
             path = _tool_call_arg_path(ev.arguments)
             if path:
                 self._pre_write_snapshots[ev.call_id] = _read_text_safe(path)
+        # A single in-place line (spinner -> checkmark/cross), not a bordered
+        # panel — Grok Build's style. Verbose per-tool panels drowned the
+        # signal of "what ran, did it work" in a chat full of tool calls;
+        # the one thing worth keeping full detail for is a file diff, kept
+        # below for write_file/edit_file/multi_edit.
         label = Text(_describe_tool_call(ev))
-        self.console.print(
-            Panel(
-                Spinner(self._spinner_name, text=label),
-                border_style="dim",
-                expand=False,
-            )
-        )
+        live = self._ensure_live()
+        live.update(Spinner(self._spinner_name, text=label))
 
     def _handle_tool_result(self, ev: ToolResultEvent) -> None:
         call = self._pending_calls.pop(ev.call_id, None)
         style = "red" if ev.is_error else "green"
         marker = self._fail_marker if ev.is_error else self._ok_marker
-        # tool_name may come from an MCP-declared tool, not just the trusted
-        # built-ins — build the title as Text so it can never be interpreted
-        # as Rich console markup.
-        title = Text(f"{marker} {ev.tool_name}")
+        summary = _describe_tool_call(call) if call is not None else ev.tool_name
+        # tool_name/summary may come from an MCP-declared tool or model
+        # arguments, not just trusted built-ins — build as Text so it can
+        # never be interpreted as Rich console markup.
+        line = Text(f"{marker} {summary}")
 
         if not ev.is_error and call is not None and ev.tool_name in _FILE_WRITE_TOOLS:
             path = _tool_call_arg_path(call.arguments)
@@ -233,13 +234,22 @@ class TUIRenderer:
                 after = _read_text_safe(path)
                 diff_renderable = _render_diff(before, after, path)
                 if diff_renderable is not None:
+                    self._stop_live()
+                    title = Text(f"{marker} {ev.tool_name}")
                     self.console.print(Panel(diff_renderable, title=title, border_style=style))
                     return
 
-        body = (
-            Text(_truncate(ev.output), style=style) if ev.is_error else Text(_truncate(ev.output))
-        )
-        self.console.print(Panel(body, title=title, border_style=style))
+        # Replace the spinner's last frame with the final line in place
+        # (one update, then stop) rather than stopping first and printing a
+        # second line below the leftover spinner frame.
+        live = self._ensure_live()
+        live.update(line)
+        self._stop_live()
+        if ev.is_error:
+            # A one-line summary of *why* it failed, still compact — full
+            # output remains available via ToolResultEvent for anything
+            # consuming the raw event stream (logs, non-TUI callers).
+            self.console.print(Text(f"  {_truncate(ev.output, limit=300)}", style="dim red"))
 
     # -- spec / verify ---------------------------------------------------------
 

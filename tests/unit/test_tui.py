@@ -46,7 +46,7 @@ def test_model_response_without_prior_stream_renders_full_text() -> None:
     assert "Done." in _text_out(console)
 
 
-def test_tool_call_then_result_renders_success_panel() -> None:
+def test_tool_call_then_result_renders_success_line() -> None:
     renderer, console = _renderer()
     renderer.handle(
         ToolCallEvent(
@@ -64,7 +64,7 @@ def test_tool_call_then_result_renders_success_panel() -> None:
     assert renderer._ok_marker in out  # type: ignore[reportPrivateUsage]
 
 
-def test_tool_result_error_renders_error_panel() -> None:
+def test_tool_result_error_renders_error_line() -> None:
     renderer, console = _renderer()
     renderer.handle(
         ToolCallEvent(
@@ -84,6 +84,30 @@ def test_tool_result_error_renders_error_panel() -> None:
     out = _text_out(console)
     assert renderer._fail_marker in out  # type: ignore[reportPrivateUsage]
     assert "command not found" in out
+
+
+def test_successful_tool_call_renders_compact_line_not_panel() -> None:
+    """Regression (M20): a successful non-write tool call used to render as
+    a full bordered Panel (spinner panel while pending, then a second
+    titled panel with the whole output as body) — two multi-line boxes per
+    tool call, drowning the "what ran, did it work" signal in a chat full
+    of tool calls. It's now a single compact line: marker + summary, no
+    box-drawing border characters, matching Grok Build's terse style."""
+    renderer, console = _renderer()
+    renderer.handle(
+        ToolCallEvent(session_id="s", call_id="c1", tool_name="todo_write", arguments={})
+    )
+    renderer.handle(
+        ToolResultEvent(
+            session_id="s", call_id="c1", tool_name="todo_write", output="ok", is_error=False
+        )
+    )
+    renderer.finish()
+    out = _text_out(console)
+    assert "todo_write" in out
+    assert renderer._ok_marker in out  # type: ignore[reportPrivateUsage]
+    assert "┌" not in out  # no Panel border characters for a plain success
+    assert "│" not in out
 
 
 def test_write_file_result_renders_diff(tmp_path: Path) -> None:
@@ -268,6 +292,9 @@ def test_bracket_content_renders_literally_not_as_markup() -> None:
     assert "Fix [bracketed] title" in out3
     assert "step [x]" in out3
 
+    # Success results render a compact one-line summary (no body text), so
+    # the bracket-safety property is exercised through the tool call's own
+    # argument-derived summary line instead of a body that no longer prints.
     renderer4, console4 = _renderer()
     renderer4.handle(
         ToolCallEvent(
@@ -284,7 +311,23 @@ def test_bracket_content_renders_literally_not_as_markup() -> None:
         )
     )
     renderer4.finish()
-    assert "content with [brackets] in it" in _text_out(console4)
+    assert "[weird].txt" in _text_out(console4)
+
+    # Error results still print a body detail line — must not be swallowed
+    # as markup either.
+    renderer5, console5 = _renderer()
+    renderer5.handle(ToolCallEvent(session_id="s", call_id="c1", tool_name="bash", arguments={}))
+    renderer5.handle(
+        ToolResultEvent(
+            session_id="s",
+            call_id="c1",
+            tool_name="bash",
+            output="error: [brackets] in output",
+            is_error=True,
+        )
+    )
+    renderer5.finish()
+    assert "error: [brackets] in output" in _text_out(console5)
 
 
 def test_legacy_windows_console_uses_ascii_safe_markers() -> None:
