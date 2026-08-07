@@ -21,6 +21,7 @@ something sensitive to a file the user didn't ask for.
 from __future__ import annotations
 
 import sys
+from typing import cast
 
 if sys.platform == "win32":
     import msvcrt
@@ -131,9 +132,14 @@ def _prompt_windows(prompt: str, history: list[str]) -> str:
                 redraw()
             continue
         try:
-            decoded: str = ch.decode("utf-8")  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType]
+            raw_decoded = ch.decode("utf-8")  # pyright: ignore[reportUnknownMemberType, reportUnknownArgumentType, reportUnknownVariableType]
         except UnicodeDecodeError:
             continue
+        # Windows resolves raw_decoded's type from the ignore comment above
+        # to str already, so pyright flags this cast as unnecessary there —
+        # it is not, on the Ubuntu/macOS runners where msvcrt (and so ch's
+        # type) is unresolvable and raw_decoded is inferred as Unknown.
+        decoded = cast(str, raw_decoded)  # pyright: ignore[reportUnnecessaryCast]
         if decoded.isprintable():
             buf.insert(cursor, decoded)
             cursor += 1
