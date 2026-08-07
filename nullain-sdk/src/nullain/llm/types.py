@@ -69,9 +69,19 @@ class ChatMessage(BaseModel):
         it must be re-serialized to a string here regardless of which form
         it is currently in before round-tripping an assistant turn's
         tool_calls back into the next request's message history.
+
+        A pure tool-call assistant turn (``content=None``, ``tool_calls``
+        set — no text alongside the calls, the common case) used to omit
+        the ``content`` key entirely. Ollama Cloud's compat shim rejected a
+        later request replaying that turn with ``400 invalid message
+        content type: <nil>`` — its Go-side unmarshal needs the key present
+        (as JSON ``null``, matching the real OpenAI spec for this exact
+        case) rather than absent. Every other role's content is always a
+        required, already-non-None string, so this only changes the
+        assistant/``content=None`` case.
         """
         data: dict[str, Any] = {"role": self.role}
-        if self.content is not None:
+        if self.content is not None or self.role == "assistant":
             data["content"] = self.content
         if self.name is not None:
             data["name"] = self.name
