@@ -29,6 +29,7 @@ from nullain.agent import Agent, RunResult
 from nullain.config import load_settings
 from nullain.events import EventStore
 from nullain.llm import OllamaCloudProvider
+from nullain.prompt_select import select
 from nullain.tools.sandbox import select_sandbox
 from nullain.tui import TUIRenderer
 
@@ -274,10 +275,11 @@ async def _chat(*, model: str | None, workspace: str, continue_session: bool = F
     pass it to ``nullain run --session <id>`` later if they want a
     non-interactive continuation.
     """
+    permission = TTYPermission()
     agent = Agent(
         workspace_root=workspace,
         model=model,
-        permission_callback=_tty_permission,
+        permission_callback=permission,
         ask_user_callback=_tty_ask_user,
     )
     session_id = await _resolve_session_id(
@@ -305,13 +307,36 @@ async def _chat(*, model: str | None, workspace: str, continue_session: bool = F
         renderer.finish()
 
 
-async def _tty_permission(tool_name: str, description: str) -> bool:
-    """Prompt the user on the TTY for an ASK-level permission request."""
-    try:
-        answer = input(f"Allow {tool_name}? ({description}) [y/N]: ")
-    except EOFError:
-        return False
-    return answer.strip().lower() in ("y", "yes")
+class TTYPermission:
+    """Callable ASK-level permission prompt with an arrow-key Yes/No/Always menu.
+
+    Matches ``PermissionCallback``'s ``(tool_name, description) -> bool``
+    signature so it drops straight into ``Agent(permission_callback=...)``.
+    Selecting "Yes, always allow this tool" remembers ``tool_name`` for the
+    lifetime of this instance (one per chat session) so later calls to the
+    same tool auto-approve without prompting again — the state lives on the
+    instance rather than a module global so concurrent chat sessions (e.g.
+    tests) never share approvals.
+    """
+
+    def __init__(self) -> None:
+        self._always_allowed: set[str] = set()
+
+    async def __call__(self, tool_name: str, description: str) -> bool:
+        if tool_name in self._always_allowed:
+            return True
+        try:
+            choice = select(
+                f"Allow {tool_name}? ({description})",
+                ["Yes", "No", "Yes, always allow this tool"],
+                default_index=0,
+            )
+        except (EOFError, OSError):
+            return False
+        if choice == 2:
+            self._always_allowed.add(tool_name)
+            return True
+        return choice == 0
 
 
 async def _tty_ask_user(question: str) -> str:

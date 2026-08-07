@@ -584,6 +584,75 @@ def test_mcp_parse_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
 
 
 # ---------------------------------------------------------------------------
+# TTYPermission — arrow-key Yes/No/Always menu (replaces the old y/N prompt)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_tty_permission_yes_approves_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _select(prompt: str, options: list[str], *, default_index: int = 0) -> int:
+        return 0
+
+    monkeypatch.setattr(cli, "select", _select)
+    permission = cli.TTYPermission()
+    assert await permission("bash", "run tests") is True
+
+
+@pytest.mark.asyncio
+async def test_tty_permission_no_denies(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _select(prompt: str, options: list[str], *, default_index: int = 0) -> int:
+        return 1
+
+    monkeypatch.setattr(cli, "select", _select)
+    permission = cli.TTYPermission()
+    assert await permission("bash", "run tests") is False
+
+
+@pytest.mark.asyncio
+async def test_tty_permission_always_allow_remembers_tool(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = 0
+
+    def _select(prompt: str, options: list[str], *, default_index: int = 0) -> int:
+        nonlocal calls
+        calls += 1
+        return 2  # "Yes, always allow this tool"
+
+    monkeypatch.setattr(cli, "select", _select)
+    permission = cli.TTYPermission()
+
+    assert await permission("bash", "run tests") is True
+    assert await permission("bash", "run something else") is True
+    assert calls == 1  # second call auto-approved without prompting again
+
+
+@pytest.mark.asyncio
+async def test_tty_permission_always_allow_is_scoped_per_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _select(prompt: str, options: list[str], *, default_index: int = 0) -> int:
+        return 2
+
+    monkeypatch.setattr(cli, "select", _select)
+    permission = cli.TTYPermission()
+
+    assert await permission("bash", "run tests") is True
+    # A different tool must still prompt (and does, since select() always
+    # returns "always allow" here) rather than inheriting bash's approval.
+    assert await permission("write_file", "write output") is True
+    assert permission._always_allowed == {"bash", "write_file"}
+
+
+@pytest.mark.asyncio
+async def test_tty_permission_eof_denies(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(prompt: str, options: list[str], *, default_index: int = 0) -> int:
+        raise EOFError
+
+    monkeypatch.setattr(cli, "select", _raise)
+    permission = cli.TTYPermission()
+    assert await permission("bash", "run tests") is False
+
+
+# ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
 
