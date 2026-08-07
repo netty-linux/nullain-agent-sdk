@@ -27,7 +27,6 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.spinner import Spinner
 from rich.syntax import Syntax
 from rich.text import Text
 
@@ -121,6 +120,11 @@ class TUIRenderer:
         self._ok_marker = "OK" if ascii_only else "✓"
         self._fail_marker = "X" if ascii_only else "✗"
         self._warn_marker = "!" if ascii_only else "⚠"
+        # Status dot for the Claude-Code-style tool-call line: colored ● for
+        # a resolved call (green/red), dim ● while pending — ASCII-safe "o"
+        # on a legacy Windows console that can't encode "●".
+        self._dot = "o" if ascii_only else "●"
+        self._detail_prefix = "  - " if ascii_only else "  └ "
         self._reset_state()
 
     def _reset_state(self) -> None:
@@ -208,24 +212,20 @@ class TUIRenderer:
             path = _tool_call_arg_path(ev.arguments)
             if path:
                 self._pre_write_snapshots[ev.call_id] = _read_text_safe(path)
-        # A single in-place line (spinner -> checkmark/cross), not a bordered
-        # panel — Grok Build's style. Verbose per-tool panels drowned the
-        # signal of "what ran, did it work" in a chat full of tool calls;
-        # the one thing worth keeping full detail for is a file diff, kept
-        # below for write_file/edit_file/multi_edit.
-        label = Text(_describe_tool_call(ev))
+        # Claude Code's status-line style: a dim ● while pending, a bold
+        # tool name, and a dim detail (path/command) beside it. Resolved in
+        # place to a colored ●/✓/✗ line by _handle_tool_result — not a
+        # bordered panel, which drowned the "what ran, did it work" signal
+        # in a chat full of tool calls. The one thing worth keeping full
+        # detail for is a file diff, kept below for write/edit tools.
         live = self._ensure_live()
-        live.update(Spinner(self._spinner_name, text=label))
+        live.update(_tool_line(self._dot, "dim", ev.tool_name, _tool_call_detail(ev)))
 
     def _handle_tool_result(self, ev: ToolResultEvent) -> None:
         call = self._pending_calls.pop(ev.call_id, None)
         style = "red" if ev.is_error else "green"
-        marker = self._fail_marker if ev.is_error else self._ok_marker
-        summary = _describe_tool_call(call) if call is not None else ev.tool_name
-        # tool_name/summary may come from an MCP-declared tool or model
-        # arguments, not just trusted built-ins — build as Text so it can
-        # never be interpreted as Rich console markup.
-        line = Text(f"{marker} {summary}")
+        detail = _tool_call_detail(call) if call is not None else None
+        line = _tool_line(self._dot, style, ev.tool_name, detail)
 
         if not ev.is_error and call is not None and ev.tool_name in _FILE_WRITE_TOOLS:
             path = _tool_call_arg_path(call.arguments)
@@ -235,8 +235,8 @@ class TUIRenderer:
                 diff_renderable = _render_diff(before, after, path)
                 if diff_renderable is not None:
                     self._stop_live()
-                    title = Text(f"{marker} {ev.tool_name}")
-                    self.console.print(Panel(diff_renderable, title=title, border_style=style))
+                    self.console.print(line)
+                    self.console.print(Panel(diff_renderable, border_style=style))
                     return
 
         # Replace the spinner's last frame with the final line in place
@@ -246,10 +246,11 @@ class TUIRenderer:
         live.update(line)
         self._stop_live()
         if ev.is_error:
-            # A one-line summary of *why* it failed, still compact — full
-            # output remains available via ToolResultEvent for anything
-            # consuming the raw event stream (logs, non-TUI callers).
-            self.console.print(Text(f"  {_truncate(ev.output, limit=300)}", style="dim red"))
+            # A one-line summary of *why* it failed, indented under the
+            # status line — full output remains available via
+            # ToolResultEvent for anything consuming the raw event stream.
+            detail_text = f"{self._detail_prefix}{_truncate(ev.output, limit=300)}"
+            self.console.print(Text(detail_text, style="dim red"))
 
     # -- spec / verify ---------------------------------------------------------
 
@@ -291,16 +292,38 @@ class TUIRenderer:
         )
 
 
-def _describe_tool_call(ev: ToolCallEvent) -> str:
+def _tool_call_detail(ev: ToolCallEvent) -> str | None:
+    """A short, dim detail string beside the bold tool name (path or command).
+
+    Returns None when the call carries nothing worth showing beyond its
+    name (e.g. ``todo_write``, ``git_status``) — the caller omits the
+    detail segment entirely rather than printing an empty one.
+    """
     path = _tool_call_arg_path(ev.arguments)
     if path:
-        return f"{ev.tool_name}({path})"
+        return path
     if isinstance(ev.arguments, dict) and "command_args" in ev.arguments:
         raw: object = ev.arguments["command_args"]
         if isinstance(raw, list):
             parts = cast(list[Any], raw)
-            return f"{ev.tool_name}: {' '.join(str(x) for x in parts)}"
-    return ev.tool_name
+            return " ".join(str(x) for x in parts)
+    return None
+
+
+def _tool_line(dot: str, style: str, tool_name: str, detail: str | None) -> Text:
+    """Build one Claude-Code-style status line: colored ● + bold name + dim detail.
+
+    ``tool_name``/``detail`` may come from an MCP-declared tool or
+    model-supplied arguments, not just trusted built-ins — appended as
+    plain segments (never f-string-interpolated into markup) so neither
+    can be misread as Rich console markup.
+    """
+    line = Text()
+    line.append(f"{dot} ", style=style)
+    line.append(tool_name, style="bold")
+    if detail:
+        line.append(f"  {detail}", style="dim")
+    return line
 
 
 def _read_text_safe(path: str) -> str:

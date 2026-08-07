@@ -16,7 +16,11 @@ from nullain.events import (
     ToolResultEvent,
 )
 from nullain.llm import ToolCall
-from nullain.tui import TUIRenderer, _legacy_safe_stdout  # type: ignore[reportPrivateUsage]
+from nullain.tui import (
+    TUIRenderer,
+    _legacy_safe_stdout,  # type: ignore[reportPrivateUsage]
+    _tool_line,  # type: ignore[reportPrivateUsage]
+)
 from rich.console import Console
 
 
@@ -61,7 +65,7 @@ def test_tool_call_then_result_renders_success_line() -> None:
     renderer.finish()
     out = _text_out(console)
     assert "read_file" in out
-    assert renderer._ok_marker in out  # type: ignore[reportPrivateUsage]
+    assert renderer._dot in out  # type: ignore[reportPrivateUsage]
 
 
 def test_tool_result_error_renders_error_line() -> None:
@@ -82,8 +86,25 @@ def test_tool_result_error_renders_error_line() -> None:
     )
     renderer.finish()
     out = _text_out(console)
-    assert renderer._fail_marker in out  # type: ignore[reportPrivateUsage]
+    assert renderer._dot in out  # type: ignore[reportPrivateUsage]
     assert "command not found" in out
+
+
+def test_tool_line_applies_status_color_and_bold_name() -> None:
+    """Direct unit test of the Claude-Code-style line builder: green ● for
+    success, red ● for failure, bold tool name, dim detail — asserted via
+    the Text object's spans (the stable API), not console export text/HTML
+    (both strip or omit styling depending on Rich version/terminal mode)."""
+    success = _tool_line("●", "green", "read_file", "a.txt")
+    assert success.plain == "● read_file  a.txt"
+    styles = [(s.start, s.end, s.style) for s in success.spans]
+    assert any(style == "green" for _, _, style in styles)
+    assert any(style == "bold" for _, _, style in styles)
+    assert any(style == "dim" for _, _, style in styles)
+
+    failure = _tool_line("●", "red", "bash", None)
+    assert failure.plain == "● bash"
+    assert any(s.style == "red" for s in failure.spans)
 
 
 def test_successful_tool_call_renders_compact_line_not_panel() -> None:
@@ -91,8 +112,9 @@ def test_successful_tool_call_renders_compact_line_not_panel() -> None:
     a full bordered Panel (spinner panel while pending, then a second
     titled panel with the whole output as body) — two multi-line boxes per
     tool call, drowning the "what ran, did it work" signal in a chat full
-    of tool calls. It's now a single compact line: marker + summary, no
-    box-drawing border characters, matching Grok Build's terse style."""
+    of tool calls. It's now a single compact status-dot line — green ●
+    (success) / red ● (failure) / dim ● (pending), bold tool name, dim
+    detail — Claude Code's style, not a bordered panel."""
     renderer, console = _renderer()
     renderer.handle(
         ToolCallEvent(session_id="s", call_id="c1", tool_name="todo_write", arguments={})
@@ -105,7 +127,7 @@ def test_successful_tool_call_renders_compact_line_not_panel() -> None:
     renderer.finish()
     out = _text_out(console)
     assert "todo_write" in out
-    assert renderer._ok_marker in out  # type: ignore[reportPrivateUsage]
+    assert renderer._dot in out  # type: ignore[reportPrivateUsage]
     assert "┌" not in out  # no Panel border characters for a plain success
     assert "│" not in out
 
@@ -343,6 +365,7 @@ def test_legacy_windows_console_uses_ascii_safe_markers() -> None:
     assert renderer._fail_marker == "X"  # type: ignore[reportPrivateUsage]
     assert renderer._warn_marker == "!"  # type: ignore[reportPrivateUsage]
     assert renderer._spinner_name == "line"  # type: ignore[reportPrivateUsage]
+    assert renderer._dot == "o"  # type: ignore[reportPrivateUsage]
 
     renderer.handle(
         ToolCallEvent(
@@ -356,8 +379,30 @@ def test_legacy_windows_console_uses_ascii_safe_markers() -> None:
     )
     renderer.finish()
     out = _text_out(console)
-    assert "OK" in out
+    assert "o read_file" in out
     assert "✓" not in out  # the Unicode checkmark must not appear
+    assert "●" not in out  # the Unicode status dot must not appear
+
+
+def test_legacy_windows_console_error_detail_uses_ascii_prefix() -> None:
+    """Regression: found via live testing — the error-detail line under a
+    failed tool call used the box-drawing "└" character unconditionally,
+    which crashed with UnicodeEncodeError on a legacy Windows console
+    (cp1252) exactly like the spinner/marker glyphs this class already
+    guards. Must fall back to an ASCII-safe prefix."""
+    console = Console(legacy_windows=True, file=None, force_terminal=True, width=100, record=True)
+    renderer = TUIRenderer(console=console)
+
+    renderer.handle(ToolCallEvent(session_id="s", call_id="c1", tool_name="bash", arguments={}))
+    renderer.handle(
+        ToolResultEvent(
+            session_id="s", call_id="c1", tool_name="bash", output="boom", is_error=True
+        )
+    )
+    renderer.finish()
+    out = _text_out(console)
+    assert "boom" in out
+    assert "└" not in out
 
 
 def test_legacy_safe_stdout_does_not_crash_on_unencodable_model_output(
