@@ -77,6 +77,25 @@ def _failure_result() -> RunResult:
     return RunResult(session_id="s1", status="error", success=False, error="boom")
 
 
+def _scripted_input(monkeypatch: pytest.MonkeyPatch, *answers: str) -> None:
+    """Patch ``input()`` to return ``answers`` in order, one per call."""
+    it = iter(answers)
+
+    def _fake_input(prompt: str = "") -> str:
+        return next(it)
+
+    monkeypatch.setattr("builtins.input", _fake_input)
+
+
+def _scripted_getpass(monkeypatch: pytest.MonkeyPatch, answer: str) -> None:
+    """Patch ``getpass.getpass()`` to return a fixed answer."""
+
+    def _fake_getpass(prompt: str = "") -> str:
+        return answer
+
+    monkeypatch.setattr("getpass.getpass", _fake_getpass)
+
+
 # ---------------------------------------------------------------------------
 # run: exit codes + --json
 # ---------------------------------------------------------------------------
@@ -219,6 +238,206 @@ def test_version_handler(
     args = cli._build_parser().parse_args(["version"])
     assert cli._version_handler(args) == cli.EXIT_OK
     assert "Nullain Agent SDK" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# first-run setup wizard
+# ---------------------------------------------------------------------------
+
+
+def test_needs_setup_true_with_no_config_and_no_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("NULLAIN_OLLAMA_API_KEY", raising=False)
+    assert cli._needs_setup(str(tmp_path)) is True
+
+
+def test_needs_setup_false_with_env_var(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OLLAMA_API_KEY", "some-key")
+    assert cli._needs_setup(str(tmp_path)) is False
+
+
+def test_needs_setup_false_with_workspace_toml(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("NULLAIN_OLLAMA_API_KEY", raising=False)
+    (tmp_path / "nullain.toml").write_text('ollama_api_key = "from-file"\n', encoding="utf-8")
+    assert cli._needs_setup(str(tmp_path)) is False
+
+
+@pytest.mark.asyncio
+async def test_setup_wizard_writes_config_and_gitignore(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Happy path: key entered, health check passes, config written, and a
+    workspace that is a git repo gets nullain.toml auto-gitignored."""
+    (tmp_path / ".git").mkdir()
+
+    _scripted_input(monkeypatch, "", "", "", "")  # base_url, then 3 model-tier prompts — defaulted
+    _scripted_getpass(monkeypatch, "secret-key-123")
+
+    async def _healthy(self: object) -> bool:
+        return True
+
+    monkeypatch.setattr(cli.OllamaCloudProvider, "health_check", _healthy)
+
+    ok = await cli._run_setup_wizard(str(tmp_path))
+    assert ok is True
+
+    config_path = tmp_path / "nullain.toml"
+    assert config_path.exists()
+    text = config_path.read_text(encoding="utf-8")
+    assert "secret-key-123" in text
+    assert "glm-5.2:cloud" in text  # default balanced-tier model
+
+    gitignore_text = (tmp_path / ".gitignore").read_text(encoding="utf-8")
+    assert "nullain.toml" in gitignore_text.splitlines()
+
+
+@pytest.mark.asyncio
+async def test_setup_wizard_no_key_aborts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    _scripted_input(monkeypatch, "")  # base_url only
+    _scripted_getpass(monkeypatch, "")  # empty key
+
+    ok = await cli._run_setup_wizard(str(tmp_path))
+    assert ok is False
+    assert not (tmp_path / "nullain.toml").exists()
+
+
+@pytest.mark.asyncio
+async def test_setup_wizard_failed_health_check_prompts_and_can_proceed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A failed health check still lets the user save anyway if they confirm."""
+    _scripted_input(monkeypatch, "", "y", "", "", "")  # base_url, confirm-anyway, 3 model tiers
+    _scripted_getpass(monkeypatch, "bad-key")
+
+    async def _unhealthy(self: object) -> bool:
+        return False
+
+    monkeypatch.setattr(cli.OllamaCloudProvider, "health_check", _unhealthy)
+
+    ok = await cli._run_setup_wizard(str(tmp_path))
+    assert ok is True
+    assert (tmp_path / "nullain.toml").exists()
+
+
+@pytest.mark.asyncio
+async def test_setup_wizard_failed_health_check_declined_aborts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _scripted_input(monkeypatch, "", "n")  # base_url, decline to save anyway
+    _scripted_getpass(monkeypatch, "bad-key")
+
+    async def _unhealthy(self: object) -> bool:
+        return False
+
+    monkeypatch.setattr(cli.OllamaCloudProvider, "health_check", _unhealthy)
+
+    ok = await cli._run_setup_wizard(str(tmp_path))
+    assert ok is False
+    assert not (tmp_path / "nullain.toml").exists()
+
+
+def test_ensure_gitignored_noop_without_git_repo(tmp_path: Path) -> None:
+    cli._ensure_gitignored(tmp_path / "nullain.toml")
+    assert not (tmp_path / ".gitignore").exists()
+
+
+def test_ensure_gitignored_appends_without_duplicating(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".gitignore").write_text("*.log\n", encoding="utf-8")
+
+    cli._ensure_gitignored(tmp_path / "nullain.toml")
+    cli._ensure_gitignored(tmp_path / "nullain.toml")  # idempotent
+
+    lines = (tmp_path / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert lines.count("nullain.toml") == 1
+    assert "*.log" in lines
+
+
+@pytest.mark.asyncio
+async def test_default_entry_skips_wizard_when_configured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """nullain (no subcommand) with an existing key goes straight to chat,
+    without prompting for setup."""
+    monkeypatch.setenv("OLLAMA_API_KEY", "already-configured")
+
+    wizard_called = False
+
+    async def _wizard_should_not_run(workspace: str) -> bool:
+        nonlocal wizard_called
+        wizard_called = True
+        return True
+
+    async def _fake_chat(
+        *, model: str | None, workspace: str, continue_session: bool = False
+    ) -> int:
+        return cli.EXIT_OK
+
+    monkeypatch.setattr(cli, "_run_setup_wizard", _wizard_should_not_run)
+    monkeypatch.setattr(cli, "_chat", _fake_chat)
+
+    result = await cli._default_entry(str(tmp_path))
+    assert result == cli.EXIT_OK
+    assert wizard_called is False
+
+
+@pytest.mark.asyncio
+async def test_default_entry_runs_wizard_then_chat_when_unconfigured(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("NULLAIN_OLLAMA_API_KEY", raising=False)
+
+    chat_called = False
+
+    async def _fake_wizard(workspace: str) -> bool:
+        return True
+
+    async def _fake_chat(
+        *, model: str | None, workspace: str, continue_session: bool = False
+    ) -> int:
+        nonlocal chat_called
+        chat_called = True
+        return cli.EXIT_OK
+
+    monkeypatch.setattr(cli, "_run_setup_wizard", _fake_wizard)
+    monkeypatch.setattr(cli, "_chat", _fake_chat)
+
+    result = await cli._default_entry(str(tmp_path))
+    assert result == cli.EXIT_OK
+    assert chat_called is True
+
+
+@pytest.mark.asyncio
+async def test_default_entry_aborted_wizard_skips_chat(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("NULLAIN_OLLAMA_API_KEY", raising=False)
+
+    chat_called = False
+
+    async def _fake_wizard(workspace: str) -> bool:
+        return False
+
+    async def _fake_chat(
+        *, model: str | None, workspace: str, continue_session: bool = False
+    ) -> int:
+        nonlocal chat_called
+        chat_called = True
+        return cli.EXIT_OK
+
+    monkeypatch.setattr(cli, "_run_setup_wizard", _fake_wizard)
+    monkeypatch.setattr(cli, "_chat", _fake_chat)
+
+    result = await cli._default_entry(str(tmp_path))
+    assert result == cli.EXIT_USAGE
+    assert chat_called is False
 
 
 def test_unknown_command_exits_usage() -> None:

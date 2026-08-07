@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
 import os
 import re
@@ -354,6 +355,153 @@ async def _doctor() -> int:
 
 
 # ---------------------------------------------------------------------------
+# first-run setup wizard
+# ---------------------------------------------------------------------------
+
+#: Suggested defaults offered by the setup wizard for each router tier.
+_WIZARD_DEFAULT_MODELS: dict[str, str] = {
+    "fast": "deepseek-v4-flash:0731-cloud",
+    "balanced": "glm-5.2:cloud",
+    "deep": "gemma4:31b-cloud",
+}
+
+
+def _ensure_gitignored(config_path: Path) -> None:
+    """Add ``config_path``'s name to the workspace's .gitignore, if any.
+
+    The wizard writes the Ollama API key as plaintext into ``nullain.toml``
+    (the config format itself, not something this CLI can change) — a
+    workspace that is a git repo (has a ``.git`` dir, even without a
+    ``.gitignore`` yet) gets an automatic ignore entry so an accidental
+    ``git add .`` doesn't stage the key. No-ops when the workspace is not a
+    git repo, or when the entry is already present.
+    """
+    workspace_root = config_path.parent
+    if not (workspace_root / ".git").exists():
+        return
+    gitignore = workspace_root / ".gitignore"
+    entry = config_path.name
+    existing = gitignore.read_text(encoding="utf-8") if gitignore.exists() else ""
+    if any(line.strip() == entry for line in existing.splitlines()):
+        return
+    separator = "" if not existing or existing.endswith("\n") else "\n"
+    gitignore.write_text(f"{existing}{separator}{entry}\n", encoding="utf-8")
+
+
+def _needs_setup(workspace: str) -> bool:
+    """Whether the first-run wizard should run before ``chat``/``run``.
+
+    True only when no Ollama Cloud API key is resolvable from any source
+    (workspace ``nullain.toml``, ``NULLAIN_CONFIG``, or the
+    ``OLLAMA_API_KEY``/``NULLAIN_OLLAMA_API_KEY`` env vars) — i.e. the
+    agent could not actually make a request yet. A key present anywhere in
+    that chain skips the wizard, so an already-configured workspace (or one
+    relying on a global env var) is never interrupted.
+    """
+    config_path = Path(workspace) / "nullain.toml" if workspace != "." else _find_config_path()
+    try:
+        settings = load_settings(config_path if config_path.exists() else None)
+    except Exception:
+        return True
+    return not settings.ollama_api_key
+
+
+async def _run_setup_wizard(workspace: str) -> bool:
+    """Interactively configure Ollama Cloud access and write ``nullain.toml``.
+
+    Writes the config to ``<workspace>/nullain.toml`` — kept separate from
+    any project source under that workspace, mirroring how ``chat``/``run``
+    already scope everything else (memory, checkpoints, sessions) under
+    ``<workspace>/.nullain/`` rather than touching the repo the agent will
+    act on. This intentionally does not reuse the MCP section's regex-based
+    TOML editor (``_edit_mcp_server``): a first-run file is written once,
+    from a fixed template, with no existing content to preserve or merge.
+
+    Returns:
+        True if a working configuration was written (or already existed and
+        the user chose to keep it), False if the user aborted (e.g. Ctrl-D
+        or Ctrl-C) — the caller should not proceed to ``chat`` in that case.
+    """
+    print("Nullain Agent SDK — first-run setup")
+    print("No Ollama Cloud API key found for this workspace.\n")
+
+    config_path = Path(workspace).resolve() / "nullain.toml"
+
+    try:
+        base_url = input("Ollama base URL [https://ollama.com]: ").strip() or "https://ollama.com"
+        api_key = getpass.getpass("Ollama Cloud API key (input hidden): ").strip()
+    except EOFError:
+        print("\nSetup aborted (no input available).", file=sys.stderr)
+        return False
+
+    if not api_key:
+        print("No key entered — aborting setup.", file=sys.stderr)
+        return False
+
+    print("\nVerifying key...")
+    provider = OllamaCloudProvider(api_key=api_key, base_url=base_url)
+    try:
+        healthy = await provider.health_check()
+    except Exception as err:
+        print(f"Could not reach {base_url}: {err}", file=sys.stderr)
+        healthy = False
+    if not healthy:
+        try:
+            proceed = input("Health check failed. Save this config anyway? [y/N]: ")
+        except EOFError:
+            proceed = ""
+        if proceed.strip().lower() not in ("y", "yes"):
+            print("Setup aborted.", file=sys.stderr)
+            return False
+    else:
+        print("Key verified.")
+
+    print(
+        "\nModel tiers (press Enter to accept the default for each):",
+    )
+    models: dict[str, str] = {}
+    for tier, default_model in _WIZARD_DEFAULT_MODELS.items():
+        try:
+            chosen = input(f"  {tier} [{default_model}]: ").strip()
+        except EOFError:
+            chosen = ""
+        models[tier] = chosen or default_model
+
+    _ensure_gitignored(config_path)
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        "\n".join(
+            [
+                "# Nullain Agent SDK — generated by first-run setup",
+                f'ollama_base_url = "{base_url}"',
+                f'ollama_api_key = "{api_key}"',
+                "",
+                "[router]",
+                'fallback_chain = ["deep", "balanced", "fast"]',
+                "",
+                "[router.tiers.fast]",
+                f'models = ["{models["fast"]}"]',
+                "max_context = 64000",
+                "",
+                "[router.tiers.balanced]",
+                f'models = ["{models["balanced"]}"]',
+                "max_context = 128000",
+                "",
+                "[router.tiers.deep]",
+                f'models = ["{models["deep"]}"]',
+                "max_context = 128000",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    print(f"\nSaved {config_path}.")
+    print("(The API key is stored in this file — keep it out of version control.)\n")
+    return True
+
+
+# ---------------------------------------------------------------------------
 # mcp
 # ---------------------------------------------------------------------------
 
@@ -404,7 +552,11 @@ def _build_parser() -> argparse.ArgumentParser:
         description="Nullain Agent SDK — run, chat, and manage an agent.",
     )
     parser.add_argument("--version", action="version", version=f"Nullain Agent SDK v{__version__}")
-    sub = parser.add_subparsers(dest="command", required=True)
+    # No default subcommand is required: `nullain` with no arguments runs the
+    # first-run setup wizard (if unconfigured) followed by `chat` — see
+    # app(). Every other invocation still needs a real subcommand.
+    parser.add_argument("--workspace", default=".", help="Workspace root (no-subcommand form only)")
+    sub = parser.add_subparsers(dest="command", required=False)
 
     sub.add_parser("version", help="Print the SDK version").set_defaults(handler=_version_handler)
 
@@ -509,14 +661,29 @@ def _mcp_remove_handler(args: argparse.Namespace) -> int:
     return _mcp_remove(args)
 
 
+async def _default_entry(workspace: str) -> int:
+    """``nullain`` with no subcommand: first-run setup, then chat.
+
+    Runs the setup wizard only when no API key is resolvable for this
+    workspace; an already-configured workspace (or one relying on a global
+    env var) goes straight to `chat`, matching the "just type the tool name"
+    entry point of Claude Code / Gemini CLI rather than requiring `chat`
+    explicitly every time.
+    """
+    if _needs_setup(workspace):
+        configured = await _run_setup_wizard(workspace)
+        if not configured:
+            return EXIT_USAGE
+    return await _chat(model=None, workspace=workspace)
+
+
 def app() -> None:
     """CLI entry point."""
     parser = _build_parser()
     args = parser.parse_args()
     handler = getattr(args, "handler", None)
     if handler is None:
-        parser.print_help()
-        sys.exit(EXIT_USAGE)
+        sys.exit(asyncio.run(_default_entry(args.workspace)))
     sys.exit(handler(args))
 
 
