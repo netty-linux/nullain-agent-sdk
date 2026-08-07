@@ -5,7 +5,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from nullain.agent import AgentLoop
+from nullain.agent import AgentLoop, SpawnTask
+from nullain.authority import Authority
 from nullain.errors import BudgetExceededError
 from nullain.events import BaseEvent, ErrorEvent, EventBus
 from nullain.llm import (
@@ -451,6 +452,147 @@ async def test_agent_loop_spawn_subagent_returns_text(tmp_path: Path) -> None:
     assert parent_events == []
 
 
+class KeyedFakeProvider(LLMProvider):
+    """Fake provider that scripts a distinct response sequence per user prompt.
+
+    Each concurrent sub-agent in a spawn_many fan-out sends a different
+    first user message, so responses are looked up by which script's opening
+    instruction text appears in the request — letting several concurrent
+    child loops share one provider instance while each gets its own scripted
+    answer.
+    """
+
+    def __init__(self, scripts: dict[str, list[CompletionChunk]]) -> None:
+        self.scripts = scripts
+        self.call_counts: dict[str, int] = dict.fromkeys(scripts, 0)
+
+    def _match_key(self, request: CompletionRequest) -> str | None:
+        for msg in request.messages:
+            if msg.role != "user" or not msg.content:
+                continue
+            for key in self.scripts:
+                if key in msg.content:
+                    return key
+        return None
+
+    async def generate(self, request: CompletionRequest) -> CompletionChunk:
+        key = self._match_key(request)
+        if key is None:
+            return CompletionChunk(delta_text="Default finished")
+        idx = self.call_counts[key]
+        responses = self.scripts[key]
+        if idx < len(responses):
+            self.call_counts[key] += 1
+            return responses[idx]
+        return CompletionChunk(delta_text="Default finished")
+
+    async def stream(self, request: CompletionRequest) -> AsyncGenerator[CompletionChunk, None]:
+        yield await self.generate(request)
+
+    async def health_check(self) -> bool:
+        return True
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_spawn_many_runs_concurrently(tmp_path: Path) -> None:
+    """spawn_many fans out several sub-agents and returns outcomes in order (M13)."""
+    registry = ToolRegistry()
+    register_default_tools(registry, tmp_path)
+
+    scripts = {
+        "task-A": [
+            CompletionChunk(
+                delta_text='{"objective": "A", "steps": ["reply"], '
+                '"target_files": [], "acceptance_criteria": []}'
+            ),
+            CompletionChunk(delta_text="Result A"),
+        ],
+        "task-B": [
+            CompletionChunk(
+                delta_text='{"objective": "B", "steps": ["reply"], '
+                '"target_files": [], "acceptance_criteria": []}'
+            ),
+            CompletionChunk(delta_text="Result B"),
+        ],
+        "task-C": [
+            CompletionChunk(
+                delta_text='{"objective": "C", "steps": ["reply"], '
+                '"target_files": [], "acceptance_criteria": []}'
+            ),
+            CompletionChunk(delta_text="Result C"),
+        ],
+    }
+    provider = KeyedFakeProvider(scripts)
+
+    parent = AgentLoop(provider=provider, tools=registry, model="sub-model")
+
+    outcomes = await parent.spawn_many(
+        [
+            SpawnTask(prompt="task-A do something", model="sub-model"),
+            SpawnTask(prompt="task-B do something", model="sub-model"),
+            SpawnTask(prompt="task-C do something", model="sub-model"),
+        ]
+    )
+
+    assert [o.text for o in outcomes] == ["Result A", "Result B", "Result C"]
+    assert all(o.success for o in outcomes)
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_spawn_many_isolates_task_failure(tmp_path: Path) -> None:
+    """One task lacking SPAWN capability fails without affecting siblings (M13)."""
+    registry = ToolRegistry()
+    register_default_tools(registry, tmp_path)
+
+    scripts = {
+        "task-ok": [
+            CompletionChunk(
+                delta_text='{"objective": "ok", "steps": ["reply"], '
+                '"target_files": [], "acceptance_criteria": []}'
+            ),
+            CompletionChunk(delta_text="Result OK"),
+        ],
+    }
+    provider = KeyedFakeProvider(scripts)
+
+    # Parent authority lacks SPAWN, so any delegated-authority task fails at
+    # _child_registry's SPAWN-capability gate; the other task passes
+    # authority=None and is unaffected.
+    parent = AgentLoop(
+        provider=provider,
+        tools=registry,
+        model="sub-model",
+        authority=Authority(
+            capabilities=frozenset(),
+            allowed_tools=frozenset(),
+            deny_patterns=frozenset(),
+            can_spawn=False,
+        ),
+    )
+
+    outcomes = await parent.spawn_many(
+        [
+            SpawnTask(prompt="task-ok do something", model="sub-model"),
+            SpawnTask(
+                prompt="task-blocked do something",
+                model="sub-model",
+                authority=Authority(
+                    capabilities=frozenset(),
+                    allowed_tools=frozenset(),
+                    deny_patterns=frozenset(),
+                    can_spawn=False,
+                ),
+            ),
+        ]
+    )
+
+    assert outcomes[0].success
+    assert outcomes[0].text == "Result OK"
+    assert not outcomes[1].success
+    assert outcomes[1].error is not None
+    assert "SPAWN capability" in outcomes[1].error
+
+
 @pytest.mark.asyncio
 async def test_agent_loop_token_budget_exceeded(tmp_path: Path) -> None:
     registry = ToolRegistry()
@@ -688,3 +830,120 @@ async def test_agent_loop_prefers_real_usage_over_estimate(tmp_path: Path) -> No
     # keeps the context under it — so the loop must NOT have compacted.
     compactions = [e for e in events_log if isinstance(e, CompactionEvent)]
     assert compactions == []
+
+
+def test_batch_by_conflict_disjoint_writes_run_together() -> None:
+    """Writes to different files have no conflicting resource — one batch (M13)."""
+    registry = ToolRegistry()
+    register_default_tools(registry, Path("."))
+
+    calls = [
+        ToolCall(id="a", name="write_file", arguments={"path": "a.txt", "content": "A"}),
+        ToolCall(id="b", name="write_file", arguments={"path": "b.txt", "content": "B"}),
+        ToolCall(id="c", name="write_file", arguments={"path": "c.txt", "content": "C"}),
+    ]
+
+    batches = AgentLoop._batch_by_conflict(calls, registry)  # type: ignore[reportPrivateUsage]
+    assert len(batches) == 1
+    assert {tc.id for tc in batches[0]} == {"a", "b", "c"}
+
+
+def test_batch_by_conflict_same_file_write_write_serializes() -> None:
+    """Two writes to the same file must land in different batches (M13)."""
+    registry = ToolRegistry()
+    register_default_tools(registry, Path("."))
+
+    calls = [
+        ToolCall(id="a", name="write_file", arguments={"path": "same.txt", "content": "A"}),
+        ToolCall(id="b", name="write_file", arguments={"path": "same.txt", "content": "B"}),
+    ]
+
+    batches = AgentLoop._batch_by_conflict(calls, registry)  # type: ignore[reportPrivateUsage]
+    assert [{tc.id for tc in b} for b in batches] == [{"a"}, {"b"}]
+
+
+def test_batch_by_conflict_read_then_write_same_file_serializes() -> None:
+    """A read and a write on the same file conflict — read_only alone is not enough (M13)."""
+    registry = ToolRegistry()
+    register_default_tools(registry, Path("."))
+
+    calls = [
+        ToolCall(id="r", name="read_file", arguments={"path": "same.txt"}),
+        ToolCall(id="w", name="write_file", arguments={"path": "same.txt", "content": "X"}),
+    ]
+
+    batches = AgentLoop._batch_by_conflict(calls, registry)  # type: ignore[reportPrivateUsage]
+    assert [{tc.id for tc in b} for b in batches] == [{"r"}, {"w"}]
+
+
+def test_batch_by_conflict_all_read_only_disjoint_paths_run_together() -> None:
+    """Multiple reads of different files run in one batch, as before M13."""
+    registry = ToolRegistry()
+    register_default_tools(registry, Path("."))
+
+    calls = [
+        ToolCall(id="r1", name="read_file", arguments={"path": "a.txt"}),
+        ToolCall(id="r2", name="read_file", arguments={"path": "b.txt"}),
+    ]
+
+    batches = AgentLoop._batch_by_conflict(calls, registry)  # type: ignore[reportPrivateUsage]
+    assert len(batches) == 1
+    assert {tc.id for tc in batches[0]} == {"r1", "r2"}
+
+
+def test_batch_by_conflict_bash_calls_serialize_with_each_other() -> None:
+    """bash has no path argument — two bash calls fall back to tool-scoped
+    serialization rather than being assumed independent (M13)."""
+    registry = ToolRegistry()
+    register_default_tools(registry, Path("."))
+
+    calls = [
+        ToolCall(id="b1", name="bash", arguments={"command_args": ["echo", "1"]}),
+        ToolCall(id="b2", name="bash", arguments={"command_args": ["echo", "2"]}),
+    ]
+
+    batches = AgentLoop._batch_by_conflict(calls, registry)  # type: ignore[reportPrivateUsage]
+    assert [{tc.id for tc in b} for b in batches] == [{"b1"}, {"b2"}]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_disjoint_writes_execute_concurrently(tmp_path: Path) -> None:
+    """End-to-end: writes to different files in one step both land on disk (M13)."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    registry = ToolRegistry()
+    register_default_tools(registry, workspace)
+
+    spec_chunk = CompletionChunk(
+        delta_text=(
+            '{"objective": "Create two files", '
+            '"steps": ["Write a.txt and b.txt"], '
+            '"target_files": ["a.txt", "b.txt"], '
+            '"acceptance_criteria": []}'
+        )
+    )
+    dual_write_chunk = CompletionChunk(
+        tool_calls=[
+            ToolCall(id="w1", name="write_file", arguments={"path": "a.txt", "content": "A"}),
+            ToolCall(id="w2", name="write_file", arguments={"path": "b.txt", "content": "B"}),
+        ],
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
+    )
+    final_chunk = CompletionChunk(
+        delta_text="Created both files.",
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+
+    fake_provider = FakeSequenceProvider([spec_chunk, dual_write_chunk, final_chunk])
+    agent = AgentLoop(
+        provider=fake_provider,
+        tools=registry,
+        max_steps=5,
+        workspace_root=workspace,
+    )
+
+    result = await agent.run_result("Create two files")
+    assert result.status == "success"
+    assert (workspace / "a.txt").read_text() == "A"
+    assert (workspace / "b.txt").read_text() == "B"
