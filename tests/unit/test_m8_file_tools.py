@@ -101,9 +101,10 @@ def test_read_file_redacts_secrets(tmp_path: Path) -> None:
 
 def test_read_file_repeat_call_hits_cache(tmp_path: Path) -> None:
     """A second identical read_file call with no change in between is served
-    from the cache — verified via FileAccessTracker.get_page directly, since
-    an out-of-band disk mutation would itself change the mtime/size cache key
-    and is a separate, correctly-handled case (see the invalidation test)."""
+    from the disk-read cache — verified via FileAccessTracker.get_page
+    directly, since an out-of-band disk mutation would itself change the
+    mtime/size cache key and is a separate, correctly-handled case (see the
+    invalidation test)."""
     target = tmp_path / "a.txt"
     target.write_text("one\ntwo\nthree\n")
     tracker = FileAccessTracker()
@@ -113,7 +114,27 @@ def test_read_file_repeat_call_hits_cache(tmp_path: Path) -> None:
     assert tracker.get_page(target.resolve(), 0, 2000) == first  # 2000 = DEFAULT_READ_LIMIT
 
     second = tools["read_file"].func(path="a.txt")
-    assert first == second
+    assert "unchanged since your last read_file" in second
+
+
+def test_read_file_cache_hit_saves_tokens_not_just_disk_io(tmp_path: Path) -> None:
+    """Regression (M20): the disk-read cache avoided re-touching disk on a
+    repeat read_file call, but still re-sent the full file content as a
+    fresh ToolResultEvent every time — costing the same tokens on the
+    second call as the first, with zero savings from the cache actually
+    existing. A cache hit now returns a short pointer instead of the full
+    body, since the model already has that exact content earlier in the
+    same conversation."""
+    target = tmp_path / "big.txt"
+    target.write_text("\n".join(f"line{i}" for i in range(500)))
+    tools = _tools(tmp_path)
+
+    first = tools["read_file"].func(path="big.txt")
+    second = tools["read_file"].func(path="big.txt")
+
+    assert len(second) < len(first) / 2
+    assert "line0" in first
+    assert "line0" not in second
 
 
 def test_read_file_cache_miss_after_mtime_change(tmp_path: Path) -> None:
