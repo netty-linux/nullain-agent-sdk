@@ -2,6 +2,20 @@
 
 ollama_base_url = "https://ollama.com"
 
+# Per-run budget/limits (M18). max_tokens is a CUMULATIVE ceiling across every
+# step of one run, not a per-message limit — 2,000,000 is sized for real
+# multi-file feature work, several rounds of self-correction, and debugging a
+# larger codebase, not just a single quick answer. Set max_tokens to a smaller
+# number to cap cost more tightly, or to an explicit `null` to disable the
+# token ceiling entirely (the run is then bounded only by max_steps/timeout —
+# a genuinely stuck loop is still caught by loop detection and max_steps, not
+# by token spend). `nullain run --max-tokens N` / `--unlimited-tokens` /
+# `--max-steps N` override this per invocation without editing the file.
+[agent]
+max_steps = 25
+max_tokens = 2000000
+timeout = 300.0
+
 [router]
 fallback_chain = ["deep", "balanced", "fast"]
 # Optional model used to classify a task's intent/complexity when the

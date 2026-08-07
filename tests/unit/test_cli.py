@@ -27,10 +27,11 @@ from nullain.events import ModelResponseEvent
 class _FakeAgent:
     """Scripted stand-in for the Agent facade."""
 
-    def __init__(self, result: RunResult) -> None:
+    def __init__(self, result: RunResult, init_kwargs: dict[str, Any] | None = None) -> None:
         self._result = result
         self._stream_items: list[Any] = []
         self.seen_session_ids: list[str | None] = []
+        self.init_kwargs = init_kwargs or {}
 
     async def run(self, prompt: str, session_id: str | None = None) -> RunResult:
         return self._result
@@ -47,7 +48,7 @@ def _fake_agent_factory(
     stream_items: list[Any] | None = None,
     created: list[_FakeAgent] | None = None,
 ) -> Callable[..., _FakeAgent]:
-    """Return a factory that builds a ``_FakeAgent``, ignoring constructor kwargs.
+    """Return a factory that builds a ``_FakeAgent``, capturing constructor kwargs.
 
     ``stream_items`` are yielded before the terminal ``RunResult``, mirroring
     what ``Agent.stream()`` actually emits (e.g. a ``ModelResponseEvent``
@@ -55,12 +56,13 @@ def _fake_agent_factory(
     ``_run``/``_chat`` render text from those events, not from
     ``RunResult.final_text`` directly. When ``created`` is given, every
     ``_FakeAgent`` instance the factory builds is appended to it, so a test
-    can inspect (e.g.) which ``session_id`` each ``stream()`` call received
-    across multiple ``_run``/``_chat`` invocations.
+    can inspect (e.g.) which ``session_id`` each ``stream()`` call received,
+    or which kwargs cli._run/_chat actually passed to ``Agent(...)``
+    (``agent.init_kwargs``), across multiple ``_run``/``_chat`` invocations.
     """
 
     def factory(**kw: object) -> _FakeAgent:
-        agent = _FakeAgent(result)
+        agent = _FakeAgent(result, init_kwargs=dict(kw))
         agent._stream_items = list(stream_items or [])
         if created is not None:
             created.append(agent)
@@ -140,6 +142,86 @@ def test_run_handler_exit_code_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "Agent", _fake_agent_factory(_failure_result()))
     args = cli._build_parser().parse_args(["run", "hi"])
     assert cli._run_handler(args) == cli.EXIT_RUNTIME
+
+
+# ---------------------------------------------------------------------------
+# token budget (M18): --max-steps / --max-tokens / --unlimited-tokens
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_omits_max_steps_and_max_tokens_when_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Unset --max-steps/--max-tokens must not pass hardcoded values to
+    Agent(...) — that would silently override nullain.toml's [agent]
+    section. cli._run must omit the keyword entirely (letting Agent's own
+    defaulting apply), not pass max_steps=25 / max_tokens=None."""
+    created: list[_FakeAgent] = []
+    monkeypatch.setattr(cli, "Agent", _fake_agent_factory(_success_result("ok"), created=created))
+
+    await cli._run("hi", model=None, workspace=str(tmp_path), max_steps=None, json_output=True)
+
+    assert "max_steps" not in created[0].init_kwargs
+    assert "max_tokens" not in created[0].init_kwargs
+
+
+@pytest.mark.asyncio
+async def test_run_passes_explicit_max_steps_and_max_tokens(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    created: list[_FakeAgent] = []
+    monkeypatch.setattr(cli, "Agent", _fake_agent_factory(_success_result("ok"), created=created))
+
+    await cli._run(
+        "hi",
+        model=None,
+        workspace=str(tmp_path),
+        max_steps=50,
+        json_output=True,
+        max_tokens=5_000_000,
+    )
+
+    assert created[0].init_kwargs["max_steps"] == 50
+    assert created[0].init_kwargs["max_tokens"] == 5_000_000
+
+
+@pytest.mark.asyncio
+async def test_run_unlimited_tokens_passes_explicit_none(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """--unlimited-tokens must pass max_tokens=None explicitly (disabling
+    the ceiling), not omit the keyword (which would fall back to config)."""
+    created: list[_FakeAgent] = []
+    monkeypatch.setattr(cli, "Agent", _fake_agent_factory(_success_result("ok"), created=created))
+
+    await cli._run(
+        "hi",
+        model=None,
+        workspace=str(tmp_path),
+        max_steps=None,
+        json_output=True,
+        unlimited_tokens=True,
+    )
+
+    assert "max_tokens" in created[0].init_kwargs
+    assert created[0].init_kwargs["max_tokens"] is None
+
+
+def test_run_handler_parses_max_tokens_and_unlimited_flags() -> None:
+    parser = cli._build_parser()
+    args = parser.parse_args(["run", "hi", "--max-tokens", "999", "--unlimited-tokens"])
+    assert args.max_tokens == 999
+    assert args.unlimited_tokens is True
+
+
+def test_run_handler_max_steps_defaults_to_none_not_25() -> None:
+    """Regression: --max-steps used to default to 25 in argparse, silently
+    overriding whatever the user configured in nullain.toml even when they
+    never passed the flag."""
+    parser = cli._build_parser()
+    args = parser.parse_args(["run", "hi"])
+    assert args.max_steps is None
 
 
 # ---------------------------------------------------------------------------

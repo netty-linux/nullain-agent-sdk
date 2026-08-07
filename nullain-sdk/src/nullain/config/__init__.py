@@ -1,6 +1,7 @@
 """Nullain Agent SDK — Configuration Module."""
 
 from nullain.config.settings import (
+    AgentConfig,
     MCPConfig,
     MCPServerConfig,
     NullainSettings,
@@ -13,6 +14,7 @@ from nullain.config.settings import (
 )
 
 __all__ = [
+    "AgentConfig",
     "MCPConfig",
     "MCPServerConfig",
     "NullainSettings",

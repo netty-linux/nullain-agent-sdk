@@ -10,6 +10,27 @@ from nullain.hooks import HooksConfig
 from nullain.lsp.config import LSPConfig, LSPServerConfig
 
 
+class AgentConfig(BaseModel):
+    """Per-run budget/limits for ``AgentLoop`` (M18).
+
+    ``max_tokens`` is a *cumulative* ceiling across every step of one
+    ``run()`` — not a per-message limit — so it scales with how much a task
+    actually needs, not with any single model call's context window. The
+    100k default `AgentLoop` shipped with was sized for short single-shot
+    tasks and cuts off well before a real coding task (multi-file feature
+    work, debugging a SaaS codebase, several rounds of self-correction) can
+    finish; 2M gives a task room to run to actual completion while still
+    stopping a genuinely runaway loop before it can spend an unbounded
+    amount on one run. Set to ``null`` in TOML (``None`` here) to disable
+    the token ceiling entirely — the run is then bounded only by
+    ``max_steps`` and ``timeout``.
+    """
+
+    max_steps: int = 25
+    max_tokens: int | None = 2_000_000
+    timeout: float = 300.0
+
+
 class TierConfig(BaseModel):
     """Configuration for a specific model tier."""
 
@@ -137,6 +158,7 @@ class NullainSettings(BaseSettings):
         populate_by_name=True,
     )
 
+    agent: AgentConfig = Field(default_factory=AgentConfig)
     router: RouterConfig = Field(default_factory=RouterConfig)
     hooks: HooksConfig = Field(default_factory=HooksConfig)
     mcp: MCPConfig = Field(default_factory=MCPConfig)
@@ -186,6 +208,7 @@ def load_settings(config_path: str | Path | None = None) -> NullainSettings:
 
 
 __all__ = [
+    "AgentConfig",
     "LSPConfig",
     "LSPServerConfig",
     "MCPConfig",
