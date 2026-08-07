@@ -225,6 +225,105 @@ async def test_agent_loop_verify_fix_reverify(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_loop_verify_retry_gets_fresh_correction_budget(tmp_path: Path) -> None:
+    """Each verify-fix-reverify cycle gets its own self-correction budget (M14).
+
+    self_correction_max=1: cycle 1 spends its one self-correction allowance
+    recovering from a failed read_file, then answers without creating the
+    target file (verify fails). Cycle 2 also hits a failed read_file — if
+    correction_budget were not reset per cycle, this second error would get
+    no [SELF-CORRECTION] reflection and the model would have no signal to
+    retry. Both cycles' errors must be followed by a reflection, proving the
+    budget was refreshed for cycle 2.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    registry = ToolRegistry()
+    register_default_tools(registry, workspace)
+
+    spec_chunk = CompletionChunk(
+        delta_text=(
+            '{"objective": "Create FACTS.txt file", '
+            '"steps": ["Write 3 facts"], '
+            '"target_files": ["FACTS.txt"], '
+            '"acceptance_criteria": []}'
+        )
+    )
+    # Cycle 1: a failing read (spends the sole self-correction allowance),
+    # then a premature final answer without creating the file (verify fails).
+    cycle1_fail_read = CompletionChunk(
+        tool_calls=[
+            ToolCall(id="r1", name="read_file", arguments={"path": "missing_1.txt"}),
+        ]
+    )
+    cycle1_premature_final = CompletionChunk(
+        delta_text="Done (nothing created).",
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+    # Cycle 2 (after VERIFY-CORRECTION): another failing read. If the budget
+    # were not refreshed, correction_budget would already be 0 here and no
+    # [SELF-CORRECTION] reflection would be injected for this error.
+    cycle2_fail_read = CompletionChunk(
+        tool_calls=[
+            ToolCall(id="r2", name="read_file", arguments={"path": "missing_2.txt"}),
+        ]
+    )
+    cycle2_fix_write = CompletionChunk(
+        tool_calls=[
+            ToolCall(
+                id="w1", name="write_file", arguments={"path": "FACTS.txt", "content": "1. Fact A"}
+            )
+        ],
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=10, total_tokens=20),
+    )
+    cycle2_final = CompletionChunk(
+        delta_text="Fixed: FACTS.txt now exists.",
+        usage=TokenUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+    )
+
+    fake_provider = FakeSequenceProvider(
+        [
+            spec_chunk,
+            cycle1_fail_read,
+            cycle1_premature_final,
+            cycle2_fail_read,
+            cycle2_fix_write,
+            cycle2_final,
+        ]
+    )
+    bus = EventBus()
+    events_log: list[BaseEvent] = []
+
+    async def track_events(ev: BaseEvent) -> None:
+        events_log.append(ev)
+
+    bus.subscribe("*", track_events)
+
+    agent = AgentLoop(
+        provider=fake_provider,
+        tools=registry,
+        event_bus=bus,
+        max_steps=15,
+        workspace_root=workspace,
+        self_correction_max=1,
+        verify_retry_max=2,
+    )
+
+    result = await agent.run_result("Create FACTS.txt file")
+    assert result.status == "success"
+    assert (workspace / "FACTS.txt").exists()
+
+    user_msgs = [e for e in events_log if e.event_type == "user_message"]
+    self_correction_msgs = [
+        m for m in user_msgs if "[SELF-CORRECTION]" in getattr(m, "content", "")
+    ]
+    # One reflection per cycle's tool failure — cycle 2's would be missing if
+    # correction_budget leaked from cycle 1 instead of being refreshed.
+    assert len(self_correction_msgs) == 2
+
+
+@pytest.mark.asyncio
 async def test_agent_loop_infinite_loop_prevention(tmp_path: Path) -> None:
     registry = ToolRegistry()
     register_default_tools(registry, tmp_path)

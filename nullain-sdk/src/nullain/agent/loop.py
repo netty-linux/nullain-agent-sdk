@@ -1021,10 +1021,15 @@ class AgentLoop:
     ) -> tuple[int, int, int, str, str, bool, RunStatus | None, str | None, bool]:
         """Run the ReAct Act loop until a final answer, terminal failure, or cap.
 
-        Called once per verify-fix-reverify cycle (M12): ``step``,
-        ``total_tokens`` and ``correction_budget`` carry over across calls so
-        the step cap, token budget, and self-correction allowance span the
-        whole run, not just one cycle. Loop-detection state
+        Called once per verify-fix-reverify cycle (M12): ``step`` and
+        ``total_tokens`` carry over across calls so the step cap and token
+        budget span the whole run, not just one cycle. ``correction_budget``
+        carries over *within* a cycle (across the internal ReAct steps this
+        call itself makes) but the caller resets it to
+        ``self.self_correction_max`` before each new verify-fix-reverify
+        cycle (M14) — each cycle is a fresh attempt at the task and gets its
+        own self-correction allowance, rather than a first attempt's tool
+        retries starving a later cycle's budget. Loop-detection state
         (``last_step_signature`` / ``repeat_count``) is local to each call —
         a fresh cycle starts after a VERIFY-CORRECTION message has been
         injected, which is itself a different step signature, so carrying
@@ -1370,6 +1375,14 @@ class AgentLoop:
             await self._emit(fix_ev)
             accumulated_events.append(fix_ev)
             completed = False
+            # Each verify-fix-reverify cycle is a fresh attempt at the task,
+            # so it gets its own self-correction allowance (M14) rather than
+            # inheriting whatever was left over from the first cycle's tool
+            # errors. Without this, a first attempt that burns its whole
+            # self_correction_max on tool retries would leave later
+            # verify-fix cycles with zero self-correction budget even though
+            # they have their own verify_retry_max budget to work with.
+            correction_budget = self.self_correction_max
 
         # Resolve final status. Terminal-resource failures win; otherwise a
         # completed run is "success" unless verification failed, a detected
