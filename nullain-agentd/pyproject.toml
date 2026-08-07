@@ -24,8 +24,8 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "nullain-sdk",
-    "nullain-tools",
+    "nullain-sdk>=0.1.0",
+    "nullain-tools>=0.1.0",
     "pydantic>=2.7.0",
     "anyio>=4.3.0",
 ]
