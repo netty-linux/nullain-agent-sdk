@@ -107,6 +107,104 @@ def test_tool_line_applies_status_color_and_bold_name() -> None:
     assert any(s.style == "red" for s in failure.spans)
 
 
+def test_repeated_same_tool_collapses_to_count_not_stacked_lines() -> None:
+    """Feedback after live use: a loop of many list_directory calls (e.g.
+    exploring a project's structure) used to print one permanent line per
+    call — 20 calls meant 20 lines stacked in the chat. Consecutive calls
+    to the same tool now update a single live line in place and finalize
+    to a compact "● name xN" summary once a different tool starts, instead
+    of stacking one line per call."""
+    renderer, console = _renderer()
+    for i in range(5):
+        renderer.handle(
+            ToolCallEvent(
+                session_id="s",
+                call_id=f"c{i}",
+                tool_name="list_directory",
+                arguments={"path": f"dir{i}"},
+            )
+        )
+        renderer.handle(
+            ToolResultEvent(
+                session_id="s",
+                call_id=f"c{i}",
+                tool_name="list_directory",
+                output="",
+                is_error=False,
+            )
+        )
+    # Streak isn't finalized until a different tool starts (or the run ends).
+    renderer.handle(
+        ToolCallEvent(session_id="s", call_id="c5", tool_name="read_file", arguments={})
+    )
+    renderer.handle(
+        ToolResultEvent(
+            session_id="s", call_id="c5", tool_name="read_file", output="", is_error=False
+        )
+    )
+    renderer.finish()
+    out = _text_out(console)
+    assert "list_directory  x5" in out
+    # None of the per-call details (dir0..dir3) survive as their own
+    # printed line — only the final live frame and the x5 summary do (a
+    # non-terminal recording console duplicates the last live frame plus
+    # the finalized line, same as any other single Live update in this
+    # suite — real terminals show only the final frame).
+    for i in range(4):
+        assert f"dir{i}" not in out
+    assert "read_file" in out
+
+
+def test_single_call_does_not_get_a_count_suffix() -> None:
+    """A tool called exactly once (the common case) still prints its own
+    full detail line — the xN summary only kicks in for an actual streak,
+    so a single read_file call isn't reduced to "read_file x1"."""
+    renderer, console = _renderer()
+    renderer.handle(
+        ToolCallEvent(
+            session_id="s", call_id="c1", tool_name="read_file", arguments={"path": "a.txt"}
+        )
+    )
+    renderer.handle(
+        ToolResultEvent(
+            session_id="s", call_id="c1", tool_name="read_file", output="", is_error=False
+        )
+    )
+    renderer.finish()
+    out = _text_out(console)
+    assert "a.txt" in out
+    assert "x1" not in out
+
+
+def test_error_breaks_streak_and_keeps_full_detail() -> None:
+    """An error must never be collapsed into a "xN" summary — it always
+    gets its own permanent line plus the failure detail underneath, even
+    mid-streak."""
+    renderer, console = _renderer()
+    for i in range(3):
+        renderer.handle(
+            ToolCallEvent(session_id="s", call_id=f"c{i}", tool_name="bash", arguments={})
+        )
+        renderer.handle(
+            ToolResultEvent(
+                session_id="s", call_id=f"c{i}", tool_name="bash", output="", is_error=False
+            )
+        )
+    renderer.handle(ToolCallEvent(session_id="s", call_id="c-fail", tool_name="bash", arguments={}))
+    renderer.handle(
+        ToolResultEvent(
+            session_id="s",
+            call_id="c-fail",
+            tool_name="bash",
+            output="permission denied",
+            is_error=True,
+        )
+    )
+    renderer.finish()
+    out = _text_out(console)
+    assert "permission denied" in out
+
+
 def test_successful_tool_call_renders_compact_line_not_panel() -> None:
     """Regression (M20): a successful non-write tool call used to render as
     a full bordered Panel (spinner panel while pending, then a second
