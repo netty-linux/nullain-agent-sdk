@@ -183,6 +183,59 @@ async def test_hover_returns_contents(fake_server_script: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
+# LSPClient: error and transport-failure paths
+# ---------------------------------------------------------------------------
+
+
+def test_lsp_client_rejects_empty_command() -> None:
+    from nullain.errors import LSPTransportError
+    from nullain.lsp.client import LSPClient as _LSPClient
+
+    with pytest.raises(LSPTransportError, match="non-empty command"):
+        _LSPClient(command="")
+
+
+@pytest.mark.asyncio
+async def test_lsp_client_start_raises_on_missing_executable() -> None:
+    """Spawning a server whose command doesn't exist on PATH surfaces as
+    LSPTransportError (FileNotFoundError), not a raw OSError leaking out of
+    the client's abstraction."""
+    from nullain.errors import LSPTransportError
+    from nullain.lsp.client import LSPClient as _LSPClient
+
+    client = _LSPClient(command="nullain-definitely-not-a-real-executable-xyz")
+    with pytest.raises(LSPTransportError, match="executable not found"):
+        await client.start()
+
+
+@pytest.mark.asyncio
+async def test_lsp_server_error_response_raises_protocol_error(
+    fake_server_script: Path,
+) -> None:
+    """The fake server responds to any unrecognized method with a JSON-RPC
+    error object — exercises the client's error-response branch, which
+    real malformed/unsupported LSP requests would also trigger."""
+    from nullain.errors import LSPProtocolError
+
+    client = await _make_client(fake_server_script)
+    try:
+        with pytest.raises(LSPProtocolError, match="LSP server error"):
+            await client._request("textDocument/completion", {})  # type: ignore[reportPrivateUsage]
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_lsp_client_close_is_idempotent(fake_server_script: Path) -> None:
+    """Calling close() twice (e.g. once explicitly, once via a caller's
+    finally block after an earlier failure already closed it) must not
+    raise."""
+    client = await _make_client(fake_server_script)
+    await client.close()
+    await client.close()  # no exception
+
+
+# ---------------------------------------------------------------------------
 # language_for_path routing
 # ---------------------------------------------------------------------------
 
