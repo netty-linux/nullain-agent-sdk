@@ -138,6 +138,16 @@ class TUIRenderer:
         # enough for CLI display purposes even though it re-reads from disk
         # rather than being fed the exact pre-write bytes.
         self._pre_write_snapshots: dict[str, str] = {}
+        # Run-of-same-tool collapsing (Claude Code's style): consecutive
+        # calls to the *same* tool name update one live line in place
+        # instead of each printing its own permanent line — a loop of 20
+        # list_directory calls exploring a project would otherwise dump 20
+        # lines into the chat. Tracks the repeated tool's name and how many
+        # times it has resolved in the current streak; reset (streak
+        # finalized as "name xN") the moment a different tool starts or an
+        # error breaks the streak.
+        self._streak_tool: str | None = None
+        self._streak_count: int = 0
 
     def reset(self) -> None:
         """Clear accumulated state between runs in a long-lived chat loop."""
@@ -169,7 +179,7 @@ class TUIRenderer:
 
     def finish(self) -> None:
         """Flush any open live display. Call after the stream is exhausted."""
-        self._stop_live()
+        self._finalize_streak()
 
     # -- streamed text -----------------------------------------------------
 
@@ -185,6 +195,12 @@ class TUIRenderer:
             self._live = None
 
     def _handle_stream_delta(self, ev: StreamDeltaEvent) -> None:
+        if not self._streamed_text:
+            # First delta of this turn: finalize any pending tool-call
+            # streak first, so its summary line prints before the model's
+            # text starts, rather than the streak's live line being
+            # silently overwritten by the incoming Markdown.
+            self._finalize_streak()
         self._streamed_text += ev.delta
         live = self._ensure_live()
         live.update(Markdown(self._streamed_text))
@@ -194,6 +210,7 @@ class TUIRenderer:
         # the full text in one ModelResponseEvent rather than deltas; render
         # it the same way if nothing was streamed yet.
         if ev.content and not self._streamed_text:
+            self._finalize_streak()
             live = self._ensure_live()
             live.update(Markdown(ev.content))
         # A tool-call step means more output is coming (tool result, then
@@ -206,12 +223,17 @@ class TUIRenderer:
     # -- tool calls ----------------------------------------------------------
 
     def _handle_tool_call(self, ev: ToolCallEvent) -> None:
-        self._stop_live()
         self._pending_calls[ev.call_id] = ev
         if ev.tool_name in _FILE_WRITE_TOOLS:
             path = _tool_call_arg_path(ev.arguments)
             if path:
                 self._pre_write_snapshots[ev.call_id] = _read_text_safe(path)
+        if ev.tool_name != self._streak_tool:
+            # A different tool than the current streak — finalize the
+            # previous streak's line (if any) as "name xN" and start fresh.
+            self._finalize_streak()
+            self._streak_tool = ev.tool_name
+            self._streak_count = 0
         # Claude Code's status-line style: a dim ● while pending, a bold
         # tool name, and a dim detail (path/command) beside it. Resolved in
         # place to a colored ●/✓/✗ line by _handle_tool_result — not a
@@ -226,6 +248,7 @@ class TUIRenderer:
         style = "red" if ev.is_error else "green"
         detail = _tool_call_detail(call) if call is not None else None
         line = _tool_line(self._dot, style, ev.tool_name, detail)
+        self._streak_count += 1
 
         if not ev.is_error and call is not None and ev.tool_name in _FILE_WRITE_TOOLS:
             path = _tool_call_arg_path(call.arguments)
@@ -234,27 +257,69 @@ class TUIRenderer:
                 after = _read_text_safe(path)
                 diff_renderable = _render_diff(before, after, path)
                 if diff_renderable is not None:
+                    # A diff is always worth its own permanent line — never
+                    # collapsed into a streak counter even if the same
+                    # write/edit tool repeats.
+                    self._finalize_streak()
                     self._stop_live()
                     self.console.print(line)
                     self.console.print(Panel(diff_renderable, border_style=style))
                     return
 
-        # Replace the spinner's last frame with the final line in place
-        # (one update, then stop) rather than stopping first and printing a
-        # second line below the leftover spinner frame.
-        live = self._ensure_live()
-        live.update(line)
-        self._stop_live()
         if ev.is_error:
+            # An error always ends the streak and gets its own permanent
+            # line + detail — collapsing a failure into a "xN" count would
+            # hide exactly the thing worth seeing.
+            self._finalize_streak()
+            live = self._ensure_live()
+            live.update(line)
+            self._stop_live()
             # A one-line summary of *why* it failed, indented under the
             # status line — full output remains available via
             # ToolResultEvent for anything consuming the raw event stream.
             detail_text = f"{self._detail_prefix}{_truncate(ev.output, limit=300)}"
             self.console.print(Text(detail_text, style="dim red"))
+            return
+
+        # Success, same tool as the current streak: update the one live
+        # line in place (showing this call's own detail) rather than
+        # printing a new permanent line — this is what collapses a run of
+        # 20 list_directory calls into a single animated line instead of
+        # 20 stacked ones. Finalized as "name xN" once a different tool
+        # starts, an error breaks the streak, or the run ends.
+        live = self._ensure_live()
+        live.update(line)
+
+    def _finalize_streak(self) -> None:
+        """Print the current tool streak's permanent summary line, if any.
+
+        A streak of exactly one call prints its own full detail (the
+        common case — most tool calls aren't repeated); a longer streak
+        collapses to "● name xN" since the per-call detail (which file,
+        which path) has already scrolled past as the live line updated.
+        """
+        if self._streak_tool is None or self._streak_count == 0:
+            self._stop_live()
+            return
+        if self._streak_count > 1:
+            style = "green"
+            line = Text()
+            line.append(f"{self._dot} ", style=style)
+            line.append(self._streak_tool, style="bold")
+            line.append(f"  x{self._streak_count}", style="dim")
+            self._stop_live()
+            self.console.print(line)
+        else:
+            # Exactly one call: the live line already shows full detail —
+            # stopping Live leaves that single frame printed as-is.
+            self._stop_live()
+        self._streak_tool = None
+        self._streak_count = 0
 
     # -- spec / verify ---------------------------------------------------------
 
     def _handle_spec_created(self, ev: SpecCreatedEvent) -> None:
+        self._finalize_streak()
         # ev.title is model-generated text, not trusted markup — build the
         # body with Text so any literal "[...]" in it renders as plain text
         # instead of being interpreted as (or breaking) Rich markup.
@@ -265,11 +330,13 @@ class TUIRenderer:
         self.console.print(Panel(body, title="Plan", border_style="cyan"))
 
     def _handle_spec_verified(self, ev: SpecVerifiedEvent) -> None:
+        self._finalize_streak()
         style = "green" if ev.success else "yellow"
         marker = self._ok_marker if ev.success else self._warn_marker
         self.console.print(Panel(Text(ev.feedback), title=f"{marker} Verify", border_style=style))
 
     def _handle_error(self, ev: ErrorEvent) -> None:
+        self._finalize_streak()
         self.console.print(
             Panel(
                 Text(ev.message), title=f"{self._fail_marker} {ev.error_type}", border_style="red"
@@ -279,7 +346,7 @@ class TUIRenderer:
     # -- terminal result -----------------------------------------------------
 
     def _handle_result(self, result: RunResult) -> None:
-        self._stop_live()
+        self._finalize_streak()
         if result.status == "success":
             return  # final answer was already rendered via streaming above
         style = "yellow" if result.status == "verification_failed" else "red"
