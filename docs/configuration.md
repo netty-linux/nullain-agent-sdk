@@ -19,12 +19,15 @@ ollama_base_url = "https://ollama.com"
 
 ```toml
 [agent]
-max_steps = 25
+max_steps = 100
 max_tokens = 2000000
 timeout = 300.0
 ```
 
-- `max_steps` — maximum ReAct loop iterations for one run.
+- `max_steps` — maximum ReAct loop iterations for one run. The default (100)
+  gives a real multi-file session (write a file, adjust config, re-run, fix
+  an error, ...) room to finish; a genuinely stuck agent is still caught by
+  loop detection well before the step cap.
 - `max_tokens` — **cumulative** token budget across every step of one run
   (not a per-message limit). The default (2,000,000) is sized for real
   multi-file feature work, several rounds of self-correction, and debugging

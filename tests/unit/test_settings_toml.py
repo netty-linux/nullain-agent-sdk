@@ -68,9 +68,10 @@ def test_load_settings_defaults_when_no_cwd_toml(
     assert settings.mcp.servers == {}
     # Default router tiers are populated.
     assert "fast" in settings.router.tiers
-    # Default agent budget (M18): large enough for real multi-file feature
-    # work, not the old 100k that cut off long-running coding tasks early.
-    assert settings.agent.max_steps == 25
+    # Default agent budget (M18/M19): large enough for real multi-file
+    # feature work, not the old 25 steps / 100k tokens that cut off
+    # long-running coding tasks early.
+    assert settings.agent.max_steps == 100
     assert settings.agent.max_tokens == 2_000_000
     assert settings.agent.timeout == 300.0
 

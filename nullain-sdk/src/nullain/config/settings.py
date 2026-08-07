@@ -24,9 +24,16 @@ class AgentConfig(BaseModel):
     amount on one run. Set to ``null`` in TOML (``None`` here) to disable
     the token ceiling entirely — the run is then bounded only by
     ``max_steps`` and ``timeout``.
+
+    ``max_steps`` had the same problem: 25 ReAct iterations is enough for a
+    single-file edit but not for a real session touching several files
+    (write a component, adjust an env file, re-run, fix an error, ...) —
+    exactly the shape of task this SDK targets. 100 gives that room while
+    loop detection (a separate, independent guard) still catches genuine
+    thrashing well before the step cap would.
     """
 
-    max_steps: int = 25
+    max_steps: int = 100
     max_tokens: int | None = 2_000_000
     timeout: float = 300.0
 

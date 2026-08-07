@@ -12,7 +12,7 @@ ollama_base_url = "https://ollama.com"
 # by token spend). `nullain run --max-tokens N` / `--unlimited-tokens` /
 # `--max-steps N` override this per invocation without editing the file.
 [agent]
-max_steps = 25
+max_steps = 100
 max_tokens = 2000000
 timeout = 300.0
 

@@ -30,9 +30,9 @@ class _NoopProvider(LLMProvider):
 
 
 def test_agent_defaults_to_settings_agent_budget(tmp_path: Path) -> None:
-    """With nothing passed, Agent uses settings.agent.* (default 25/2M/300)."""
+    """With nothing passed, Agent uses settings.agent.* (default 100/2M/300)."""
     agent = Agent(provider=_NoopProvider(), workspace_root=str(tmp_path))
-    assert agent._max_steps == 25  # type: ignore[reportPrivateUsage]
+    assert agent._max_steps == 100  # type: ignore[reportPrivateUsage]
     assert agent._max_tokens == 2_000_000  # type: ignore[reportPrivateUsage]
     assert agent._timeout == 300.0  # type: ignore[reportPrivateUsage]
 
