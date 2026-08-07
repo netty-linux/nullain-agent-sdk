@@ -39,6 +39,20 @@ PermissionCallback = Callable[[str, str], Awaitable[bool]]
 AskUserCallback = Callable[[str], Awaitable[str]]
 
 
+class _Unset:
+    """Sentinel distinguishing "argument omitted" from "explicitly None".
+
+    ``max_tokens=None`` is a meaningful, valid value (disable the token
+    ceiling) — so ``max_tokens`` can't default to ``None`` to mean "fall
+    back to settings.agent.max_tokens" without losing the ability to pass
+    ``None`` on purpose. This sentinel is the omitted-argument default
+    instead.
+    """
+
+
+_UNSET = _Unset()
+
+
 class Agent:
     """High-level facade assembling a runnable agent with safe defaults.
 
@@ -62,8 +76,9 @@ class Agent:
         tools: ToolRegistry | None = None,
         workspace_root: str | Path = ".",
         model: str | None = None,
-        max_steps: int = 25,
-        timeout: float = 300.0,
+        max_steps: int | None = None,
+        max_tokens: int | _Unset | None = _UNSET,
+        timeout: float | None = None,
         permission_callback: PermissionCallback | None = None,
         ask_user_callback: AskUserCallback | None = None,
         event_bus: EventBus | None = None,
@@ -83,8 +98,23 @@ class Agent:
                 built-in tools under a fail-closed permission policy.
             workspace_root: Workspace root for the filesystem/bash/git tools.
             model: Optional model override for the run.
-            max_steps: Maximum ReAct steps per run.
-            timeout: Per-run timeout in seconds.
+            max_steps: Maximum ReAct steps per run. When None, uses
+                ``settings.agent.max_steps`` (``[agent] max_steps`` in
+                ``nullain.toml``; SDK default 25).
+            max_tokens: Cumulative token budget ceiling for one run — not a
+                per-message limit, so it scales with how much a task
+                actually needs across every step. When omitted entirely,
+                uses ``settings.agent.max_tokens`` (``[agent] max_tokens``
+                in ``nullain.toml``; SDK default 2,000,000 — large enough
+                for real multi-file feature work, several rounds of
+                self-correction, and debugging, while still stopping a
+                genuinely runaway loop). Pass ``None`` explicitly to disable
+                the ceiling for this ``Agent`` regardless of what
+                ``nullain.toml`` says — the run is then bounded only by
+                ``max_steps`` and ``timeout``.
+            timeout: Per-run timeout in seconds. When None, uses
+                ``settings.agent.timeout`` (``[agent] timeout`` in
+                ``nullain.toml``; SDK default 300.0).
             permission_callback: Async callback for ASK-level permission
                 requests. When None, ASK resolves to DENY (fail-closed).
             ask_user_callback: Async callback backing the ``ask_user`` tool.
@@ -120,8 +150,11 @@ class Agent:
             )
             self._settings = load_settings(config_path)
         self._model = model
-        self._max_steps = max_steps
-        self._timeout = timeout
+        self._max_steps = max_steps if max_steps is not None else self._settings.agent.max_steps
+        self._max_tokens = (
+            self._settings.agent.max_tokens if isinstance(max_tokens, _Unset) else max_tokens
+        )
+        self._timeout = timeout if timeout is not None else self._settings.agent.timeout
 
         self._provider = provider or OllamaCloudProvider(
             api_key=self._settings.ollama_api_key,
@@ -173,8 +206,9 @@ class Agent:
         tools: ToolRegistry | None = None,
         workspace_root: str | Path = ".",
         model: str | None = None,
-        max_steps: int = 25,
-        timeout: float = 300.0,
+        max_steps: int | None = None,
+        max_tokens: int | _Unset | None = _UNSET,
+        timeout: float | None = None,
         permission_callback: PermissionCallback | None = None,
         ask_user_callback: AskUserCallback | None = None,
         event_bus: EventBus | None = None,
@@ -192,6 +226,8 @@ class Agent:
             workspace_root: Optional workspace root override.
             model: Optional model override.
             max_steps: Optional max-steps override.
+            max_tokens: Optional cumulative token-budget override; see the
+                constructor's docstring for the omitted-vs-None distinction.
             timeout: Optional per-run timeout override.
             permission_callback: Optional permission callback override.
             ask_user_callback: Optional ask-user callback override.
@@ -211,6 +247,7 @@ class Agent:
             workspace_root=workspace_root,
             model=model,
             max_steps=max_steps,
+            max_tokens=max_tokens,
             timeout=timeout,
             permission_callback=permission_callback,
             ask_user_callback=ask_user_callback,
@@ -230,8 +267,9 @@ class Agent:
         tools: ToolRegistry | None = None,
         workspace_root: str | Path = ".",
         model: str | None = None,
-        max_steps: int = 25,
-        timeout: float = 300.0,
+        max_steps: int | None = None,
+        max_tokens: int | _Unset | None = _UNSET,
+        timeout: float | None = None,
         permission_callback: PermissionCallback | None = None,
         ask_user_callback: AskUserCallback | None = None,
         event_bus: EventBus | None = None,
@@ -249,6 +287,8 @@ class Agent:
             workspace_root: Optional workspace root override.
             model: Optional model override.
             max_steps: Optional max-steps override.
+            max_tokens: Optional cumulative token-budget override; see the
+                constructor's docstring for the omitted-vs-None distinction.
             timeout: Optional per-run timeout override.
             permission_callback: Optional permission callback override.
             ask_user_callback: Optional ask-user callback override.
@@ -268,6 +308,7 @@ class Agent:
             workspace_root=workspace_root,
             model=model,
             max_steps=max_steps,
+            max_tokens=max_tokens,
             timeout=timeout,
             permission_callback=permission_callback,
             ask_user_callback=ask_user_callback,
@@ -292,6 +333,7 @@ class Agent:
             persistent_memory=self._persistent_memory,
             workspace_root=self._workspace_root,
             max_steps=self._max_steps,
+            max_tokens=self._max_tokens,
             timeout=self._timeout,
         )
 

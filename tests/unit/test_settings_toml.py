@@ -68,6 +68,43 @@ def test_load_settings_defaults_when_no_cwd_toml(
     assert settings.mcp.servers == {}
     # Default router tiers are populated.
     assert "fast" in settings.router.tiers
+    # Default agent budget (M18): large enough for real multi-file feature
+    # work, not the old 100k that cut off long-running coding tasks early.
+    assert settings.agent.max_steps == 25
+    assert settings.agent.max_tokens == 2_000_000
+    assert settings.agent.timeout == 300.0
+
+
+def test_load_settings_agent_section_from_toml(tmp_path: Path) -> None:
+    """[agent] overrides the default budget/limits."""
+    toml = tmp_path / "nullain.toml"
+    toml.write_text(
+        """
+[agent]
+max_steps = 50
+max_tokens = 5000000
+timeout = 600.0
+"""
+    )
+    settings = load_settings(toml)
+    assert settings.agent.max_steps == 50
+    assert settings.agent.max_tokens == 5_000_000
+    assert settings.agent.timeout == 600.0
+
+
+def test_agent_config_max_tokens_none_disables_ceiling() -> None:
+    """AgentConfig accepts max_tokens=None directly (no ceiling).
+
+    TOML has no `null` literal — a user disables the ceiling by omitting
+    the key entirely (which already keeps the default 2,000,000, so that's
+    not the right way to test "disabled" either) or by constructing
+    AgentConfig programmatically. This test covers the Python-level
+    contract that None is a valid, meaningful value for the field.
+    """
+    from nullain.config import AgentConfig
+
+    config = AgentConfig(max_tokens=None)
+    assert config.max_tokens is None
 
 
 def test_load_settings_no_path_reads_cwd_toml(

@@ -15,6 +15,31 @@ ollama_base_url = "https://ollama.com"
   instead, so it never lands in a committed file — `NULLAIN_OLLAMA_API_KEY`
   also works and takes precedence if both are set).
 
+## `[agent]` — per-run budget/limits
+
+```toml
+[agent]
+max_steps = 25
+max_tokens = 2000000
+timeout = 300.0
+```
+
+- `max_steps` — maximum ReAct loop iterations for one run.
+- `max_tokens` — **cumulative** token budget across every step of one run
+  (not a per-message limit). The default (2,000,000) is sized for real
+  multi-file feature work, several rounds of self-correction, and debugging
+  a larger codebase — not just a single quick answer. Set to a smaller
+  number to cap cost more tightly, or to `null` to disable the ceiling
+  entirely (the run is then bounded only by `max_steps`/`timeout` — a
+  genuinely stuck loop is still caught by loop detection, not by token
+  spend).
+- `timeout` — per-run wall-clock timeout in seconds.
+
+`nullain run --max-steps N` / `--max-tokens N` / `--unlimited-tokens`
+override these per invocation without editing the file. Passing `max_steps`/
+`max_tokens`/`timeout` directly to `Agent(...)` in code overrides this
+section the same way.
+
 ## `[router]` — model routing
 
 ```toml

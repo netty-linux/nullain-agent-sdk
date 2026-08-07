@@ -184,10 +184,12 @@ async def _run(
     *,
     model: str | None,
     workspace: str,
-    max_steps: int,
+    max_steps: int | None,
     json_output: bool,
     session_id: str | None = None,
     continue_session: bool = False,
+    max_tokens: int | None = None,
+    unlimited_tokens: bool = False,
 ) -> RunResult:
     """Execute a single prompt and return the structured result.
 
@@ -202,8 +204,24 @@ async def _run(
     or the latest one via ``--continue``) is passed through to
     ``agent.stream()``, which resumes that session's history from the
     workspace's on-disk event store when it has prior events.
+
+    Token budget (M18): ``max_steps`` defaults to None here so an unset CLI
+    flag falls through to Agent's own resolution (``settings.agent.*`` from
+    ``nullain.toml``, then the SDK default) — passing a hardcoded 25 here
+    would silently override whatever the user configured. ``max_tokens``
+    works the same way when not given (the ``Agent(...)`` call below omits
+    the keyword entirely rather than passing None, since None to Agent
+    means "disable the ceiling", not "unset"). ``--unlimited-tokens``
+    passes ``max_tokens=None`` explicitly to disable the ceiling outright.
     """
-    agent = Agent(workspace_root=workspace, model=model, max_steps=max_steps)
+    agent_kwargs: dict[str, Any] = {"workspace_root": workspace, "model": model}
+    if max_steps is not None:
+        agent_kwargs["max_steps"] = max_steps
+    if unlimited_tokens:
+        agent_kwargs["max_tokens"] = None
+    elif max_tokens is not None:
+        agent_kwargs["max_tokens"] = max_tokens
+    agent = Agent(**agent_kwargs)
     resolved_session = await _resolve_session_id(
         workspace, session_id=session_id, continue_session=continue_session
     )
@@ -568,7 +586,24 @@ def _build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("prompt", help="The prompt to act on")
     p_run.add_argument("--model", default=None, help="Model override")
     p_run.add_argument("--workspace", default=".", help="Workspace root")
-    p_run.add_argument("--max-steps", type=int, default=25, help="Max ReAct steps")
+    p_run.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Max ReAct steps (default: [agent] max_steps in nullain.toml, else 25)",
+    )
+    p_run.add_argument(
+        "--max-tokens",
+        type=int,
+        default=None,
+        help="Cumulative token budget for this run "
+        "(default: [agent] max_tokens in nullain.toml, else 2,000,000)",
+    )
+    p_run.add_argument(
+        "--unlimited-tokens",
+        action="store_true",
+        help="Disable the token budget ceiling for this run (bounded only by --max-steps/timeout)",
+    )
     p_run.add_argument("--json", action="store_true", help="Emit NDJSON for piping")
     p_run.add_argument(
         "--session",
@@ -633,6 +668,8 @@ def _run_handler(args: argparse.Namespace) -> int:
             json_output=args.json,
             session_id=args.session,
             continue_session=args.continue_session,
+            max_tokens=args.max_tokens,
+            unlimited_tokens=args.unlimited_tokens,
         )
     )
     return EXIT_OK if result.success else EXIT_RUNTIME
