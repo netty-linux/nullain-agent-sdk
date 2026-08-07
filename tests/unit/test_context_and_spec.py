@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 from nullain.agent import SpecValidator, TaskSpec
 from nullain.context import ContextManager, PromptAssembler
-from nullain.events import UserMessageEvent
+from nullain.events import ModelResponseEvent, ToolResultEvent, UserMessageEvent
+from nullain.llm import ToolCall
 from nullain.tools import PermissionLevel, PermissionPolicy
 
 
@@ -29,6 +30,101 @@ async def test_context_manager_compaction(tmp_path: Path) -> None:
     assert compaction_ev.session_id == "s1"
     assert "Implement login auth" in compaction_ev.summary
     assert len(compaction_ev.compacted_event_ids) == 6
+
+
+def test_compaction_never_splits_a_tool_call_from_its_results() -> None:
+    """Regression: found live against the real Ollama Cloud API. The naive
+    events[:-_RECENT_KEEP] positional slice could compact away a
+    ModelResponseEvent carrying tool_calls while its matching
+    ToolResultEvent(s) survived in the "kept verbatim" tail — replaying an
+    orphaned `tool`-role message with no preceding `assistant` tool_calls
+    message. Ollama Cloud's compat shim rejects that shape with
+    `400 invalid message content type: <nil>` instead of a clearer error.
+    _compaction_boundary must always keep (or compact) a tool-call turn
+    and every one of its results together."""
+    events = [
+        UserMessageEvent(session_id="s1", id="u0", content="old prompt"),
+        ModelResponseEvent(
+            session_id="s1",
+            id="m1",
+            model="m",
+            content=None,
+            tool_calls=(
+                ToolCall(id="call_1", name="write_file", arguments={}),
+                ToolCall(id="call_2", name="write_file", arguments={}),
+            ),
+        ),
+        ToolResultEvent(
+            session_id="s1", id="t1", call_id="call_1", tool_name="write_file", output="ok1"
+        ),
+        ToolResultEvent(
+            session_id="s1", id="t2", call_id="call_2", tool_name="write_file", output="ok2"
+        ),
+        UserMessageEvent(session_id="s1", id="u1", content="verify fix"),
+        UserMessageEvent(session_id="s1", id="u2", content="try again"),
+    ]
+
+    boundary = ContextManager._compaction_boundary(events)  # type: ignore[reportPrivateUsage]
+    # The naive events[:-4] slice would cut at index 2, splitting m1 (index
+    # 1, would be compacted) from t1/t2 (indices 2-3, would be kept) — the
+    # exact bug. The safe boundary must pull back to include m1 too.
+    assert boundary <= 1
+
+    kept = events[boundary:]
+    kept_ids = {ev.id for ev in kept}
+    if "t1" in kept_ids or "t2" in kept_ids:
+        assert "m1" in kept_ids
+
+
+def test_compaction_boundary_keeps_last_n_when_no_split_needed() -> None:
+    """When no tool-call/result pair straddles the naive boundary, the
+    boundary is exactly the plain events[:-_RECENT_KEEP] cut — no
+    unnecessary widening of the compacted set."""
+    events = [
+        UserMessageEvent(session_id="s1", id=f"u{i}", content=f"prompt {i}") for i in range(10)
+    ]
+    boundary = ContextManager._compaction_boundary(events)  # type: ignore[reportPrivateUsage]
+    assert boundary == len(events) - 4
+
+
+def test_folded_history_never_orphans_a_tool_message() -> None:
+    """End-to-end check with the real fold + serialize path: after
+    compacting a trajectory that would have split a tool-call turn from
+    its results under the old logic, every `tool`-role ChatMessage in the
+    resulting history is still preceded somewhere earlier by the
+    `assistant` message carrying the matching tool_calls id."""
+    from nullain.events import Conversation
+
+    events = [
+        UserMessageEvent(session_id="s1", id="u0", content="old prompt"),
+        ModelResponseEvent(
+            session_id="s1",
+            id="m1",
+            model="m",
+            content=None,
+            tool_calls=(ToolCall(id="call_1", name="write_file", arguments={}),),
+        ),
+        ToolResultEvent(
+            session_id="s1", id="t1", call_id="call_1", tool_name="write_file", output="ok1"
+        ),
+        UserMessageEvent(session_id="s1", id="u1", content="verify fix"),
+        UserMessageEvent(session_id="s1", id="u2", content="try again"),
+    ]
+    cm = ContextManager(max_window_tokens=1000, compaction_threshold=0.75)
+    import asyncio
+
+    compaction_ev = asyncio.run(cm.compact("s1", events, active_spec=None))
+
+    state = Conversation.fold("s1", [*events, compaction_ev])
+    known_tool_call_ids: set[str] = set()
+    for msg in state.messages:
+        d = msg.to_api_dict()
+        if d["role"] == "tool":
+            assert d["tool_call_id"] in known_tool_call_ids, (
+                "orphaned tool message with no preceding assistant tool_calls"
+            )
+        for tc in msg.tool_calls or []:
+            known_tool_call_ids.add(tc.id)
 
 
 @pytest.mark.asyncio
