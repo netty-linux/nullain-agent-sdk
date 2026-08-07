@@ -50,8 +50,16 @@ class EventStore:
         resolution on Windows, so consecutively appended events routinely share
         one timestamp, and any tiebreaker on ``id`` (a random UUID) would order
         them arbitrarily — silently corrupting the trajectory the agent replays.
+
+        For a file-backed store (anything other than ``":memory:"``), the
+        parent directory is created if missing — aiosqlite does not do this
+        itself, and callers (e.g. the ``Agent`` facade's default
+        ``<workspace>/.nullain/sessions.db``) should not need to create it
+        ahead of time.
         """
         if self._conn is None:
+            if self.db_path != ":memory:":
+                Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
             self._conn = await aiosqlite.connect(self.db_path)
             await self._conn.execute(
                 """
@@ -94,6 +102,26 @@ class EventStore:
             (event.id, event.session_id, event.timestamp, event.event_type, payload),
         )
         await self._conn.commit()
+
+    async def get_latest_session_id(self) -> str | None:
+        """Return the session_id of the most recently appended event, if any.
+
+        Used to resume "the last conversation" (e.g. a CLI ``--continue``
+        flag) without the caller having to track session ids itself. Latest
+        is defined by insertion order (``seq``), consistent with
+        :meth:`get_session_events`'s ordering — not by timestamp, for the
+        same coarse-clock reason documented on :meth:`initialize`.
+        """
+        if self._conn is None:
+            await self.initialize()
+
+        if self._conn is None:
+            raise RuntimeError("Failed to initialize EventStore database connection")
+
+        query = "SELECT session_id FROM events ORDER BY seq DESC LIMIT 1"
+        async with self._conn.execute(query) as cursor:
+            row = await cursor.fetchone()
+        return row[0] if row is not None else None
 
     async def get_session_events(self, session_id: str) -> list[BaseEvent]:
         """Fetch all events for a session in insertion order.
