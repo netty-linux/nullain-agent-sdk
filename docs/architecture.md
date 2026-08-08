@@ -87,6 +87,37 @@ the final `RunResult`; `run_sync` is a thin synchronous facade.
 - Plugins are signed, SBOM'd, capability-manifested bundles, fail-closed at
   every branch.
 
+## Daemon (`nullain-agentd`)
+
+`nullain-agentd` exposes the SDK to non-Python hosts over a stdio NDJSON
+protocol (`nullain/protocol/`), rather than embedding this Python process
+into a client written in another language. `run_agentd` owns one process's
+worth of shared, expensive-to-create state — the `LLMProvider`, the MCP/LSP
+server subprocesses, prepared plugins, the OS sandbox adapter — prepared
+once at startup and reused across every session (P4.23/P4.25).
+
+Per-session state (the tool registry, permission policy, workspace root,
+and persistent memory) is kept in a `dict[session_id, _SessionState]`, never
+as a single mutable variable — two concurrent `session_id`s cannot see or
+clobber each other's workspace or tools (issue #43). A `user.message` for an
+unrecognized `session_id` is rejected with a structured error rather than
+silently falling back to whichever session most recently started.
+
+Session history is durable, not process-local: every event lands in
+`<workspace>/.nullain/sessions.db` (the same `EventStore` `Agent` uses — see
+[`api-stability.md`](api-stability.md)'s M11 notes), so a `session.start` on
+a `session_id` that already has events resumes that conversation — including
+across a full daemon restart, and including the same orphaned-tool-result
+repair pass `Agent._load_session_history` applies (issue #44) for a session
+persisted before the #24 compaction fix.
+
+`ASK`-level permission checks and `ask_user` tool calls have no TTY to read
+from inside the daemon, so both are proxied over the same NDJSON channel as
+`permission.request`/`permission.response` and
+`ask_user.request`/`ask_user.response` pairs; the daemon blocks the affected
+tool call until a matching response arrives, and treats a closed stream (EOF)
+as a denial (fail-closed), never a hang.
+
 ## Subagents & worktree isolation
 
 `AgentLoop.spawn` runs a sub-agent with fresh context and an isolated event

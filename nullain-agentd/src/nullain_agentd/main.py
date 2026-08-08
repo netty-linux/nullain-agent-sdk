@@ -6,13 +6,14 @@ import json
 import os
 import sys
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO, cast
 
 from nullain.agent import AgentLoop
 from nullain.authority import Capability
 from nullain.config import NullainSettings, load_settings
-from nullain.events import BaseEvent, EventBus, EventStore
+from nullain.events import BaseEvent, EventBus, EventStore, repair_session_events
 from nullain.hooks import HookManager
 from nullain.llm import LLMProvider, OllamaCloudProvider
 from nullain.lsp import LSPClient, register_lsp_tools
@@ -32,6 +33,30 @@ from nullain.tools.sandbox import SandboxOptions, select_sandbox
 from nullain_tools import CheckpointStore, FileAccessTracker, register_default_tools
 
 logger = get_logger(__name__)
+
+
+@dataclass
+class _SessionState:
+    """Per-session mutable state (issue #43).
+
+    Everything a running session needs that must NOT be shared with any
+    other concurrent session — workspace root, tool registry, permission
+    policy, and persistent memory. Found live: an earlier version of this
+    daemon kept these as single closure-local variables reassigned on every
+    ``session.start``, so a second concurrent session silently clobbered the
+    first session's workspace/registry the moment it started — any
+    ``user.message`` for session A, sent after session B started, ran
+    against B's tools and workspace instead of A's. Keying this state by
+    ``session_id`` in a dict (see ``run_agentd``'s ``sessions`` map) is the
+    fix: shared collaborators (provider, MCP/LSP clients, prepared plugins,
+    sandbox, router, event bus/store, episodic memory) still persist across
+    sessions as before — only what genuinely must be per-session lives here.
+    """
+
+    workspace_root: str
+    registry: ToolRegistry
+    permission_policy: PermissionPolicy
+    persistent_memory: PersistentMemory
 
 
 def _sandbox_opts(settings: NullainSettings, ws_root: str) -> SandboxOptions:
@@ -337,29 +362,20 @@ async def run_agentd(
             return "Error: expected ask_user.response."
         return str(resp_env.payload.get("answer", ""))
 
-    ws_root = "."
-    policy = PermissionPolicy(workspace_root=ws_root)
-    registry: ToolRegistry = ToolRegistry(
-        permission_policy=policy,
-        permission_callback=permission_callback,
-    )
-    persistent_memory: PersistentMemory | None = None
-    register_default_tools(
-        registry,
-        ws_root,
-        ask_user_callback=ask_user_callback,
-        sandbox=sandbox,
-        sandbox_opts=_sandbox_opts(settings, ws_root),
-        bash_timeout=settings.agent.bash_timeout,
-    )
+    # Per-session state (issue #43): keyed by session_id, never overwritten by
+    # a different session starting — see _SessionState's docstring for the
+    # concurrency bug this replaces.
+    sessions: dict[str, _SessionState] = {}
 
-    def _build_worktree_registry(worktree_root: Path, sess_id: str) -> ToolRegistry:
+    def _build_worktree_registry(
+        worktree_root: Path, sess_id: str, sess_event_bus: EventBus
+    ) -> ToolRegistry:
         """Build a fresh registry rooted at a worktree directory (M11.4).
 
         Tools bind to their workspace root at creation time, so a
         worktree-isolated subagent needs a registry built against the worktree
         path rather than the parent's. Captures the same permission/ask
-        callbacks, sandbox, event bus, and session id as the parent registry.
+        callbacks, sandbox, and session id as the parent session's registry.
         """
         wt_root = str(worktree_root)
         wt_policy = PermissionPolicy(workspace_root=wt_root)
@@ -375,12 +391,36 @@ async def run_agentd(
             sandbox=sandbox,
             sandbox_opts=_sandbox_opts(settings, wt_root),
             file_access_tracker=FileAccessTracker(),
-            event_bus=event_bus,
+            event_bus=sess_event_bus,
             session_id=sess_id,
             checkpoint_store=CheckpointStore(wt_root),
             bash_timeout=settings.agent.bash_timeout,
         )
         return wt_registry
+
+    async def _load_session_history(sess_id: str) -> list[BaseEvent] | None:
+        """Load and repair prior events for ``sess_id`` from the shared event
+        store, so a ``session.start`` on an id with prior history resumes
+        that conversation after a daemon restart (issue #43's acceptance
+        criterion) — mirrors ``Agent._load_session_history`` (issue #44),
+        including the same orphaned-tool-result repair for sessions
+        persisted by a build older than #24's compaction fix.
+        """
+        events = await event_store.get_session_events(sess_id)
+        if not events:
+            return None
+        repaired, report = repair_session_events(sess_id, events)
+        if report is None:
+            return repaired
+        logger.warning(
+            "agentd_session_repaired",
+            session_id=sess_id,
+            re_paired_call_ids=report.re_paired_call_ids,
+            dropped_call_ids=report.dropped_call_ids,
+        )
+        await event_store.append(report)
+        await event_bus.publish(report)
+        return [*repaired, report]
 
     try:
         while True:
@@ -470,12 +510,26 @@ async def run_agentd(
                 # session crash.
                 register_lsp_tools(registry, lsp_clients)
 
+                # Keyed by session_id — a second session.start for a
+                # DIFFERENT id no longer clobbers this one's state (issue
+                # #43). Restarting the SAME session_id rebuilds its registry
+                # fresh (correct: tool wrappers/read-trackers/checkpoint
+                # stores are process-local and don't survive anyway), while
+                # its conversation history still resumes below from the
+                # durable event store.
+                sessions[sess_id] = _SessionState(
+                    workspace_root=ws_root,
+                    registry=registry,
+                    permission_policy=policy,
+                    persistent_memory=persistent_memory,
+                )
+
                 resp_env = ProtocolEnvelope(
                     v=1,
                     type="session.started",
                     id=env.id,
                     payload={
-                        "session_id": env.payload.get("session_id", "s1"),
+                        "session_id": sess_id,
                         "status": "ok",
                     },
                 )
@@ -485,24 +539,46 @@ async def run_agentd(
                 prompt = str(env.payload.get("prompt", ""))
                 sess_id = str(env.payload.get("session_id", "s1"))
 
+                state = sessions.get(sess_id)
+                if state is None:
+                    err_env = ProtocolEnvelope(
+                        v=1,
+                        type="session.end",
+                        id=env.id,
+                        payload={
+                            "session_id": sess_id,
+                            "status": "error",
+                            "error": (f"unknown session_id {sess_id!r} — send session.start first"),
+                        },
+                    )
+                    write_envelope(err_env)
+                    continue
+
+                events_history = await _load_session_history(sess_id)
+
                 agent = AgentLoop(
                     provider=provider,
-                    tools=registry,
+                    tools=state.registry,
                     event_bus=event_bus,
                     event_store=event_store,
                     router=router,
                     episodic_memory=episodic_memory,
                     hooks=hook_manager,
-                    persistent_memory=persistent_memory,
-                    workspace_root=Path(ws_root),
+                    persistent_memory=state.persistent_memory,
+                    workspace_root=Path(state.workspace_root),
                     # M11.4: enables isolation="worktree" subagents by re-rooting
-                    # a fresh registry at the worktree directory. The lambda binds
-                    # this session's id (B023: loop var captured as a default).
-                    tool_factory=lambda p, _sid=sess_id: _build_worktree_registry(p, _sid),
+                    # a fresh registry at the worktree directory. The lambda
+                    # binds this session's id and event bus (B023: loop var
+                    # captured as a default).
+                    tool_factory=lambda p, _sid=sess_id, _bus=event_bus: _build_worktree_registry(
+                        p, _sid, _bus
+                    ),
                 )
 
                 try:
-                    res_text = await agent.run_streaming(prompt=prompt, session_id=sess_id)
+                    res_text = await agent.run_streaming(
+                        prompt=prompt, session_id=sess_id, events_history=events_history
+                    )
                     end_env = ProtocolEnvelope(
                         v=1,
                         type="session.end",
