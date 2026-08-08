@@ -1,6 +1,27 @@
 # Nullain Agent SDK Configuration Example
 
 ollama_base_url = "https://ollama.com"
+# ollama_api_key is usually set via the OLLAMA_API_KEY env var instead, so it
+# never lands in a committed file — NULLAIN_OLLAMA_API_KEY also works and
+# takes precedence if both are set.
+
+# OpenAI-compatible provider settings (used only when [llm] provider =
+# "openai" below). openai_base_url defaults to OpenAI itself; pointing it at
+# any other OpenAI-compatible chat-completions endpoint — OpenRouter,
+# Together, Groq, vLLM, LM Studio, ... — is the entire mechanism for
+# switching providers, no other setting changes needed.
+# openai_base_url = "https://api.openai.com"
+# openai_api_key is usually set via the OPENAI_API_KEY env var instead —
+# NULLAIN_OPENAI_API_KEY also works and takes precedence if both are set.
+
+# Which LLM provider Agent() builds by default when none is injected.
+# "ollama" (default) uses ollama_api_key/ollama_base_url above; "openai"
+# uses openai_api_key/openai_base_url above (works against any
+# OpenAI-compatible endpoint, not only OpenAI itself — see
+# docs/configuration.md's [llm] section). This selects ONE provider for the
+# whole agent; per-tier provider routing is not yet implemented.
+[llm]
+provider = "ollama"
 
 # Per-run budget/limits (M18). max_tokens is a CUMULATIVE ceiling across every
 # step of one run, not a per-message limit — 2,000,000 is sized for real

@@ -6,10 +6,18 @@ From zero to a running agent in a few minutes.
 
 - Python 3.12+
 - [uv](https://github.com/astral-sh/uv)
-- An [Ollama Cloud](https://ollama.com) API key — this is the only LLM
-  provider currently wired up. Sign up at ollama.com, generate an API key,
-  and either export it as `OLLAMA_API_KEY` or let the first-run setup
-  wizard below prompt you for it.
+- An API key for your LLM provider. Two are wired up:
+  - **[Ollama Cloud](https://ollama.com)** (default) — open-weight models.
+    Sign up at ollama.com, generate an API key, and export it as
+    `OLLAMA_API_KEY`.
+  - **Any OpenAI-compatible endpoint** — OpenAI itself, OpenRouter,
+    Together, Groq, vLLM, LM Studio, and others. Export your key as
+    `OPENAI_API_KEY` and set `[llm] provider = "openai"` in `nullain.toml`
+    (see [configuration.md](configuration.md#llm--provider-selection)).
+
+  Either way, the first-run setup wizard below will ask you to pick a
+  provider and enter the key interactively if you'd rather not set it up
+  front.
 
 ## Install
 
@@ -118,4 +126,4 @@ agent = Agent.from_config("path/to/nullain.toml")
   lines, permission prompts, command history, diffs.
 - [architecture.md](architecture.md) — how the pipeline fits together.
 - [api-stability.md](api-stability.md) — what is public API under SemVer.
-- `examples/` — runnable examples: `01_basic_agent.py` … `05_mcp_server.py`.
+- `examples/` — runnable examples: `01_basic_agent.py` … `06_openai_compat_smoke.py`.

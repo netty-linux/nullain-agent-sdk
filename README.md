@@ -141,7 +141,7 @@ A full walkthrough of the six-phase run pipeline (Intent → Route → Plan → 
 
 - **Python 3.12+**
 - [**uv**](https://github.com/astral-sh/uv) — fast Python package installer
-- An **[Ollama Cloud](https://ollama.com)** API key — the SDK talks to Ollama Cloud's hosted models by default. Sign up and grab a key, or just run `nullain` with no configuration and its first-run wizard will ask for it.
+- An API key for your LLM provider — **[Ollama Cloud](https://ollama.com)** (default, open-weight models) or **any OpenAI-compatible endpoint** (OpenAI, OpenRouter, Together, Groq, vLLM, LM Studio, ...). Sign up and grab a key, or just run `nullain` with no configuration and its first-run wizard will ask you to pick a provider and enter the key.
 
 ### Install from PyPI
 
@@ -238,7 +238,7 @@ if __name__ == "__main__":
 | [docs/architecture.md](docs/architecture.md) | The full run pipeline and layer breakdown. |
 | [docs/api-stability.md](docs/api-stability.md) | What is public API under SemVer. |
 | [CHANGELOG.md](CHANGELOG.md) | Notable changes across versions. |
-| [`examples/`](examples/) | Runnable examples: `01_basic_agent.py` … `05_mcp_server.py`. |
+| [`examples/`](examples/) | Runnable examples: `01_basic_agent.py` … `06_openai_compat_smoke.py`. |
 
 ### Contributing
 

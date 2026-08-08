@@ -2,6 +2,7 @@
 
 from nullain.config.settings import (
     AgentConfig,
+    LLMConfig,
     MCPConfig,
     MCPServerConfig,
     NullainSettings,
@@ -15,6 +16,7 @@ from nullain.config.settings import (
 
 __all__ = [
     "AgentConfig",
+    "LLMConfig",
     "MCPConfig",
     "MCPServerConfig",
     "NullainSettings",

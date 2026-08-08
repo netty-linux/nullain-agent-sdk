@@ -334,8 +334,13 @@ async def test_ollama_error_response_logs_status_and_body(
     """Regression (M20): _handle_error_response only ever raised — no
     structured log line recorded which status code came back or why,
     making a 400/401/429 failure invisible in telemetry until the raised
-    exception's message was read from application logs."""
-    from nullain.llm import ollama as ollama_module
+    exception's message was read from application logs.
+
+    OllamaCloudProvider's default v1 mode delegates _handle_error_response
+    to OpenAICompatibleProvider (issue #40's extraction), so the log call
+    — and this spy target — now lives in openai_compat, not ollama.
+    """
+    from nullain.llm import openai_compat as openai_compat_module
 
     respx.post("https://ollama.com/v1/chat/completions").respond(
         status_code=400, json={"error": {"message": "invalid request"}}
@@ -346,7 +351,7 @@ async def test_ollama_error_response_logs_status_and_body(
     def _spy(event: str, **kwargs: object) -> None:
         calls.append((event, kwargs))
 
-    monkeypatch.setattr(ollama_module.logger, "warning", _spy)
+    monkeypatch.setattr(openai_compat_module.logger, "warning", _spy)
 
     provider = OllamaCloudProvider(base_url="https://ollama.com", max_retries=1)
     req = CompletionRequest(model="test-model", messages=[ChatMessage(role="user", content="Hi")])
@@ -366,8 +371,12 @@ async def test_ollama_retries_exhausted_logs_attempt_count(
 ) -> None:
     """Regression (M20): exhausting retries on a persistent timeout raised
     ProviderTimeoutError with no observable record of how many attempts
-    were made before giving up."""
-    from nullain.llm import ollama as ollama_module
+    were made before giving up.
+
+    Same delegation note as the test above: the log call lives in
+    openai_compat now (issue #40's extraction).
+    """
+    from nullain.llm import openai_compat as openai_compat_module
 
     respx.post("https://ollama.com/v1/chat/completions").side_effect = httpx.TimeoutException(
         "Request timeout"
@@ -378,7 +387,7 @@ async def test_ollama_retries_exhausted_logs_attempt_count(
     def _spy(event: str, **kwargs: object) -> None:
         calls.append((event, kwargs))
 
-    monkeypatch.setattr(ollama_module.logger, "error", _spy)
+    monkeypatch.setattr(openai_compat_module.logger, "error", _spy)
 
     provider = OllamaCloudProvider(base_url="https://ollama.com", max_retries=2)
     req = CompletionRequest(model="test-model", messages=[ChatMessage(role="user", content="Hi")])

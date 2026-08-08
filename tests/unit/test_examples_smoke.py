@@ -20,6 +20,7 @@ EXAMPLE_MODULES = [
     "03_subagent_authority",
     "04_workflow",
     "05_mcp_server",
+    "06_openai_compat_smoke",
 ]
 
 
