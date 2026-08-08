@@ -9,6 +9,7 @@ from nullain.events.types import (
     CompactionEvent,
     ErrorEvent,
     ModelResponseEvent,
+    SessionRepairedEvent,
     SpecCreatedEvent,
     SpecVerifiedEvent,
     StreamDeltaEvent,
@@ -30,6 +31,7 @@ EVENT_CLASS_MAP: dict[str, type[BaseEvent]] = {
     "error": ErrorEvent,
     "spec_created": SpecCreatedEvent,
     "spec_verified": SpecVerifiedEvent,
+    "session_repaired": SessionRepairedEvent,
     "stream_delta": StreamDeltaEvent,
     "todo": TodoEvent,
 }
@@ -122,6 +124,25 @@ class EventStore:
         async with self._conn.execute(query) as cursor:
             row = await cursor.fetchone()
         return row[0] if row is not None else None
+
+    async def list_session_ids(self) -> list[str]:
+        """Return every distinct session id in the store, oldest first.
+
+        Ordered by each session's earliest ``seq`` (not alphabetically by id,
+        which would be meaningless for random UUIDs) so callers presenting a
+        list — e.g. ``nullain doctor``'s session-integrity check — see
+        sessions in the order they were created.
+        """
+        if self._conn is None:
+            await self.initialize()
+
+        if self._conn is None:
+            raise RuntimeError("Failed to initialize EventStore database connection")
+
+        query = "SELECT session_id FROM events GROUP BY session_id ORDER BY MIN(seq) ASC"
+        async with self._conn.execute(query) as cursor:
+            rows = await cursor.fetchall()
+        return [row[0] for row in rows]
 
     async def get_session_events(self, session_id: str) -> list[BaseEvent]:
         """Fetch all events for a session in insertion order.

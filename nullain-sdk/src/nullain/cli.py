@@ -27,7 +27,7 @@ from typing import Any
 from nullain import __version__
 from nullain.agent import Agent, RunResult
 from nullain.config import load_settings
-from nullain.events import EventStore
+from nullain.events import EventStore, find_orphaned_tool_results
 from nullain.input_history import InputHistory
 from nullain.llm import OllamaCloudProvider
 from nullain.prompt_select import select
@@ -181,6 +181,20 @@ async def _resolve_session_id(
         await store.close()
 
 
+async def _session_needs_repair(workspace: str, session_id: str) -> bool:
+    """Whether resuming ``session_id`` would trigger the pre-#24 orphaned-
+    tool-result repair. Read-only — does not itself repair or persist
+    anything; ``chat`` uses this only to decide whether to print a warning
+    before the first turn's real repair happens inside ``agent.stream()``.
+    """
+    store = EventStore(Path(workspace).resolve() / ".nullain" / "sessions.db")
+    try:
+        events = await store.get_session_events(session_id)
+    finally:
+        await store.close()
+    return bool(find_orphaned_tool_results(events))
+
+
 async def _run(
     prompt: str,
     *,
@@ -289,6 +303,17 @@ async def _chat(*, model: str | None, workspace: str, continue_session: bool = F
     resuming = session_id is not None
     if session_id is None:
         session_id = str(uuid.uuid4())
+    elif await _session_needs_repair(workspace, session_id):
+        # Warn before the first turn silently repairs it (inside
+        # agent.stream() -> Agent._load_session_history) instead of the user
+        # only finding out from a SessionRepairedEvent buried in the log —
+        # a resumed session changing shape underneath them should be visible
+        # up front, not discovered mid-run.
+        print(
+            f"Note: session {session_id} was corrupted by a pre-#24 compaction "
+            "bug (orphaned tool result). It will be automatically repaired on "
+            "the first message below — see `nullain doctor` for details."
+        )
     renderer = TUIRenderer()
     history = InputHistory()
     print("Nullain chat. Type 'exit' or Ctrl-D to quit.")
@@ -354,6 +379,49 @@ async def _tty_ask_user(question: str) -> str:
 # ---------------------------------------------------------------------------
 
 
+async def _doctor_session_integrity(
+    db_path: Path | None = None,
+) -> tuple[str, bool, str]:
+    """Scan the workspace's session store for pre-#24 orphaned-tool-result
+    corruption (see ``nullain.events.repair``), without repairing anything.
+
+    Read-only by design: ``doctor`` reports, it doesn't mutate — repair
+    happens automatically (and is logged) the moment a corrupted session is
+    actually resumed, via ``Agent._load_session_history``. Running this scan
+    never triggers that path itself.
+
+    Always reports ``ok=True`` (never fails ``doctor``'s overall exit code)
+    even when corrupted sessions are found: the corruption is self-healing on
+    next resume, so it is not an actionable failure the way a missing
+    ``ripgrep`` or an unreachable provider is — it's informational, listing
+    which sessions will be auto-repaired and when.
+    """
+    path = db_path or Path.cwd() / ".nullain" / "sessions.db"
+    if not path.exists():
+        return ("sessions", True, "no session database yet")
+
+    store = EventStore(path)
+    try:
+        session_ids = await store.list_session_ids()
+        corrupted: list[str] = []
+        for session_id in session_ids:
+            events = await store.get_session_events(session_id)
+            if find_orphaned_tool_results(events):
+                corrupted.append(session_id)
+    finally:
+        await store.close()
+
+    if not corrupted:
+        return ("sessions", True, f"{len(session_ids)} session(s), none corrupted")
+    detail = (
+        f"{len(corrupted)}/{len(session_ids)} session(s) corrupted "
+        f"(pre-#24 compaction bug): {', '.join(corrupted[:5])}"
+        + (", ..." if len(corrupted) > 5 else "")
+        + " — repaired automatically on next resume (nullain run/chat --continue)"
+    )
+    return ("sessions", True, detail)
+
+
 async def _doctor() -> int:
     """Run environment and health checks, returning a non-zero exit on failure."""
     checks: list[tuple[str, bool, str]] = []
@@ -390,6 +458,8 @@ async def _doctor() -> int:
 
     rg = shutil.which("rg")
     checks.append(("ripgrep", rg is not None, rg or "not found"))
+
+    checks.append(await _doctor_session_integrity())
 
     failed = False
     for name, ok, detail in checks:

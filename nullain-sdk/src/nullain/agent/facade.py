@@ -19,17 +19,21 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
 from nullain_tools import register_default_tools
+from structlog.stdlib import BoundLogger
 
 from nullain.agent.loop import AgentLoop
 from nullain.agent.result import RunResult
 from nullain.config import NullainSettings, load_settings
-from nullain.events import BaseEvent, EventBus, EventStore
+from nullain.events import BaseEvent, EventBus, EventStore, repair_session_events
 from nullain.hooks import HookManager, HooksConfig
 from nullain.llm import LLMProvider, OllamaCloudProvider
 from nullain.memory import EpisodicMemory, PersistentMemory
 from nullain.router import ModelRouter
+from nullain.telemetry import get_logger
 from nullain.tools import PermissionPolicy, ToolRegistry
 from nullain.tools.sandbox import Sandbox, SandboxOptions, select_sandbox
+
+logger: BoundLogger = get_logger("nullain.agent.facade")
 
 #: Async callback invoked when a tool requires ASK-level permission. Receives
 #: the tool name and a human-readable description; returns whether to allow.
@@ -363,11 +367,39 @@ class Agent:
         return await loop.run_result(prompt, session_id=session_id, events_history=events_history)
 
     async def _load_session_history(self, session_id: str | None) -> list[BaseEvent] | None:
-        """Load prior events for ``session_id`` from the event store, if any."""
+        """Load prior events for ``session_id`` from the event store, if any.
+
+        Applies the pre-#24 orphaned-tool-result repair pass (see
+        ``nullain.events.repair``) before returning: a session persisted by a
+        build older than #24's compaction-boundary fix can carry a
+        ``CompactionEvent`` that split a tool-call turn from its results,
+        which would otherwise replay into a message history Ollama Cloud
+        rejects with ``400 invalid message content type: <nil>`` on every
+        resume attempt. Uncorrupted sessions take the fast no-op path inside
+        ``repair_session_events`` — no extra write, no extra event — so this
+        is free for every session created after the fix.
+
+        A repair is never silent: it is logged, published on the event bus,
+        and persisted to the store as a ``SessionRepairedEvent`` so it shows
+        up in that session's history and in ``nullain doctor``.
+        """
         if session_id is None:
             return None
         events = await self._event_store.get_session_events(session_id)
-        return events or None
+        if not events:
+            return None
+        repaired, report = repair_session_events(session_id, events)
+        if report is None:
+            return repaired
+        logger.warning(
+            "Repaired corrupted session history",
+            session_id=session_id,
+            re_paired_call_ids=report.re_paired_call_ids,
+            dropped_call_ids=report.dropped_call_ids,
+        )
+        await self._event_store.append(report)
+        await self.event_bus.publish(report)
+        return [*repaired, report]
 
     async def stream(
         self, prompt: str, session_id: str | None = None
