@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="AI-AGENT-SDK-CHIBI-TRANSPARENTE.png" alt="Nullain Agent SDK Logo" width="220" />
+<img src="logotipo-sdk.png" alt="Nullain Agent SDK" width="420" />
 
 # Nullain Agent SDK
 
@@ -316,6 +316,8 @@ make bump-version-apply VERSION=0.2.0
 This project is licensed under the [MIT License](LICENSE).
 
 <div align="center">
+
+<img src="AI-AGENT-SDK-CHIBI-TRANSPARENTE.png" alt="Nullain" width="72" />
 
 **[⬆ Back to top](#nullain-agent-sdk)**
 
