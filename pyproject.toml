@@ -56,8 +56,8 @@ ignore = [
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "strict"
-include = ["nullain-sdk/src", "nullain-tools/src", "nullain-agentd/src", "tests"]
-extraPaths = ["nullain-sdk/src", "nullain-tools/src", "nullain-agentd/src"]
+include = ["nullain-sdk/src", "nullain-tools/src", "nullain-agentd/src", "tests", "evals"]
+extraPaths = ["nullain-sdk/src", "nullain-tools/src", "nullain-agentd/src", "evals"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"

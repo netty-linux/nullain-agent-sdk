@@ -54,3 +54,7 @@ coverage.xml
 .nullain/
 schema/
 scratch/
+
+# Eval run output — evals/baselines/*.json is the committed reference,
+# evals/report.json is a fresh per-run artifact (make evals / make evals-live).
+evals/report.json

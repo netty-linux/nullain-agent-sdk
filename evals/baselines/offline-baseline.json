@@ -1,0 +1,80 @@
+{
+  "schema_version": 1,
+  "mode": "offline",
+  "provider": "replay",
+  "model": "offline-replay",
+  "results": [
+    {
+      "task_id": "single_file_edit_create",
+      "passed": true,
+      "reason": "greet.py created with a greet() function",
+      "steps": 2,
+      "wall_time_seconds": 0.0,
+      "total_tokens": null,
+      "error": null
+    },
+    {
+      "task_id": "single_file_edit_append",
+      "passed": true,
+      "reason": "constants.py extended with E while keeping PI",
+      "steps": 3,
+      "wall_time_seconds": 0.0,
+      "total_tokens": null,
+      "error": null
+    },
+    {
+      "task_id": "rename_function",
+      "passed": true,
+      "reason": "renamed compute_total -> compute_sum surgically",
+      "steps": 3,
+      "wall_time_seconds": 0.0,
+      "total_tokens": null,
+      "error": null
+    },
+    {
+      "task_id": "bugfix_failing_test",
+      "passed": true,
+      "reason": "pytest passes after the fix",
+      "steps": 4,
+      "wall_time_seconds": 0.0,
+      "total_tokens": null,
+      "error": null
+    },
+    {
+      "task_id": "multi_file_feature_add_field",
+      "passed": true,
+      "reason": "User gained an age field and main.py was updated consistently",
+      "steps": 5,
+      "wall_time_seconds": 0.0,
+      "total_tokens": null,
+      "error": null
+    },
+    {
+      "task_id": "explore_and_explain_fib",
+      "passed": true,
+      "reason": "explanation correctly identifies the caching behavior",
+      "steps": 2,
+      "wall_time_seconds": 0.0,
+      "total_tokens": null,
+      "error": null
+    },
+    {
+      "task_id": "add_error_handling",
+      "passed": true,
+      "reason": "parse_int now handles invalid input gracefully",
+      "steps": 3,
+      "wall_time_seconds": 0.0,
+      "total_tokens": null,
+      "error": null
+    },
+    {
+      "task_id": "refactor_extract_function",
+      "passed": true,
+      "reason": "duplication extracted, behavior preserved",
+      "steps": 3,
+      "wall_time_seconds": 0.0,
+      "total_tokens": null,
+      "error": null
+    }
+  ]
+}

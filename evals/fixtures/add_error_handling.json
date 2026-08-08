@@ -1,0 +1,77 @@
+[
+  {
+    "delta_text": "",
+    "tool_calls": [
+      {
+        "id": "call_spec",
+        "name": "emit_task_spec",
+        "arguments": {
+          "objective": "Make parse_int return None instead of raising on invalid input",
+          "steps": [
+            "Read parser_mod.py",
+            "Wrap int(text) in a try/except returning None on failure"
+          ],
+          "target_files": [
+            "parser_mod.py"
+          ],
+          "acceptance_criteria": [
+            "Task completes without errors"
+          ]
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": null
+  },
+  {
+    "delta_text": "",
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "name": "read_file",
+        "arguments": {
+          "path": "parser_mod.py"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": null
+  },
+  {
+    "delta_text": "",
+    "tool_calls": [
+      {
+        "id": "call_2",
+        "name": "write_file",
+        "arguments": {
+          "path": "parser_mod.py",
+          "content": "def parse_int(text):\n    try:\n        return int(text)\n    except ValueError:\n        return None\n"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": null
+  },
+  {
+    "delta_text": "parse_int now returns None on invalid input instead of raising.",
+    "tool_calls": null,
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": "stop"
+  }
+]

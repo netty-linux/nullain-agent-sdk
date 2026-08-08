@@ -1,0 +1,78 @@
+[
+  {
+    "delta_text": "",
+    "tool_calls": [
+      {
+        "id": "call_spec",
+        "name": "emit_task_spec",
+        "arguments": {
+          "objective": "Rename compute_total to compute_sum in calc.py",
+          "steps": [
+            "Read calc.py",
+            "Rename compute_total to compute_sum, leave the rest untouched"
+          ],
+          "target_files": [
+            "calc.py"
+          ],
+          "acceptance_criteria": [
+            "Task completes without errors"
+          ]
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": null
+  },
+  {
+    "delta_text": "",
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "name": "read_file",
+        "arguments": {
+          "path": "calc.py"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": null
+  },
+  {
+    "delta_text": "",
+    "tool_calls": [
+      {
+        "id": "call_2",
+        "name": "edit_file",
+        "arguments": {
+          "path": "calc.py",
+          "old_str": "def compute_total(items):",
+          "new_str": "def compute_sum(items):"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": null
+  },
+  {
+    "delta_text": "Renamed compute_total to compute_sum without touching unrelated_helper.",
+    "tool_calls": null,
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": "stop"
+  }
+]
