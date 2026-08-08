@@ -235,6 +235,7 @@ Adapters: `FastEmbedProvider` (default — ver ADR-1) e `OllamaEmbeddingProvider
 
 ```python
 from fastembed import TextEmbedding
+
 model = TextEmbedding(model_name="BAAI/bge-m3")  # ONNX, baixa e cacheia na 1ª vez
 vector = list(model.embed(["texto em português"]))[0]  # 1024 floats → Qdrant
 ```
