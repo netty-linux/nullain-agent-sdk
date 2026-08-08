@@ -130,9 +130,12 @@ max_context = 128000
 # unavailable on this host, bash/git REFUSE to run rather than executing
 # unconfined — the safe default. Set required=false to opt out (run unconfined
 # if the adapter is unavailable); set enabled=false to disable isolation entirely.
-# allow_paths grants the sandboxed child extra writable paths beyond the workspace
-# (e.g. a shared cache). deny_network blocks network access where the adapter
-# supports it (landlock >=6.2, seatbelt, windows_job — see the platform parity
+# allow_paths grants the sandboxed child extra read+write paths beyond the
+# workspace (e.g. a shared cache). allow_read_paths grants extra READ-ONLY
+# paths (e.g. a shared reference dataset) — currently used by the seatbelt
+# adapter's read isolation on macOS; adapters that don't isolate reads
+# ignore it. deny_network blocks network access where the adapter supports
+# it (landlock >=6.2, seatbelt, windows_job — see the platform parity
 # table in docs/configuration.md for exactly what each adapter enforces).
 # On Windows, deny_network=true launches inside a real AppContainer (network
 # genuinely blocked at the kernel/WFP level, filesystem restricted to the
@@ -143,5 +146,6 @@ max_context = 128000
 enabled = true
 required = true
 allow_paths = []
+allow_read_paths = []
 deny_network = true
 

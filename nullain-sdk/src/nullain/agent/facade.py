@@ -196,6 +196,7 @@ class Agent:
                 sandbox_opts=SandboxOptions(
                     workspace_root=Path(self._workspace_root),
                     allow_paths=[Path(p) for p in self._settings.sandbox.allow_paths],
+                    allow_read_paths=[Path(p) for p in self._settings.sandbox.allow_read_paths],
                     deny_network=self._settings.sandbox.deny_network,
                 ),
                 event_bus=self.event_bus,

@@ -105,6 +105,10 @@ class SandboxConfig(BaseModel):
       executing the subprocess without isolation.
     - ``allow_paths``: extra paths (beyond the workspace root) the sandbox
       permits the child to read/write.
+    - ``allow_read_paths``: extra paths granted READ access only (not write).
+      Escape hatch for the seatbelt adapter's read isolation (#42) — e.g. a
+      shared toolchain or reference dataset the child needs to read but must
+      never modify. Ignored by adapters that don't isolate reads.
     - ``deny_network`` (default True): request network isolation when the
       platform adapter supports it.
     """
@@ -112,6 +116,7 @@ class SandboxConfig(BaseModel):
     enabled: bool = True
     required: bool = True
     allow_paths: list[str] = Field(default_factory=list)
+    allow_read_paths: list[str] = Field(default_factory=list)
     deny_network: bool = True
 
 

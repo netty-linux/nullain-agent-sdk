@@ -88,25 +88,49 @@ are cached by prompt hash within the session.
 enabled = true
 required = true
 allow_paths = []
+allow_read_paths = []
 deny_network = true
 ```
 
 - `enabled` — turn isolation on/off.
 - `required` — when `true` and the platform adapter is unavailable, `bash`/`git`
   **refuse** to run (fail-closed) rather than executing unconfined.
-- `allow_paths` — extra writable paths granted to the sandboxed child.
+- `allow_paths` — extra read+write paths granted to the sandboxed child.
+- `allow_read_paths` — extra **read-only** paths granted to the sandboxed
+  child (never write). The escape hatch for the seatbelt adapter's read
+  isolation (#42) when a workflow legitimately needs to read something
+  outside the workspace — e.g. a shared reference dataset or toolchain.
+  Ignored by adapters that don't isolate reads.
 - `deny_network` — block network access where the adapter supports it.
 
 ### Platform parity
 
-What each adapter actually enforces, as of issue #41 (Windows) and #42 (macOS
-seatbelt read isolation, tracked separately — still open):
+What each adapter actually enforces, as of issue #41 (Windows) and #42
+(macOS seatbelt read isolation):
 
 | | Linux (landlock ≥5.13) | macOS (seatbelt) | Windows (`deny_network=true`) | Windows (`deny_network=false`) |
 |---|---|---|---|---|
 | Filesystem write | Confined to workspace + `allow_paths` (kernel-enforced) | Confined to workspace + `allow_paths` (kernel-enforced) | Confined to workspace + `allow_paths` (AppContainer ACL — kernel-enforced) | Unconfined (restricted token only; same as the tool-layer `PermissionPolicy` checks) |
-| Filesystem read | Confined to workspace + `allow_paths` + system trees needed to exec (kernel ≥6.2; older kernels: read is global) | Global (see #42 — read isolation is explicitly out of scope for the current profile) | Confined to workspace + `allow_paths` + interpreter trees (AppContainer default-deny — kernel-enforced) | Unconfined |
+| Filesystem read | Confined to workspace + `allow_paths` + system trees needed to exec (kernel ≥6.2; older kernels: read is global) | Confined to workspace + `allow_paths` + `allow_read_paths` + a fixed interpreter-bootstrap allowlist (kernel-enforced) — **see the note below: not yet empirically validated on real macOS hardware** | Confined to workspace + `allow_paths` + interpreter trees (AppContainer default-deny — kernel-enforced) | Unconfined |
 | Network | Denied via Landlock scope (kernel ≥6.2; older kernels: not enforced) | Denied via `(deny network*)` in the seatbelt profile | Denied — AppContainer with no capabilities attached; the firewall/WFP layer refuses a socket regardless of anything the process does | Allowed — plain restricted-token launch, no AppContainer |
+
+**macOS read isolation validation status (#42):** the seatbelt profile now
+denies reads by default (workspace + `allow_paths` + `allow_read_paths` + a
+fixed bootstrap allowlist for what CPython needs to start — see
+`seatbelt.py`'s `_BOOTSTRAP_READ_PATHS`), replacing the old v1 profile that
+allowed reads globally. The issue's test plan calls for empirically tracing
+a real `sandbox-exec` run to build that bootstrap allowlist rather than
+working from documentation alone; this implementation was written without
+access to macOS hardware, so the darwin-gated tests
+(`test_seatbelt_blocks_read_outside_workspace`,
+`test_seatbelt_allows_read_inside_workspace`,
+`test_seatbelt_allows_interpreter_startup` in `tests/unit/test_sandbox.py`)
+exist and are believed correct, but **have not yet been run on real macOS**.
+Run them on a macOS host (or add a macOS CI job) before relying on this
+read-isolation guarantee in production — if interpreter startup fails, the
+bootstrap allowlist is missing an entry, and the fix is adding it with a
+comment explaining why (matching how the Linux Landlock adapter documents
+its own system-tree grants).
 
 **Why Windows has two different mechanisms depending on `deny_network`:**
 confirmed live that an AppContainer's capability grant (attaching the

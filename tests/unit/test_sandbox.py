@@ -226,6 +226,7 @@ def test_sandbox_config_defaults() -> None:
     assert cfg.enabled is True
     assert cfg.required is True
     assert cfg.allow_paths == []
+    assert cfg.allow_read_paths == []
     assert cfg.deny_network is True
 
 
@@ -245,6 +246,7 @@ def test_load_settings_sandbox_from_toml(tmp_path: Path) -> None:
 enabled = true
 required = false
 allow_paths = ["/opt/nullain/cache"]
+allow_read_paths = ["/opt/nullain/reference-data"]
 deny_network = false
 """
     )
@@ -252,6 +254,7 @@ deny_network = false
     assert settings.sandbox.enabled is True
     assert settings.sandbox.required is False
     assert settings.sandbox.allow_paths == ["/opt/nullain/cache"]
+    assert settings.sandbox.allow_read_paths == ["/opt/nullain/reference-data"]
     assert settings.sandbox.deny_network is False
 
 
@@ -404,6 +407,164 @@ def test_seatbelt_selector_wires_on_darwin() -> None:
     sb = select_sandbox(SandboxConfig(enabled=True, required=True))
     assert isinstance(sb, SeatbeltSandbox)
     assert sb.required is True
+
+
+# ---------------------------------------------------------------------------
+# macOS Seatbelt read isolation (issue #42): profile-generation logic is
+# tested offline (runs on every platform, no sandbox-exec needed); the
+# actual kernel-enforced escape/allow behavior is darwin-gated like the
+# write-confinement pair above. IMPORTANT: the darwin-gated tests below have
+# been written and are believed correct, but have NOT been run on real macOS
+# hardware in this development pass (no macOS host was available) — the
+# issue's own test plan calls for empirically tracing a real sandbox-exec
+# run to build the bootstrap allowlist, which this implementation could not
+# do. Treat this as needing manual validation on a macOS host (or a macOS CI
+# job) before relying on the read-isolation guarantee in production.
+# ---------------------------------------------------------------------------
+
+
+def test_seatbelt_build_profile_denies_reads_by_default() -> None:
+    """Offline structural check: the generated profile denies file-read* by
+    default (issue #42's core change from the old read-everything v1
+    profile) and only re-allows it for specific granted subpaths."""
+    from nullain.tools.sandbox.adapters import seatbelt
+
+    profile = seatbelt._build_profile(  # type: ignore[reportPrivateUsage]
+        "/ws", [], [], deny_network=True
+    )
+    assert "(deny file-read*)" in profile
+    # The old v1 blanket grant must be gone.
+    assert "(allow file-read*)" not in profile.replace('(allow file-read* (subpath "/ws"))', "")
+
+
+def test_seatbelt_build_profile_grants_workspace_read_and_write() -> None:
+    from nullain.tools.sandbox.adapters import seatbelt
+
+    profile = seatbelt._build_profile(  # type: ignore[reportPrivateUsage]
+        "/ws", [], [], deny_network=True
+    )
+    assert '(allow file-read* (subpath "/ws"))' in profile
+    assert '(allow file-write* (subpath "/ws"))' in profile
+
+
+def test_seatbelt_build_profile_grants_allow_paths_read_and_write() -> None:
+    from nullain.tools.sandbox.adapters import seatbelt
+
+    profile = seatbelt._build_profile(  # type: ignore[reportPrivateUsage]
+        "/ws", ["/shared"], [], deny_network=True
+    )
+    assert '(allow file-read* (subpath "/shared"))' in profile
+    assert '(allow file-write* (subpath "/shared"))' in profile
+
+
+def test_seatbelt_build_profile_allow_read_paths_is_read_only() -> None:
+    """allow_read_paths grants READ but never WRITE — the whole point of it
+    being a separate, narrower escape hatch than allow_paths."""
+    from nullain.tools.sandbox.adapters import seatbelt
+
+    profile = seatbelt._build_profile(  # type: ignore[reportPrivateUsage]
+        "/ws", [], ["/reference-data"], deny_network=True
+    )
+    assert '(allow file-read* (subpath "/reference-data"))' in profile
+    assert '(allow file-write* (subpath "/reference-data"))' not in profile
+
+
+def test_seatbelt_build_profile_grants_bootstrap_read_paths() -> None:
+    """The interpreter-startup bootstrap allowlist is always granted read
+    access, regardless of workspace/allow_paths — without it Python itself
+    cannot start under the sandbox."""
+    from nullain.tools.sandbox.adapters import seatbelt
+
+    profile = seatbelt._build_profile(  # type: ignore[reportPrivateUsage]
+        "/ws", [], [], deny_network=True
+    )
+    for path in seatbelt._BOOTSTRAP_READ_PATHS:  # type: ignore[reportPrivateUsage]
+        assert f'(allow file-read* (subpath "{path}"))' in profile
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="seatbelt is macOS-only")
+@pytest.mark.asyncio
+async def test_seatbelt_blocks_read_outside_workspace(tmp_path: Path) -> None:
+    """Issue #42's flagship security proof: a sandboxed child cannot READ a
+    file outside workspace + allow_paths + allow_read_paths + the bootstrap
+    allowlist — e.g. it cannot read the user's SSH keys. NEEDS MANUAL
+    VALIDATION on real macOS hardware (see the module-level note above)."""
+    from nullain.tools.sandbox.adapters.seatbelt import SeatbeltSandbox
+
+    sb = SeatbeltSandbox(required=True)
+    if not sb.available():
+        pytest.skip("sandbox-exec not available on this host")
+
+    outside_dir = tmp_path.parent / f"nullain_seatbelt_read_escape_{tmp_path.name}"
+    outside_dir.mkdir(exist_ok=True)
+    secret = outside_dir / "id_ed25519"
+    secret.write_text(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\nfake\n-----END OPENSSH PRIVATE KEY-----"
+    )
+
+    try:
+        code, output = await execute_subprocess(
+            [sys.executable, "-c", f"print(open(r'{secret}').read())"],
+            cwd=tmp_path,
+            sandbox=sb,
+            sandbox_opts=SandboxOptions(workspace_root=tmp_path, deny_network=True),
+        )
+        assert code != 0, "reading a file outside the granted paths must be denied"
+        assert "BEGIN OPENSSH PRIVATE KEY" not in output, "secret content must never reach stdout"
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            secret.unlink()
+        with contextlib.suppress(OSError):
+            outside_dir.rmdir()
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="seatbelt is macOS-only")
+@pytest.mark.asyncio
+async def test_seatbelt_allows_read_inside_workspace(tmp_path: Path) -> None:
+    """Complement to the read-escape test: reading a file inside the
+    workspace must still succeed — a profile that blocks everything is
+    caught here, not just one that lets everything through. NEEDS MANUAL
+    VALIDATION on real macOS hardware."""
+    from nullain.tools.sandbox.adapters.seatbelt import SeatbeltSandbox
+
+    sb = SeatbeltSandbox(required=True)
+    if not sb.available():
+        pytest.skip("sandbox-exec not available on this host")
+
+    inside = tmp_path / "readable.txt"
+    inside.write_text("hello")
+    code, output = await execute_subprocess(
+        [sys.executable, "-c", f"print(open(r'{inside}').read())"],
+        cwd=tmp_path,
+        sandbox=sb,
+        sandbox_opts=SandboxOptions(workspace_root=tmp_path, deny_network=True),
+    )
+    assert code == 0, f"reading inside the workspace must succeed: {output}"
+    assert "hello" in output
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="seatbelt is macOS-only")
+@pytest.mark.asyncio
+async def test_seatbelt_allows_interpreter_startup(tmp_path: Path) -> None:
+    """The read-isolation profile must not regress interpreter startup — a
+    trivial script must still run to completion under the new deny-by-default
+    read profile. If this fails on real macOS, the bootstrap allowlist
+    (_BOOTSTRAP_READ_PATHS) is missing an entry Python actually needs; that
+    is exactly the empirical-validation gap called out at module level."""
+    from nullain.tools.sandbox.adapters.seatbelt import SeatbeltSandbox
+
+    sb = SeatbeltSandbox(required=True)
+    if not sb.available():
+        pytest.skip("sandbox-exec not available on this host")
+
+    code, output = await execute_subprocess(
+        [sys.executable, "-c", "print('interpreter started ok')"],
+        cwd=tmp_path,
+        sandbox=sb,
+        sandbox_opts=SandboxOptions(workspace_root=tmp_path, deny_network=True),
+    )
+    assert code == 0, f"interpreter must start normally under read isolation: {output}"
+    assert "interpreter started ok" in output
 
 
 # ---------------------------------------------------------------------------

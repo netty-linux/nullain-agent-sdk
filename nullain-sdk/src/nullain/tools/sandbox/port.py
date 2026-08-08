@@ -27,12 +27,17 @@ class SandboxOptions:
 
     ``workspace_root`` is the single path the child may read/write freely;
     ``allow_paths`` are extra read-only or read-write paths the caller has
-    explicitly approved (e.g. a pytest cache). ``deny_network`` requests
+    explicitly approved (e.g. a pytest cache). ``allow_read_paths`` are extra
+    paths granted READ access only (e.g. a shared reference dataset the
+    child must not modify) — currently consumed by the seatbelt adapter's
+    read-isolation profile (#42); adapters that allow reads globally (or
+    don't isolate reads at all) may ignore it. ``deny_network`` requests
     network isolation when the adapter supports it.
     """
 
     workspace_root: Path
     allow_paths: Sequence[Path] = field(default_factory=tuple)
+    allow_read_paths: Sequence[Path] = field(default_factory=tuple)
     deny_network: bool = True
 
 
