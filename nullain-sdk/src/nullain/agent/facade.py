@@ -489,5 +489,26 @@ class Agent:
         """
         return asyncio.run(self.run(prompt, session_id=session_id))
 
+    async def close(self) -> None:
+        """Release the SQLite connections opened by ``run``/``stream``.
+
+        ``EventStore`` and ``EpisodicMemory`` each open an ``aiosqlite``
+        connection lazily on first use, backed by a dedicated worker thread
+        that stays alive until ``.close()`` runs. Nothing in ``run``/
+        ``stream`` closes them automatically — a script that calls one of
+        those and exits without calling ``close()`` first leaves those
+        threads parked waiting on the event loop, which blocks the
+        interpreter's own shutdown from completing cleanly (observed
+        building the ``nullain-agent`` bridge: the process would sit
+        indefinitely after a fully successful run, never producing an
+        error, because two live ``aiosqlite`` worker threads kept the
+        interpreter from exiting).
+
+        Safe to call even if neither store was ever initialized (each
+        ``close()`` is itself a no-op on an unopened connection). Idempotent.
+        """
+        await self._event_store.close()
+        await self._episodic_memory.close()
+
 
 __all__ = ["Agent", "AskUserCallback", "PermissionCallback"]
