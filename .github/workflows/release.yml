@@ -84,14 +84,20 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  publish-testpypi:
-    name: Publish to TestPyPI
+  # PyPI's trusted-publisher registration is keyed on (owner, repo, workflow,
+  # environment) — NOT on the PyPI project name. Three packages published
+  # from the same workflow file each need their OWN GitHub environment
+  # (pypi-nullain-sdk / pypi-nullain-tools / pypi-nullain-agentd, and the
+  # testpypi-* equivalents), or PyPI refuses the second/third registration
+  # as a duplicate of the first. Hence one job per package below instead of
+  # a single job publishing dist/* in bulk.
+
+  publish-testpypi-sdk:
+    name: Publish nullain-sdk to TestPyPI
     needs: build
     if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
     runs-on: ubuntu-latest
-    environment: testpypi
-    # Trusted publishing (OIDC): no API token is stored in the repository.
-    # Configure the publisher for each project at https://test.pypi.org.
+    environment: testpypi-nullain-sdk
     permissions:
       id-token: write
     steps:
@@ -100,18 +106,19 @@ jobs:
         with:
           name: distributions
           path: dist
-
+      - name: Remove other packages' artifacts
+        run: find dist -type f ! -name 'nullain_sdk-*' -delete
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           repository-url: https://test.pypi.org/legacy/
 
-  publish-pypi:
-    name: Publish to PyPI
+  publish-testpypi-tools:
+    name: Publish nullain-tools to TestPyPI
     needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
     runs-on: ubuntu-latest
-    environment: pypi
+    environment: testpypi-nullain-tools
     permissions:
       id-token: write
     steps:
@@ -120,6 +127,87 @@ jobs:
         with:
           name: distributions
           path: dist
+      - name: Remove other packages' artifacts
+        run: find dist -type f ! -name 'nullain_tools-*' -delete
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
 
+  publish-testpypi-agentd:
+    name: Publish nullain-agentd to TestPyPI
+    needs: build
+    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    runs-on: ubuntu-latest
+    environment: testpypi-nullain-agentd
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist
+      - name: Remove other packages' artifacts
+        run: find dist -type f ! -name 'nullain_agentd-*' -delete
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          repository-url: https://test.pypi.org/legacy/
+
+  publish-pypi-sdk:
+    name: Publish nullain-sdk to PyPI
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment: pypi-nullain-sdk
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist
+      - name: Remove other packages' artifacts
+        run: find dist -type f ! -name 'nullain_sdk-*' -delete
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-pypi-tools:
+    name: Publish nullain-tools to PyPI
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment: pypi-nullain-tools
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist
+      - name: Remove other packages' artifacts
+        run: find dist -type f ! -name 'nullain_tools-*' -delete
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+
+  publish-pypi-agentd:
+    name: Publish nullain-agentd to PyPI
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    runs-on: ubuntu-latest
+    environment: pypi-nullain-agentd
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist
+      - name: Remove other packages' artifacts
+        run: find dist -type f ! -name 'nullain_agentd-*' -delete
       - name: Publish
         uses: pypa/gh-action-pypi-publish@release/v1
