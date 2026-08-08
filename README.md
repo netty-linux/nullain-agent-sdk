@@ -1,102 +1,137 @@
 <div align="center">
 
-<img src="AI-AGENT-SDK-CHIBI-TRANSPARENTE.png" alt="Nullain Agent SDK Logo" width="240" />
+<img src="AI-AGENT-SDK-CHIBI-TRANSPARENTE.png" alt="Nullain Agent SDK Logo" width="220" />
 
 # Nullain Agent SDK
 
 **The Production-Grade Autonomous Agent Engine & SDK for Python**
 
 [![CI](https://github.com/netty-linux/nullain-agent-sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/netty-linux/nullain-agent-sdk/actions/workflows/ci.yml)
+[![PyPI version](https://img.shields.io/pypi/v/nullain-sdk.svg?color=blue)](https://pypi.org/project/nullain-sdk/)
+[![Downloads](https://img.shields.io/pypi/dm/nullain-sdk.svg?color=blueviolet)](https://pypi.org/project/nullain-sdk/)
+[![Coverage Gate](https://img.shields.io/badge/coverage-%E2%89%A578%25-brightgreen.svg)](https://github.com/netty-linux/nullain-agent-sdk/blob/master/pyproject.toml)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
-[![Architecture: Hexagonal](https://img.shields.io/badge/architecture-Hexagonal-purple.svg)](https://github.com/netty-linux/nullain-agent-sdk)
 [![Type Checker: Pyright Strict](https://img.shields.io/badge/pyright-strict-green.svg)](https://github.com/microsoft/pyright)
 [![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
+[![Architecture: Hexagonal](https://img.shields.io/badge/architecture-hexagonal-purple.svg)](docs/architecture.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
-*Built for high-reliability software engineering workflows. Consumed by the Go CLI via zero-drift NDJSON protocol over stdio.*
+**[English](README.md)** • [Português (Brasil)](README.pt-BR.md)
 
-[Overview](#-overview) • [Core Features](#-core-features) • [Architecture](#-architecture) • [Quick Start](#-quick-start) • [Protocol & Daemon](#-protocol--daemon) • [Development](#-development)
+*Built for high-reliability software engineering workflows. Consumed by any host process — CLI, IDE extension, backend service — via a zero-drift NDJSON protocol over stdio.*
 
----
+[Overview](#-overview) • [Features](#-features) • [Architecture](#-architecture) • [Quick Start](#-quick-start) • [Protocol & Daemon](#-protocol--daemon) • [Security](#-security--threat-model) • [Development](#-development)
 
 </div>
 
+---
+
 ## 📌 Overview
 
-**Nullain Agent SDK** (`nullain`) is a production-grade agentic engine designed to reason, execute code, self-correct, and learn from experience across software development tasks.
+**Nullain Agent SDK** (`nullain`) is a production-grade agentic engine that reasons, executes code, self-corrects, and learns from experience across software development tasks.
 
-Built on **Hexagonal Architecture** and **Event Sourcing**, `nullain` enforces deterministic execution, strict boundaries against prompt injection, and intelligent LLM routing across Ollama Cloud models.
+It is built on **Hexagonal Architecture** (ports & adapters) and **Event Sourcing** — every interaction is a frozen, append-only event, state is derived by deterministic fold, and the boundary between "what the LLM decided" and "what actually ran" is explicit and auditable at every step.
+
+The SDK ships as three packages in one workspace:
+
+| Package | What it is |
+|---|---|
+| [`nullain-sdk`](nullain-sdk/) | The core engine — model routing, event sourcing, context management, memory, MCP client, subagent authority, plugins, sandboxing, and the workflow orchestrator. |
+| [`nullain-tools`](nullain-tools/) | Built-in developer tools — paged file reads, safe edits, `ripgrep` search, shell execution, git, checkpoints/undo. |
+| [`nullain-agentd`](nullain-agentd/) | A stdio NDJSON daemon that exposes the SDK to non-Python hosts (CLIs, IDE extensions, other services) with a versioned, schema-exported protocol. |
 
 ---
 
-## ✨ Core Features
+## ✨ Features
 
 - 🧠 **Tiered Model Routing (`ModelRouter`)**
-  Intelligent task classification routing requests to `fast` (`gpt-oss:20b`), `balanced` (`qwen3-coder:480b-cloud`), or `deep` (`deepseek-v4-pro`) tiers with automated circuit breakers and fallback chains.
+  Task classification routes requests to `fast`, `balanced`, or `deep` model tiers on Ollama Cloud, with circuit breakers and automatic fallback chains.
 - 📜 **Immutable Event Sourcing (`Conversation`)**
-  All interaction history is stored as frozen, append-only Pydantic event sequences. Conversation state is derived via deterministic fold—enabling replayability, zero-drift persistence, and trajectory audits.
-- 📐 **Plan/Act Hybrid Loop (`AgentLoop`)**
-  Structured execution pipeline featuring task spec generation, strict validation (`SpecValidator`), human approval gates, and a verification phase (`VERIFY`) with self-correction on test or linter failures.
+  All interaction history is a frozen, append-only sequence of Pydantic events. State is derived via deterministic fold — replayable, zero-drift, fully auditable.
+- 📐 **Plan/Act/Verify Loop (`AgentLoop`)**
+  Structured pipeline: task-spec generation, strict validation, human approval gates, and a verification phase with self-correction on test or lint failure.
 - 🛡️ **Context Compaction & Instruction Centrifugation (`ContextManager`)**
-  Prevents context rot and degradation. Automatically compacts history at 75% window capacity while preserving active specs, key decisions, and diagnostics, paired with instruction re-injection and progressive tool disclosure.
+  Automatically compacts history at 75% window capacity while preserving active specs and key decisions, with instruction re-injection and progressive tool disclosure.
 - 🧬 **Episodic Memory & Learning Loop (`EpisodicMemory`)**
-  SQLite-backed trajectory engine that records execution attempts, success metrics, and repository fingerprints—injecting relevant few-shot examples into future tasks.
-- 🔒 **Defense-in-Depth Security & Sandboxing (`PermissionPolicy` + `Sandbox`)**
-  Subprocess execution strictly via explicit argument lists (no `shell=True`), strict path resolution (`resolve()` + `is_relative_to`), and 3-tier action permissions (`allow`, `ask`, `deny`). On top of that, an **OS-level fail-closed sandbox** (`Landlock` on Linux ≥5.13, `Seatbelt` on macOS, Job Object on Windows) isolates filesystem + network for subprocess tools — if a sandbox is required and unavailable, execution is **refused**, never run unsandboxed.
+  SQLite-backed trajectory engine that records execution attempts and repository fingerprints, injecting relevant few-shot examples into future tasks.
+- 🔒 **Defense-in-Depth Security (`PermissionPolicy` + `Sandbox`)**
+  No `shell=True`, ever — subprocess execution via explicit argument lists, strict path resolution, and 3-tier permissions (`allow` / `ask` / `deny`). Underneath that, an **OS-level fail-closed sandbox** (Landlock on Linux ≥5.13, Seatbelt on macOS, Job Object on Windows): if a required sandbox is unavailable, execution is **refused**, never run unsandboxed.
 - 🪪 **Subagent Authority-Intersection Law (`Authority`)**
-  A child subagent's effective authority is the **meet** (intersection) of four factors — parent authority ∧ delegation ∧ child definition ∧ policy. A capability is granted only if all four grant it; any single denial removes it outright (no ASK escape). `AgentLoop.spawn` materialises the bound onto a scoped child registry.
-- 📦 **Signed Plugins + SBOM + Capability Manifests (`PluginLoader`)**
-  Plugins (v1: MCP server bundles) are signed, capability-manifested bundles. A signature covers identity + transport command + capabilities + tool declarations + a content-hashed SBOM, so drift in any of them invalidates the signature. The loader verifies, intersects declared capabilities with the operator's grant, and registers tools — **fail-closed at every branch** (Ed25519 via the optional `signing` extra).
-- 🔎 **Tool Search & Deferred MCP Schemas**
-  MCP tools register with minimal metadata (name + description); full input schemas are **deferred** and hydrated on demand. The agent discovers tools via a `search_tools` tool, and only the schemas of the tools it actually selects are loaded into the LLM context — keeping the prompt small as the tool surface scales.
+  A child subagent's effective authority is the **meet** of four factors — parent authority ∧ delegation ∧ child definition ∧ policy. A capability is granted only if all four grant it; any single denial removes it outright, with no `ASK` escape hatch.
+- 📦 **Signed Plugins + SBOM (`PluginLoader`)**
+  Plugins are signed, capability-manifested bundles. The signature covers identity, transport, capabilities, tool declarations, and a content-hashed SBOM — drift in any of them invalidates it. Verification is Ed25519, fail-closed at every branch.
+- 🔎 **Deferred Tool Schemas**
+  MCP tools register with minimal metadata; full input schemas hydrate on demand via a `search_tools` tool, keeping the prompt small as the tool surface scales.
 - 🧩 **Deterministic Workflow Orchestrator (`Workflow`)**
-  A workflow is a Python function that orchestrates subagents deterministically — which subagents run, in what order, with what fan-out and pipeline stages is fixed by the script, never decided by an LLM. `agent()`, `parallel()` (barrier), and `pipeline()` (no barrier) compose into auditable, resumable, testable multi-agent tasks.
+  A workflow is a Python function that composes subagents deterministically — fan-out, pipelines, and ordering are fixed by the script, never decided by an LLM.
 - ⚡ **Zero-Drift Stdio NDJSON Daemon (`nullain-agentd`)**
-  Exposes a typed stdio NDJSON protocol with automated JSON Schema generation (`make schema`), allowing Go, Rust, or CLI wrappers to consume the SDK natively.
+  A typed protocol with automated JSON Schema export (`make schema`), so any language can consume the SDK without hand-maintained bindings.
 
 ---
 
 ## 🏗️ Architecture
 
+```mermaid
+flowchart TB
+    subgraph API["🔌 Public API"]
+        direction LR
+        Agent(["Agent facade"]) --- Loop(["AgentLoop"]) --- Conv(["Conversation"]) --- WF(["Workflow"])
+    end
+
+    subgraph ORCH["🧭 Orchestration & Harness"]
+        direction LR
+        Intent(["IntentParser"]) --> Route(["ModelRouter"]) --> Plan(["SpecValidator"]) --> Act(["ReAct loop"]) --> Verify(["Verify / self-correct"])
+    end
+
+    subgraph CTX["🧠 Context & Memory"]
+        direction LR
+        CM(["ContextManager\ncompaction"]) --- EM(["EpisodicMemory"]) --- PM(["PersistentMemory"])
+    end
+
+    subgraph MODEL["🌐 Model Routing"]
+        direction LR
+        Router(["ModelRouter"]) --> CB(["CircuitBreaker"]) --> Provider(["OllamaCloudProvider"])
+    end
+
+    subgraph TOOLS["🔧 Tools & Execution"]
+        direction LR
+        Registry(["ToolRegistry"]) --- MCP(["MCPClient"]) --- Policy(["PermissionPolicy"]) --- Sandbox(["Sandbox\nfail-closed"]) --- Auth(["Authority gate"])
+    end
+
+    subgraph TRUST["🔐 Plugins & Trust"]
+        direction LR
+        Loader(["PluginLoader"]) --> Sig(["Ed25519 SignatureVerifier"]) --> SBOM(["Capability-manifested SBOM"])
+    end
+
+    subgraph INFRA["📡 Infrastructure & Transport"]
+        direction LR
+        Bus(["EventBus"]) --- Telemetry(["structlog Telemetry"]) --- NDJSON(["Stdio NDJSON Protocol"])
+    end
+
+    API --> ORCH --> CTX
+    ORCH --> MODEL
+    ORCH --> TOOLS
+    TOOLS --> TRUST
+    ORCH --> INFRA
+    NDJSON -.->|"consumed by"| Host(["Host process\nCLI · IDE · service"])
+
+    classDef api fill:#6366f1,stroke:#4338ca,color:#fff
+    classDef orch fill:#0ea5e9,stroke:#0369a1,color:#fff
+    classDef ctx fill:#8b5cf6,stroke:#6d28d9,color:#fff
+    classDef model fill:#14b8a6,stroke:#0f766e,color:#fff
+    classDef tools fill:#f59e0b,stroke:#b45309,color:#fff
+    classDef trust fill:#ef4444,stroke:#b91c1c,color:#fff
+    classDef infra fill:#64748b,stroke:#334155,color:#fff
+    class API api
+    class ORCH orch
+    class CTX ctx
+    class MODEL model
+    class TOOLS tools
+    class TRUST trust
+    class INFRA infra
 ```
-┌────────────────────────────────────────────────────────────┐
-│  PUBLIC API                                                │
-│  AgentLoop · Conversation · OllamaCloudProvider · Workflow │
-├────────────────────────────────────────────────────────────┤
-│  ORCHESTRATION & HARNESS                                   │
-│  AgentLoop (ReAct + Plan/Act) · Workflow (subagent DSL)    │
-│  IntentParser · SpecValidator · Reflection/Self-correction │
-├────────────────────────────────────────────────────────────┤
-│  CONTEXT & MEMORY                                          │
-│  ContextManager (compaction, instruction centrifuging)     │
-│  EpisodicMemory · PersistentMemory · TrajectoryRecord      │
-├────────────────────────────────────────────────────────────┤
-│  MODEL ROUTING                                             │
-│  ModelRouter (task → tier → model) · CircuitBreaker        │
-│  LLMProvider (Port) ← OllamaCloudProvider (Adapter)        │
-├────────────────────────────────────────────────────────────┤
-│  TOOLS & EXECUTION                                         │
-│  ToolRegistry · Tool Search (deferred schemas) · MCPClient │
-│  PermissionPolicy · Sandbox (fail-closed) · Authority gate │
-├────────────────────────────────────────────────────────────┤
-│  PLUGINS & TRUST                                           │
-│  PluginLoader · PluginManifest · SignatureVerifier · SBOM  │
-├────────────────────────────────────────────────────────────┤
-│  INFRASTRUCTURE & TRANSPORT                                │
-│  EventBus · Telemetry (structlog) · Stdio NDJSON Protocol  │
-└────────────────────────────────────────────────────────────┘
-```
 
----
-
-## 📦 Workspace Package Structure
-
-The repository is organized as a high-efficiency `uv` monorepo:
-
-- **`nullain-sdk/`**: Core SDK engine — LLM adapters, event bus, router, context manager, memory, MCP client, authority, plugins, sandbox, and the workflow orchestrator.
-- **`nullain-tools/`**: Built-in developer tools (`read_file`, `write_file`, `edit_file`, `bash`, `grep`, `git`, `web_fetch`, `ask_user`, `search_tools`, memory tools).
-- **`nullain-agentd/`**: High-performance daemon reading/writing NDJSON over stdio for CLI integration.
-- **`schema/`**: Exported JSON Schema contracts for cross-language interoperability.
+A full walkthrough of the six-phase run pipeline (Intent → Route → Plan → Act → Verify → Memory) lives in [docs/architecture.md](docs/architecture.md).
 
 ---
 
@@ -105,25 +140,24 @@ The repository is organized as a high-efficiency `uv` monorepo:
 ### Prerequisites
 
 - **Python 3.12+**
-- [**uv**](https://github.com/astral-sh/uv) (fast Python package installer)
-- An **[Ollama Cloud](https://ollama.com)** API key — the SDK talks to
-  Ollama Cloud's hosted models by default (no other provider is wired up
-  yet). Sign up and grab a key before your first run, or run `nullain`
-  with no arguments the first time and its setup wizard will walk you
-  through it.
+- [**uv**](https://github.com/astral-sh/uv) — fast Python package installer
+- An **[Ollama Cloud](https://ollama.com)** API key — the SDK talks to Ollama Cloud's hosted models by default. Sign up and grab a key, or just run `nullain` with no configuration and its first-run wizard will ask for it.
 
-### Setup
+### Install from PyPI
 
 ```bash
-# Clone the repository
+pip install nullain-sdk
+# or, with the tools + daemon packages too:
+pip install nullain-sdk nullain-tools nullain-agentd
+```
+
+### …or clone and run from source
+
+```bash
 git clone https://github.com/netty-linux/nullain-agent-sdk.git
 cd nullain-agent-sdk
-
-# Sync virtual environment & dependencies
 uv sync
-
-# Set your Ollama Cloud API key (or let `nullain`'s first-run wizard ask for it)
-export OLLAMA_API_KEY="your-key-here"
+export OLLAMA_API_KEY="your-key-here"   # or skip — the setup wizard will ask
 ```
 
 ### CLI
@@ -133,7 +167,7 @@ export OLLAMA_API_KEY="your-key-here"
 uv run nullain run "list the python files in this workspace"
 
 # Structured NDJSON output for piping
-uv run nullain run "list the python files" --json
+uv run nullain run "list the python files" --json | jq '.type'
 
 # Interactive multi-turn chat with TTY permission approval
 uv run nullain chat
@@ -145,20 +179,19 @@ uv run nullain doctor
 uv run nullain mcp list
 ```
 
-### Python SDK Usage Example
+### Python SDK
 
-The `Agent` facade is the primary entry point — it assembles the provider,
-tools, permission policy, router, and sandbox with safe defaults:
+The `Agent` facade is the primary entry point — it assembles the provider, tools, permission policy, router, and sandbox with safe defaults:
 
 ```python
 import asyncio
 from nullain import Agent
 
 
-async def main():
+async def main() -> None:
     agent = Agent(workspace_root=".")
     result = await agent.run("Audit pyproject.toml and ensure all dependencies are up to date")
-    print("Agent Execution Result:", result.final_text)
+    print(result.final_text)
 
 
 if __name__ == "__main__":
@@ -174,16 +207,38 @@ result = Agent(workspace_root=".").run_sync("say hello")
 print(result.final_text)
 ```
 
-### Documentation & Examples
+Or stream events as they happen:
 
-- [docs/quickstart.md](docs/quickstart.md) — from zero to a running agent.
-- [docs/configuration.md](docs/configuration.md) — every `nullain.toml` section.
-- [docs/tools.md](docs/tools.md) — the built-in tools and their capabilities.
-- [docs/tui.md](docs/tui.md) — what the terminal UI actually looks like.
-- [docs/architecture.md](docs/architecture.md) — the pipeline and layers.
-- [docs/api-stability.md](docs/api-stability.md) — what is public API under SemVer.
-- [CHANGELOG.md](CHANGELOG.md) — notable changes across versions.
-- `examples/` — runnable examples: `01_basic_agent.py` … `05_mcp_server.py`.
+```python
+import asyncio
+from nullain import Agent, RunResult
+
+
+async def main() -> None:
+    agent = Agent(workspace_root=".")
+    async for item in agent.stream("refactor the config loader"):
+        if isinstance(item, RunResult):
+            print(f"\nstatus={item.status} steps={item.steps}")
+        else:
+            print(f"[{item.event_type}]")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
+```
+
+### Documentation
+
+| Doc | What's in it |
+|---|---|
+| [docs/quickstart.md](docs/quickstart.md) | From zero to a running agent. |
+| [docs/configuration.md](docs/configuration.md) | Every `nullain.toml` section. |
+| [docs/tools.md](docs/tools.md) | The built-in tools and their capabilities. |
+| [docs/tui.md](docs/tui.md) | What the terminal UI actually looks like. |
+| [docs/architecture.md](docs/architecture.md) | The full run pipeline and layer breakdown. |
+| [docs/api-stability.md](docs/api-stability.md) | What is public API under SemVer. |
+| [CHANGELOG.md](CHANGELOG.md) | Notable changes across versions. |
+| [`examples/`](examples/) | Runnable examples: `01_basic_agent.py` … `05_mcp_server.py`. |
 
 ### Contributing
 
@@ -195,15 +250,13 @@ print(result.final_text)
 
 ## 🔄 Protocol & Daemon
 
-`nullain-agentd` serves as the stdio IPC bridge between the SDK and host processes (such as the Go CLI).
-
-### Running the Daemon
+`nullain-agentd` is the stdio IPC bridge between the SDK and any host process — a CLI, an IDE extension, a backend service — in any language.
 
 ```bash
 uv run python -m nullain_agentd.main
 ```
 
-### Protocol Envelope Structure
+Every message is a versioned NDJSON envelope:
 
 ```json
 {
@@ -217,59 +270,53 @@ uv run python -m nullain_agentd.main
 }
 ```
 
-To update the JSON Schema exported to `schema/protocol_v1.json`:
+The full contract is exported as JSON Schema so non-Python hosts don't need hand-maintained bindings:
 
 ```bash
-make schema
+make schema   # regenerates schema/protocol_v1.json
 ```
-
----
-
-## 🧪 Development & Quality Assurance
-
-Quality is enforced through strict static analysis, complete type safety, and automated test coverage.
-
-```bash
-# Run all quality checks (lint + typecheck + tests)
-make check
-
-# Run test suite
-make test
-
-# Run linter checks
-make lint
-
-# Run Pyright strict type check
-make typecheck
-
-# Format code automatically
-make format
-
-# Audit dependencies for known vulnerabilities
-make audit
-
-# Regenerate the exported JSON Schema (schema/protocol_v1.json)
-make schema
-```
-
-> **Plugin signing (optional).** Ed25519 signature verification requires the
-> `signing` extra: `uv sync --extra signing` (installs `cryptography`). Without
-> it, the SDK installs cleanly and a signed plugin is refused fail-closed rather
-> than loaded on trust.
 
 ---
 
 ## 🔒 Security & Threat Model
 
-1. **Subprocess Isolation**: Zero reliance on `shell=True`. Commands run via argument array execution with timeouts and output truncation.
-2. **Fail-Closed OS Sandbox**: Subprocess tools run inside an OS-level sandbox (`Landlock` on Linux ≥5.13, `Seatbelt` on macOS, Job Object on Windows) isolating filesystem + network. If a sandbox is required and unavailable, execution is **refused** — never run unsandboxed.
-3. **Workspace Containment**: File operations enforce absolute path resolution verified against the `workspace_root`. Symlinks are resolved prior to authorization checks.
-4. **Subagent Authority-Intersection**: A child subagent's effective authority is the meet of parent ∧ delegation ∧ child definition ∧ policy — a capability is granted only if all four grant it, with no ASK escape from the bound.
-5. **Signed Plugins & SBOM**: Plugins are signed, capability-manifested bundles; the signature covers identity + transport + capabilities + tool declarations + a content-hashed SBOM, and the loader is fail-closed at every branch.
-6. **Secret Redaction**: Automatic redaction patterns prevent API keys and credentials from entering logs or LLM context prompts.
+1. **Subprocess isolation** — zero reliance on `shell=True`; commands run via argument-array execution with timeouts and output truncation.
+2. **Fail-closed OS sandbox** — subprocess tools run inside Landlock (Linux ≥5.13), Seatbelt (macOS), or a Job Object (Windows), isolating filesystem and network. If a required sandbox is unavailable, execution is **refused**, never run unsandboxed.
+3. **Workspace containment** — file operations enforce absolute path resolution verified against `workspace_root`; symlinks are resolved before authorization checks.
+4. **Subagent authority-intersection** — a child's effective authority is the meet of parent ∧ delegation ∧ child definition ∧ policy; any single denial removes a capability outright.
+5. **Signed plugins & SBOM** — the signature covers identity, transport, capabilities, tool declarations, and a content-hashed SBOM; the loader is fail-closed at every branch.
+6. **Secret redaction** — automatic redaction patterns keep API keys and credentials out of logs and LLM context.
+
+Found a vulnerability? See [SECURITY.md](SECURITY.md) for how to report it responsibly.
+
+---
+
+## 🧪 Development
+
+```bash
+make check          # lint + typecheck + test — the full gate
+make test            # test suite
+make lint             # ruff check
+make typecheck    # pyright, strict mode
+make format         # ruff check --fix + ruff format
+make audit           # pip-audit for known vulnerabilities
+make schema        # regenerate schema/protocol_v1.json
+
+# Preview or apply a synchronized version bump across the monorepo
+make bump-version VERSION=0.2.0
+make bump-version-apply VERSION=0.2.0
+```
+
+> **Plugin signing (optional).** Ed25519 signature verification requires the `signing` extra: `uv sync --extra signing` (installs `cryptography`). Without it, the SDK installs cleanly and a signed plugin is refused fail-closed rather than loaded on trust.
 
 ---
 
 ## 📄 License
 
 This project is licensed under the [MIT License](LICENSE).
+
+<div align="center">
+
+**[⬆ Back to top](#nullain-agent-sdk)**
+
+</div>
