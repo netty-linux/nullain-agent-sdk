@@ -1,0 +1,58 @@
+[
+  {
+    "delta_text": "",
+    "tool_calls": [
+      {
+        "id": "call_spec",
+        "name": "emit_task_spec",
+        "arguments": {
+          "objective": "Create greet.py with a greet(name) function",
+          "steps": [
+            "Write greet.py with a greet function returning a greeting string"
+          ],
+          "target_files": [
+            "greet.py"
+          ],
+          "acceptance_criteria": [
+            "Task completes without errors"
+          ]
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": null
+  },
+  {
+    "delta_text": "",
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "name": "write_file",
+        "arguments": {
+          "path": "greet.py",
+          "content": "def greet(name):\n    return f\"Hello, {name}!\"\n"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": null
+  },
+  {
+    "delta_text": "Created greet.py with a greet(name) function that returns a greeting.",
+    "tool_calls": null,
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": "stop"
+  }
+]

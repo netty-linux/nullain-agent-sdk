@@ -182,6 +182,45 @@ jobs:
       - name: Pip audit
         run: uv run pip-audit
 
+  # Runs the eval suite against recorded fixtures (no network, deterministic)
+  # and uploads the report as an artifact. Deliberately informational, not
+  # gated: the suite is new (issue #45) and hasn't proven stable enough to
+  # block merges on yet — a PR author diffs the uploaded report against
+  # evals/baselines/offline-baseline.json by hand for now. `continue-on-error`
+  # keeps a task regression visible in the job summary without failing CI.
+  evals:
+    name: Evals (offline)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: true
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: uv sync --all-packages
+
+      - name: Run offline eval suite
+        run: PYTHONPATH=evals uv run python -m nullain_evals.cli offline
+
+      - name: Run eval harness's own unit tests
+        run: PYTHONPATH=evals uv run pytest evals/tests -v
+
+      - name: Upload eval report
+        uses: actions/upload-artifact@v4
+        with:
+          name: evals-report
+          path: evals/report.json
+          if-no-files-found: error
+
   # Proves the three distributions actually build and that their metadata is
   # valid for PyPI. Catches a broken package long before a release is cut.
   build:

@@ -1,0 +1,117 @@
+[
+  {
+    "delta_text": "",
+    "tool_calls": [
+      {
+        "id": "call_spec",
+        "name": "emit_task_spec",
+        "arguments": {
+          "objective": "Add an age field to User and update main.py's construction",
+          "steps": [
+            "Read models.py",
+            "Add age to User.__init__",
+            "Read main.py",
+            "Update the User(...) call to pass age"
+          ],
+          "target_files": [
+            "models.py",
+            "main.py"
+          ],
+          "acceptance_criteria": [
+            "Task completes without errors"
+          ]
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": null
+  },
+  {
+    "delta_text": "",
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "name": "read_file",
+        "arguments": {
+          "path": "models.py"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": null
+  },
+  {
+    "delta_text": "",
+    "tool_calls": [
+      {
+        "id": "call_2",
+        "name": "write_file",
+        "arguments": {
+          "path": "models.py",
+          "content": "class User:\n    def __init__(self, name, email, age):\n        self.name = name\n        self.email = email\n        self.age = age\n"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": null
+  },
+  {
+    "delta_text": "",
+    "tool_calls": [
+      {
+        "id": "call_3",
+        "name": "read_file",
+        "arguments": {
+          "path": "main.py"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": null
+  },
+  {
+    "delta_text": "",
+    "tool_calls": [
+      {
+        "id": "call_4",
+        "name": "write_file",
+        "arguments": {
+          "path": "main.py",
+          "content": "from models import User\n\nuser = User(\"Ada\", \"ada@example.com\", age=34)\nprint(user.name)\n"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": null
+  },
+  {
+    "delta_text": "Added an age field to User in models.py and updated main.py accordingly.",
+    "tool_calls": null,
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": "stop"
+  }
+]

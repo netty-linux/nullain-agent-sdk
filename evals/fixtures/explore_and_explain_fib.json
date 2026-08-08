@@ -1,0 +1,56 @@
+[
+  {
+    "delta_text": "",
+    "tool_calls": [
+      {
+        "id": "call_spec",
+        "name": "emit_task_spec",
+        "arguments": {
+          "objective": "Explain fib.py's caching behavior",
+          "steps": [
+            "Read fib.py",
+            "Explain the memoization pattern in the response"
+          ],
+          "target_files": [],
+          "acceptance_criteria": [
+            "Task completes without errors"
+          ]
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": null
+  },
+  {
+    "delta_text": "",
+    "tool_calls": [
+      {
+        "id": "call_1",
+        "name": "read_file",
+        "arguments": {
+          "path": "fib.py"
+        }
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": null
+  },
+  {
+    "delta_text": "fib(n) computes the nth Fibonacci number recursively. It uses a mutable dict as a default argument (cache={}) to memoize previously computed results across calls, so repeated or overlapping calls avoid redundant recursive work \u2014 this is a caching/memoization optimization, though relying on a mutable default argument for persistent state is a somewhat unusual (and commonly flagged) Python idiom.",
+    "tool_calls": null,
+    "usage": {
+      "prompt_tokens": 800,
+      "completion_tokens": 120,
+      "total_tokens": 920
+    },
+    "finish_reason": "stop"
+  }
+]
