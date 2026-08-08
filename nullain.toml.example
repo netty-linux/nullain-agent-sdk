@@ -132,7 +132,13 @@ max_context = 128000
 # if the adapter is unavailable); set enabled=false to disable isolation entirely.
 # allow_paths grants the sandboxed child extra writable paths beyond the workspace
 # (e.g. a shared cache). deny_network blocks network access where the adapter
-# supports it (landlock >=6.2, seatbelt; windows_job v1 does not enforce it).
+# supports it (landlock >=6.2, seatbelt, windows_job — see the platform parity
+# table in docs/configuration.md for exactly what each adapter enforces).
+# On Windows, deny_network=true launches inside a real AppContainer (network
+# genuinely blocked at the kernel/WFP level, filesystem restricted to the
+# workspace + allow_paths); deny_network=false uses a plain restricted-token
+# launch instead (process-contained, but not network- or filesystem-isolated
+# beyond the tool layer) — see docs/configuration.md for why.
 [sandbox]
 enabled = true
 required = true
