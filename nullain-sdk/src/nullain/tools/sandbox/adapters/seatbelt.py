@@ -101,6 +101,38 @@ def _per_user_tmp_dir() -> str | None:
     return os.environ.get("TMPDIR")
 
 
+def _interpreter_read_paths(argv: Sequence[str]) -> list[str]:
+    """Directories the interpreter being exec'd (``argv[0]``) needs read
+    access to just to start — found live (CI failure on a real macOS
+    runner): the deny-by-default read profile denied the venv directory
+    itself, so ``sandbox-exec`` couldn't even ``execvp()`` the interpreter
+    binary (``Operation not permitted`` before the child's own code ever
+    ran). ``argv[0]`` is frequently a venv shim distinct from the workspace
+    (e.g. ``<repo>/.venv/bin/python`` when ``workspace_root`` is some
+    subdirectory or an unrelated temp dir, as in the test suite and in any
+    real agent run where the SDK's own venv lives outside the project being
+    acted on) — mirrors the same concern the Linux Landlock adapter already
+    documents and grants for its own ``argv[0]``/realpath trees.
+
+    Grants BOTH the literal ``argv[0]`` tree and its realpath target tree,
+    since venv shims are commonly symlinks (``sys.executable`` inside a venv
+    often resolves to a different real interpreter location).
+    """
+    if not argv:
+        return []
+    paths: set[str] = set()
+    for candidate in (argv[0], os.path.realpath(argv[0])):
+        directory = os.path.dirname(candidate)
+        # Grant both the immediate directory (e.g. .venv/bin) and its parent
+        # (e.g. .venv, holding pyvenv.cfg that site.py reads at startup) —
+        # matching exactly what the Landlock adapter grants for the same
+        # reason (see landlock.py's _apply, step 5).
+        for tree in (directory, os.path.dirname(directory)):
+            if tree and os.path.exists(tree):
+                paths.add(tree)
+    return sorted(paths)
+
+
 class SeatbeltSandbox:
     """macOS Seatbelt sandbox: write-confined + network-denied + read-isolated
     (workspace/allow_paths/bootstrap only) via sandbox-exec."""
@@ -128,7 +160,10 @@ class SeatbeltSandbox:
             return {}
         workspace = os.path.realpath(os.fspath(opts.workspace_root))
         allow_paths = [os.path.realpath(os.fspath(p)) for p in opts.allow_paths]
-        allow_read_paths = [os.path.realpath(os.fspath(p)) for p in opts.allow_read_paths]
+        allow_read_paths = [
+            *(os.path.realpath(os.fspath(p)) for p in opts.allow_read_paths),
+            *_interpreter_read_paths(argv),
+        ]
         profile = _build_profile(workspace, allow_paths, allow_read_paths, opts.deny_network)
         # Wrap the command in sandbox-exec; still an explicit argv, never shell.
         return {"argv": [_SANDBOX_EXEC, "-p", profile, *argv]}

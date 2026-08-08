@@ -482,6 +482,49 @@ def test_seatbelt_build_profile_grants_bootstrap_read_paths() -> None:
         assert f'(allow file-read* (subpath "{path}"))' in profile
 
 
+def test_seatbelt_interpreter_read_paths_grants_argv0_tree(tmp_path: Path) -> None:
+    """Regression (found live on real macOS CI): argv[0] is frequently a
+    venv shim OUTSIDE the workspace (e.g. <repo>/.venv/bin/python when
+    workspace_root is an unrelated temp dir, exactly the test suite's own
+    setup) — without granting its own tree, sandbox-exec's execvp() itself
+    is denied before the child's code ever runs ("Operation not permitted"),
+    which broke even the pre-existing write-confinement test, not just the
+    new read-isolation ones."""
+    from nullain.tools.sandbox.adapters import seatbelt
+
+    venv_bin = tmp_path / "somewhere" / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    fake_python = venv_bin / "python"
+    fake_python.write_text("#!/bin/sh\n")
+
+    paths = seatbelt._interpreter_read_paths(  # type: ignore[reportPrivateUsage]
+        [str(fake_python)]
+    )
+    assert str(venv_bin) in paths
+    assert str(venv_bin.parent) in paths  # the .venv dir itself (pyvenv.cfg)
+
+
+def test_seatbelt_interpreter_read_paths_empty_for_empty_argv() -> None:
+    from nullain.tools.sandbox.adapters import seatbelt
+
+    assert seatbelt._interpreter_read_paths([]) == []  # type: ignore[reportPrivateUsage]
+
+
+def test_seatbelt_build_profile_includes_interpreter_read_paths() -> None:
+    """End-to-end wiring check (offline, no sandbox-exec execution): a path
+    from _interpreter_read_paths, once passed into _build_profile's
+    allow_read_paths, must actually appear in the generated profile — this
+    is the fix for the CI regression (execvp() denied because the venv
+    directory wasn't granted), verified structurally without needing macOS
+    to run sandbox-exec itself."""
+    from nullain.tools.sandbox.adapters import seatbelt
+
+    profile = seatbelt._build_profile(  # type: ignore[reportPrivateUsage]
+        "/ws", [], ["/some/venv/bin"], deny_network=True
+    )
+    assert '(allow file-read* (subpath "/some/venv/bin"))' in profile
+
+
 @pytest.mark.skipif(sys.platform != "darwin", reason="seatbelt is macOS-only")
 @pytest.mark.asyncio
 async def test_seatbelt_blocks_read_outside_workspace(tmp_path: Path) -> None:
