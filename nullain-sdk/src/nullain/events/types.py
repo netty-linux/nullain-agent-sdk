@@ -130,6 +130,23 @@ class TodoItem(BaseModel, frozen=True):
     status: Literal["pending", "in_progress", "completed"]
 
 
+class SessionRepairedEvent(BaseEvent, frozen=True):
+    """Event recorded when loading a session applies the pre-#24
+    orphaned-tool-result repair pass (see ``nullain.events.repair``).
+
+    ``re_paired_call_ids`` lists tool calls whose origin ``ModelResponseEvent``
+    was recovered by shrinking a stale ``CompactionEvent`` back open;
+    ``dropped_call_ids`` lists tool calls whose origin could not be found at
+    all, so the dangling result was excluded instead. Recorded on the event
+    bus (and persisted like any other event) so the repair is auditable, never
+    a silent mutation.
+    """
+
+    event_type: Literal["session_repaired"] = "session_repaired"
+    re_paired_call_ids: tuple[str, ...] = Field(default_factory=tuple)
+    dropped_call_ids: tuple[str, ...] = Field(default_factory=tuple)
+
+
 class TodoEvent(BaseEvent, frozen=True):
     """Event emitted when the agent updates its todo list (M8).
 
@@ -150,6 +167,7 @@ EventUnion = (
     | ErrorEvent
     | SpecCreatedEvent
     | SpecVerifiedEvent
+    | SessionRepairedEvent
     | StreamDeltaEvent
     | WorkflowPhaseEvent
     | WorkflowLogEvent
@@ -164,6 +182,7 @@ __all__ = [
     "ErrorEvent",
     "EventUnion",
     "ModelResponseEvent",
+    "SessionRepairedEvent",
     "SpecCreatedEvent",
     "SpecVerifiedEvent",
     "StreamDeltaEvent",

@@ -171,3 +171,39 @@ timeout = 30.0
 Each hook runs a command (argv list, no shell) and pipes the event payload as
 JSON on stdin. Exit codes: `0` success, `2` block, other = non-blocking
 failure.
+
+## Troubleshooting
+
+### "400 invalid message content type: <nil>" on a resumed session
+
+This was a real bug (fixed in #24, repaired retroactively for existing
+sessions in #44). A pre-#24 build could compact a `ModelResponseEvent`
+carrying `tool_calls` away while its matching `ToolResultEvent`(s) survived,
+leaving the persisted session (`<workspace>/.nullain/sessions.db`) with a
+`tool`-role message that has no preceding `assistant` message declaring that
+call — invalid per the OpenAI chat-completions schema. Ollama Cloud's compat
+shim rejects that shape with this opaque error instead of a clearer one.
+
+You do not need to do anything by hand. Resuming an affected session (`nullain
+run --continue`, `nullain chat --continue`, or any `Agent.run`/`stream` call
+with a `session_id` that has prior events) automatically repairs it before the
+first request goes out:
+
+- **Re-pair** (preferred): if the tool call's origin message is still in the
+  event log — compaction only marks events as summarized-away, it never
+  deletes them — the repair un-compacts just that message, restoring the
+  pairing exactly as the current compaction logic would have kept it.
+- **Drop** (fallback): if the origin message genuinely isn't in the log, the
+  dangling tool result is dropped instead. Whatever it reported on is
+  unrecoverable either way; dropping it is the only path to a valid history.
+
+Every repair is recorded as a `SessionRepairedEvent` — logged, published on
+the event bus, and persisted in that session's own event history — listing
+exactly which tool-call ids were re-paired vs. dropped, so nothing is a silent
+mutation. `nullain doctor` reports how many sessions in the current
+workspace are affected without repairing anything (repair only happens on
+actual resume); `nullain chat --continue` onto an affected session prints a
+one-line warning before the first turn runs. Uncorrupted sessions (anything
+created after #24, or that never hit the split boundary) take a no-op fast
+path — nothing is scanned beyond the detection pass, and no extra event is
+written.

@@ -148,6 +148,92 @@ async def test_agent_stream_also_resumes_session_history(tmp_path: Path) -> None
 
 
 @pytest.mark.asyncio
+async def test_agent_run_repairs_pre_24_corrupted_session_on_resume(tmp_path: Path) -> None:
+    """Issue #44: a session persisted by a pre-#24 build can carry a
+    CompactionEvent that split a tool-call turn from its result. Resuming it
+    via Agent.run() must repair the history before building the request, not
+    replay the orphaned tool message and let the provider reject it."""
+    from nullain.events import (
+        CompactionEvent,
+        EventStore,
+        ModelResponseEvent,
+        ToolResultEvent,
+        UserMessageEvent,
+    )
+    from nullain.llm import ToolCall
+
+    store = EventStore(tmp_path / ".nullain" / "sessions.db")
+    await store.initialize()
+    for ev in [
+        UserMessageEvent(session_id="corrupt-sess", id="u0", content="old prompt"),
+        ModelResponseEvent(
+            session_id="corrupt-sess",
+            id="m1",
+            model="m",
+            content=None,
+            tool_calls=(ToolCall(id="call_1", name="write_file", arguments={}),),
+        ),
+        ToolResultEvent(
+            session_id="corrupt-sess",
+            id="t1",
+            call_id="call_1",
+            tool_name="write_file",
+            output="ok1",
+        ),
+        CompactionEvent(
+            session_id="corrupt-sess",
+            id="c1",
+            summary="old prompt happened",
+            compacted_event_ids=("u0", "m1"),  # the bug: m1 compacted, t1 not
+        ),
+    ]:
+        await store.append(ev)
+    await store.close()
+
+    provider = FakeSequenceProvider([CompletionChunk(delta_text="continued fine")])
+    agent = _agent(tmp_path, provider)
+
+    result = await agent.run("format next step", session_id="corrupt-sess")
+
+    assert result.final_text == "continued fine"
+    # The request actually sent must not contain an orphaned tool message —
+    # every tool message's id must be preceded by a matching assistant call.
+    sent = provider.seen_messages[0]
+    known_call_ids: set[str] = set()
+    for msg in sent:
+        if msg.role == "tool":
+            assert msg.tool_call_id in known_call_ids
+        for tc in msg.tool_calls or []:
+            known_call_ids.add(tc.id)
+
+    # The repair itself was persisted, auditable, not a silent mutation.
+    events_after = await EventStore(tmp_path / ".nullain" / "sessions.db").get_session_events(
+        "corrupt-sess"
+    )
+    assert any(ev.event_type == "session_repaired" for ev in events_after)
+
+
+@pytest.mark.asyncio
+async def test_agent_run_healthy_session_has_no_repair_event(tmp_path: Path) -> None:
+    """The no-op fast path: a session with no orphaned tool results must
+    never grow a SessionRepairedEvent, on any resume."""
+    provider = FakeSequenceProvider(
+        [CompletionChunk(delta_text="First."), CompletionChunk(delta_text="Second.")]
+    )
+    agent = _agent(tmp_path, provider)
+
+    await agent.run("format first", session_id="healthy-sess")
+    await agent.run("format second", session_id="healthy-sess")
+
+    from nullain.events import EventStore as _EventStore
+
+    events = await _EventStore(tmp_path / ".nullain" / "sessions.db").get_session_events(
+        "healthy-sess"
+    )
+    assert not any(ev.event_type == "session_repaired" for ev in events)
+
+
+@pytest.mark.asyncio
 async def test_explicit_memory_event_store_disables_persistence(tmp_path: Path) -> None:
     """Passing EventStore(':memory:') explicitly opts out of the on-disk
     default — no sessions.db file should be created."""

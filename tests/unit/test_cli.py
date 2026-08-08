@@ -271,6 +271,51 @@ async def test_resolve_session_id_continue_finds_latest_session(tmp_path: Path) 
 
 
 @pytest.mark.asyncio
+async def test_session_needs_repair_false_for_healthy_session(tmp_path: Path) -> None:
+    from nullain.events import EventStore, UserMessageEvent
+
+    store = EventStore(tmp_path / ".nullain" / "sessions.db")
+    await store.initialize()
+    await store.append(UserMessageEvent(session_id="s1", content="hi"))
+    await store.close()
+
+    assert await cli._session_needs_repair(str(tmp_path), "s1") is False
+
+
+@pytest.mark.asyncio
+async def test_session_needs_repair_true_for_corrupted_session(tmp_path: Path) -> None:
+    from nullain.events import (
+        CompactionEvent,
+        EventStore,
+        ModelResponseEvent,
+        ToolResultEvent,
+        UserMessageEvent,
+    )
+    from nullain.llm import ToolCall
+
+    store = EventStore(tmp_path / ".nullain" / "sessions.db")
+    await store.initialize()
+    for ev in [
+        UserMessageEvent(session_id="s1", id="u0", content="old"),
+        ModelResponseEvent(
+            session_id="s1",
+            id="m1",
+            model="m",
+            content=None,
+            tool_calls=(ToolCall(id="call_1", name="write_file", arguments={}),),
+        ),
+        ToolResultEvent(
+            session_id="s1", id="t1", call_id="call_1", tool_name="write_file", output="ok"
+        ),
+        CompactionEvent(session_id="s1", id="c1", summary="old", compacted_event_ids=("u0", "m1")),
+    ]:
+        await store.append(ev)
+    await store.close()
+
+    assert await cli._session_needs_repair(str(tmp_path), "s1") is True
+
+
+@pytest.mark.asyncio
 async def test_run_passes_resolved_session_id_to_agent_stream(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -552,6 +597,95 @@ async def test_doctor_fails_when_rg_missing(
     monkeypatch.setattr(cli, "load_settings", lambda: _settings(tmp_path))
     monkeypatch.setattr(cli, "shutil", _Shutil(rg=None))
     assert await cli._doctor() == cli.EXIT_RUNTIME
+
+
+# ---------------------------------------------------------------------------
+# doctor: session integrity check (#44)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_doctor_session_integrity_no_db_yet(tmp_path: Path) -> None:
+    name, ok, detail = await cli._doctor_session_integrity(tmp_path / ".nullain" / "sessions.db")
+    assert name == "sessions"
+    assert ok is True
+    assert "no session database" in detail
+
+
+@pytest.mark.asyncio
+async def test_doctor_session_integrity_reports_no_corruption(tmp_path: Path) -> None:
+    from nullain.events import EventStore, UserMessageEvent
+
+    db_path = tmp_path / ".nullain" / "sessions.db"
+    store = EventStore(db_path)
+    await store.initialize()
+    await store.append(UserMessageEvent(session_id="s1", content="hi"))
+    await store.close()
+
+    name, ok, detail = await cli._doctor_session_integrity(db_path)
+    assert name == "sessions"
+    assert ok is True
+    assert "none corrupted" in detail
+
+
+@pytest.mark.asyncio
+async def test_doctor_session_integrity_lists_corrupted_sessions_without_repairing(
+    tmp_path: Path,
+) -> None:
+    """The doctor check must report corruption but never repair it — repair
+    only happens when a session is actually resumed through Agent."""
+    from nullain.events import (
+        CompactionEvent,
+        EventStore,
+        ModelResponseEvent,
+        ToolResultEvent,
+        UserMessageEvent,
+    )
+    from nullain.llm import ToolCall
+
+    db_path = tmp_path / ".nullain" / "sessions.db"
+    store = EventStore(db_path)
+    await store.initialize()
+    for ev in [
+        UserMessageEvent(session_id="bad-sess", id="u0", content="old"),
+        ModelResponseEvent(
+            session_id="bad-sess",
+            id="m1",
+            model="m",
+            content=None,
+            tool_calls=(ToolCall(id="call_1", name="write_file", arguments={}),),
+        ),
+        ToolResultEvent(
+            session_id="bad-sess", id="t1", call_id="call_1", tool_name="write_file", output="ok"
+        ),
+        CompactionEvent(
+            session_id="bad-sess", id="c1", summary="old", compacted_event_ids=("u0", "m1")
+        ),
+    ]:
+        await store.append(ev)
+    await store.close()
+
+    name, ok, detail = await cli._doctor_session_integrity(db_path)
+    assert name == "sessions"
+    assert ok is True  # informational — corruption is self-healing, never fails doctor
+    assert "bad-sess" in detail
+    assert "1/1 session(s) corrupted" in detail
+
+    # Confirm nothing was repaired by the scan itself: raw events unchanged.
+    raw = await EventStore(db_path).get_session_events("bad-sess")
+    assert not any(ev.event_type == "session_repaired" for ev in raw)
+
+
+@pytest.mark.asyncio
+async def test_doctor_includes_sessions_check(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The full `doctor` command wires in the sessions check and stays
+    EXIT_OK for a workspace with no session database yet."""
+    monkeypatch.setattr(cli, "load_settings", lambda: _settings(tmp_path))
+    monkeypatch.setattr(cli, "shutil", _Shutil(rg="/usr/bin/rg"))
+    monkeypatch.setattr(cli.Path, "cwd", staticmethod(lambda: tmp_path))
+    assert await cli._doctor() == cli.EXIT_OK
 
 
 # ---------------------------------------------------------------------------

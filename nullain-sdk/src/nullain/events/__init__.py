@@ -2,6 +2,7 @@
 
 from nullain.events.bus import EventBus, EventHandler
 from nullain.events.conversation import Conversation, ConversationState, IncrementalFold
+from nullain.events.repair import find_orphaned_tool_results, repair_session_events
 from nullain.events.store import EventStore
 from nullain.events.types import (
     BaseEvent,
@@ -9,6 +10,7 @@ from nullain.events.types import (
     ErrorEvent,
     EventUnion,
     ModelResponseEvent,
+    SessionRepairedEvent,
     SpecCreatedEvent,
     SpecVerifiedEvent,
     StreamDeltaEvent,
@@ -34,6 +36,7 @@ __all__ = [
     "EventUnion",
     "IncrementalFold",
     "ModelResponseEvent",
+    "SessionRepairedEvent",
     "SpecCreatedEvent",
     "SpecVerifiedEvent",
     "StreamDeltaEvent",
@@ -45,4 +48,6 @@ __all__ = [
     "WorkflowAgentEvent",
     "WorkflowLogEvent",
     "WorkflowPhaseEvent",
+    "find_orphaned_tool_results",
+    "repair_session_events",
 ]
