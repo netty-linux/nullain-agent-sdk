@@ -170,7 +170,7 @@ async def test_register_mcp_tools_over_http_transport() -> None:
     registered = await register_mcp_tools(registry, client)
 
     assert registered == ["mcp__composio__GITHUB_STAR_REPO"]
-    tool = registry._tools["mcp__composio__GITHUB_STAR_REPO"]
+    tool = registry.get_tool("mcp__composio__GITHUB_STAR_REPO")
     assert tool.spec.function.parameters["required"] == ["repo"]
     await transport.close()
 
