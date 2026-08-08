@@ -9,10 +9,12 @@ decoupled from the subprocess adapter (hexagonal architecture).
 """
 
 from nullain.mcp.client import MCPClient, register_mcp_tools
+from nullain.mcp.http_transport import HttpTransport
 from nullain.mcp.protocol import MCPToolDefinition
 from nullain.mcp.transport import MCPTransport, StdioTransport
 
 __all__ = [
+    "HttpTransport",
     "MCPClient",
     "MCPToolDefinition",
     "MCPTransport",
