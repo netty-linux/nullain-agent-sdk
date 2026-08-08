@@ -190,7 +190,9 @@ from nullain import Agent
 
 async def main() -> None:
     agent = Agent(workspace_root=".")
-    result = await agent.run("Audite o pyproject.toml e garanta que as dependências estão atualizadas")
+    result = await agent.run(
+        "Audite o pyproject.toml e garanta que as dependências estão atualizadas"
+    )
     print(result.final_text)
 
 
