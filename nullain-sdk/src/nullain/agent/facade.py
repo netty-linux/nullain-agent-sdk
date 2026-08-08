@@ -28,6 +28,7 @@ from nullain.events import BaseEvent, EventBus, EventStore, EventStorePort, repa
 from nullain.hooks import HookManager, HooksConfig
 from nullain.llm import LLMProvider, OllamaCloudProvider, OpenAICompatibleProvider
 from nullain.memory import EpisodicMemory, PersistentMemory
+from nullain.quota import QuotaChecker
 from nullain.router import ModelRouter
 from nullain.telemetry import get_logger
 from nullain.tools import PermissionPolicy, ToolRegistry
@@ -90,6 +91,7 @@ class Agent:
         episodic_memory: EpisodicMemory | None = None,
         persistent_memory: PersistentMemory | None = None,
         hooks: HookManager | HooksConfig | None = None,
+        quota_checker: QuotaChecker | None = None,
     ) -> None:
         """Assemble the agent's collaborators with safe defaults.
 
@@ -139,6 +141,9 @@ class Agent:
                 scoped to ``workspace_root``.
             hooks: Lifecycle hooks; a ``HooksConfig`` is wrapped in a
                 ``HookManager``. When None, ``settings.hooks`` is used.
+            quota_checker: Optional per-tenant quota enforcement (ADR-4,
+                docs/FUSION_PLAN.md), consulted before each step. When None
+                (the default), no quota enforcement occurs.
         """
         self._workspace_root = str(workspace_root)
         # Resolve settings relative to workspace_root, not the process's own
@@ -177,6 +182,7 @@ class Agent:
             self._hooks = hooks
         else:
             self._hooks = HookManager(hooks or self._settings.hooks)
+        self._quota_checker = quota_checker
 
         if tools is not None:
             self.tools = tools
@@ -250,6 +256,7 @@ class Agent:
         episodic_memory: EpisodicMemory | None = None,
         persistent_memory: PersistentMemory | None = None,
         hooks: HookManager | HooksConfig | None = None,
+        quota_checker: QuotaChecker | None = None,
     ) -> Agent:
         """Build an ``Agent`` from an already-resolved :class:`NullainSettings`.
 
@@ -290,6 +297,7 @@ class Agent:
             episodic_memory=episodic_memory,
             persistent_memory=persistent_memory,
             hooks=hooks,
+            quota_checker=quota_checker,
         )
 
     @classmethod
@@ -311,6 +319,7 @@ class Agent:
         episodic_memory: EpisodicMemory | None = None,
         persistent_memory: PersistentMemory | None = None,
         hooks: HookManager | HooksConfig | None = None,
+        quota_checker: QuotaChecker | None = None,
     ) -> Agent:
         """Build an ``Agent`` from a ``nullain.toml`` config file path.
 
@@ -351,6 +360,7 @@ class Agent:
             episodic_memory=episodic_memory,
             persistent_memory=persistent_memory,
             hooks=hooks,
+            quota_checker=quota_checker,
         )
 
     def _build_loop(self, session_id: str | None) -> AgentLoop:
@@ -369,6 +379,7 @@ class Agent:
             max_steps=self._max_steps,
             max_tokens=self._max_tokens,
             timeout=self._timeout,
+            quota_checker=self._quota_checker,
         )
 
     async def run(self, prompt: str, session_id: str | None = None) -> RunResult:
