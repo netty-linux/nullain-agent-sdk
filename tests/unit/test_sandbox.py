@@ -460,4 +460,128 @@ def test_windows_job_selector_wires_on_win32() -> None:
 
     sb = select_sandbox(SandboxConfig(enabled=True, required=True))
     assert isinstance(sb, WindowsJobSandbox)
+
+
+# ---------------------------------------------------------------------------
+# Windows AppContainer isolation (issue #41): real filesystem + network
+# confinement when deny_network=True, mirroring the landlock escape/allow
+# pair. Gated to win32; validated live on a Windows host.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="AppContainer is Windows-only")
+@pytest.mark.asyncio
+async def test_windows_job_blocks_write_outside_workspace(tmp_path: Path) -> None:
+    """The flagship security proof (issue #41): with deny_network=True, a
+    sandboxed child CANNOT write outside its workspace + allow_paths — the
+    AppContainer token implies no file access by default, and only granted
+    paths are ACL'd. Complements the landlock/seatbelt escape tests."""
+    from nullain.tools.sandbox.adapters.windows_job import WindowsJobSandbox
+
+    sb = WindowsJobSandbox(required=True)
+    if not sb.available():
+        pytest.skip("AppContainer not available on this host")
+
+    outside_dir = tmp_path.parent / f"nullain_appcontainer_escape_{tmp_path.name}"
+    outside_dir.mkdir(exist_ok=True)
+    target = outside_dir / "evil.txt"
+    if target.exists():
+        target.unlink()
+
+    try:
+        code, output = await execute_subprocess(
+            [sys.executable, "-c", f"open(r'{target}', 'w').write('x')"],
+            cwd=tmp_path,
+            sandbox=sb,
+            sandbox_opts=SandboxOptions(workspace_root=tmp_path, deny_network=True),
+        )
+        assert code != 0, "writing outside the workspace must be denied"
+        assert not target.exists(), "no file must be created outside the workspace"
+        assert "PermissionError" in output or "Permission denied" in output, output
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            target.unlink()
+        with contextlib.suppress(OSError):
+            outside_dir.rmdir()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="AppContainer is Windows-only")
+@pytest.mark.asyncio
+async def test_windows_job_allows_write_inside_workspace(tmp_path: Path) -> None:
+    """Complement to the escape test: isolation must not over-restrict — the
+    child can still write inside its granted workspace."""
+    from nullain.tools.sandbox.adapters.windows_job import WindowsJobSandbox
+
+    sb = WindowsJobSandbox(required=True)
+    if not sb.available():
+        pytest.skip("AppContainer not available on this host")
+
+    inside = tmp_path / "inside.txt"
+    code, output = await execute_subprocess(
+        [sys.executable, "-c", f"open(r'{inside}', 'w').write('x')"],
+        cwd=tmp_path,
+        sandbox=sb,
+        sandbox_opts=SandboxOptions(workspace_root=tmp_path, deny_network=True),
+    )
+    assert code == 0, f"writing inside the workspace must succeed: {output}"
+    assert inside.read_text() == "x"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="AppContainer is Windows-only")
+@pytest.mark.asyncio
+async def test_windows_job_denies_network_when_requested(tmp_path: Path) -> None:
+    """With deny_network=True, a sandboxed child cannot establish a TCP
+    connection — real AppContainer confinement (no capabilities attached),
+    not a best-effort check. Proven live via WinError 10013 (WSAEACCES)."""
+    from nullain.tools.sandbox.adapters.windows_job import WindowsJobSandbox
+
+    sb = WindowsJobSandbox(required=True)
+    if not sb.available():
+        pytest.skip("AppContainer not available on this host")
+
+    code, _output = await execute_subprocess(
+        [
+            sys.executable,
+            "-c",
+            "import socket; s=socket.socket(); s.settimeout(3); s.connect(('8.8.8.8', 53))",
+        ],
+        cwd=tmp_path,
+        sandbox=sb,
+        sandbox_opts=SandboxOptions(workspace_root=tmp_path, deny_network=True),
+    )
+    assert code != 0, "network connection must be denied when deny_network=True"
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="AppContainer is Windows-only")
+@pytest.mark.asyncio
+async def test_windows_job_allows_network_when_not_denied(tmp_path: Path) -> None:
+    """deny_network=False must not silently break network access: an
+    AppContainer's capability grant does not actually restore network for an
+    ad-hoc (non-package-registered) container (see _win_launcher's module
+    docstring), so this path uses a plain restricted token instead — still
+    process-contained, but with normal filesystem + network access."""
+    from nullain.tools.sandbox.adapters.windows_job import WindowsJobSandbox
+
+    sb = WindowsJobSandbox(required=True)
+    if not sb.available():
+        pytest.skip("AppContainer not available on this host")
+
+    result_file = tmp_path / "net_ok.txt"
+    code, output = await execute_subprocess(
+        [
+            sys.executable,
+            "-c",
+            "import socket; s=socket.socket(); s.settimeout(5); "
+            "s.connect(('8.8.8.8', 53)); "
+            f"open(r'{result_file}', 'w').write('connected')",
+        ],
+        cwd=tmp_path,
+        sandbox=sb,
+        sandbox_opts=SandboxOptions(workspace_root=tmp_path, deny_network=False),
+        timeout=15.0,
+    )
+    if code != 0 and "TimeoutError" in output:
+        pytest.skip("no outbound network reachable from this CI/host — cannot prove allow-path")
+    assert code == 0, f"network connection must succeed when deny_network=False: {output}"
+    assert result_file.exists()
     assert sb.required is True

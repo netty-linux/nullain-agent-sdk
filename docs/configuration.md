@@ -97,6 +97,32 @@ deny_network = true
 - `allow_paths` — extra writable paths granted to the sandboxed child.
 - `deny_network` — block network access where the adapter supports it.
 
+### Platform parity
+
+What each adapter actually enforces, as of issue #41 (Windows) and #42 (macOS
+seatbelt read isolation, tracked separately — still open):
+
+| | Linux (landlock ≥5.13) | macOS (seatbelt) | Windows (`deny_network=true`) | Windows (`deny_network=false`) |
+|---|---|---|---|---|
+| Filesystem write | Confined to workspace + `allow_paths` (kernel-enforced) | Confined to workspace + `allow_paths` (kernel-enforced) | Confined to workspace + `allow_paths` (AppContainer ACL — kernel-enforced) | Unconfined (restricted token only; same as the tool-layer `PermissionPolicy` checks) |
+| Filesystem read | Confined to workspace + `allow_paths` + system trees needed to exec (kernel ≥6.2; older kernels: read is global) | Global (see #42 — read isolation is explicitly out of scope for the current profile) | Confined to workspace + `allow_paths` + interpreter trees (AppContainer default-deny — kernel-enforced) | Unconfined |
+| Network | Denied via Landlock scope (kernel ≥6.2; older kernels: not enforced) | Denied via `(deny network*)` in the seatbelt profile | Denied — AppContainer with no capabilities attached; the firewall/WFP layer refuses a socket regardless of anything the process does | Allowed — plain restricted-token launch, no AppContainer |
+
+**Why Windows has two different mechanisms depending on `deny_network`:**
+confirmed live that an AppContainer's capability grant (attaching the
+`INTERNET_CLIENT`/`INTERNET_CLIENT_SERVER` capability SIDs to the token) does
+**not** actually restore network access for an AppContainer created ad hoc at
+runtime (`CreateAppContainerProfile`, no package install) — Windows only
+honors network capabilities for a process belonging to a properly
+*registered* MSIX/APPX package. Since AppContainer's only guarantee that
+matters here is "no capabilities ⇒ no socket, no exceptions," and that
+guarantee is the opposite of what `deny_network=false` asks for, the
+`deny_network=false` path uses the older restricted-token mechanism instead
+(process-contained via a Job Object, but not filesystem- or network-isolated
+beyond the tool layer's own `PermissionPolicy` checks) rather than launching
+inside an AppContainer that would silently break the network access the
+caller asked to keep.
+
 ## `[mcp.servers.<name>]` — MCP servers
 
 ```toml
