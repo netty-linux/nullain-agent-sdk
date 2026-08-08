@@ -2,8 +2,10 @@
 
 from nullain.events.bus import EventBus, EventHandler
 from nullain.events.conversation import Conversation, ConversationState, IncrementalFold
+from nullain.events.port import EventStorePort
+from nullain.events.postgres_store import EventStoreConnectionError, PostgresEventStore
 from nullain.events.repair import find_orphaned_tool_results, repair_session_events
-from nullain.events.store import EventStore
+from nullain.events.store import EventStore, SQLiteEventStore
 from nullain.events.types import (
     BaseEvent,
     CompactionEvent,
@@ -33,9 +35,13 @@ __all__ = [
     "EventBus",
     "EventHandler",
     "EventStore",
+    "EventStoreConnectionError",
+    "EventStorePort",
     "EventUnion",
     "IncrementalFold",
     "ModelResponseEvent",
+    "PostgresEventStore",
+    "SQLiteEventStore",
     "SessionRepairedEvent",
     "SpecCreatedEvent",
     "SpecVerifiedEvent",

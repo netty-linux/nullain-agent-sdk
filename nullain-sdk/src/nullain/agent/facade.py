@@ -24,7 +24,7 @@ from structlog.stdlib import BoundLogger
 from nullain.agent.loop import AgentLoop
 from nullain.agent.result import RunResult
 from nullain.config import NullainSettings, load_settings
-from nullain.events import BaseEvent, EventBus, EventStore, repair_session_events
+from nullain.events import BaseEvent, EventBus, EventStore, EventStorePort, repair_session_events
 from nullain.hooks import HookManager, HooksConfig
 from nullain.llm import LLMProvider, OllamaCloudProvider, OpenAICompatibleProvider
 from nullain.memory import EpisodicMemory, PersistentMemory
@@ -86,7 +86,7 @@ class Agent:
         permission_callback: PermissionCallback | None = None,
         ask_user_callback: AskUserCallback | None = None,
         event_bus: EventBus | None = None,
-        event_store: EventStore | None = None,
+        event_store: EventStorePort | None = None,
         episodic_memory: EpisodicMemory | None = None,
         persistent_memory: PersistentMemory | None = None,
         hooks: HookManager | HooksConfig | None = None,
@@ -246,7 +246,7 @@ class Agent:
         permission_callback: PermissionCallback | None = None,
         ask_user_callback: AskUserCallback | None = None,
         event_bus: EventBus | None = None,
-        event_store: EventStore | None = None,
+        event_store: EventStorePort | None = None,
         episodic_memory: EpisodicMemory | None = None,
         persistent_memory: PersistentMemory | None = None,
         hooks: HookManager | HooksConfig | None = None,
@@ -307,7 +307,7 @@ class Agent:
         permission_callback: PermissionCallback | None = None,
         ask_user_callback: AskUserCallback | None = None,
         event_bus: EventBus | None = None,
-        event_store: EventStore | None = None,
+        event_store: EventStorePort | None = None,
         episodic_memory: EpisodicMemory | None = None,
         persistent_memory: PersistentMemory | None = None,
         hooks: HookManager | HooksConfig | None = None,

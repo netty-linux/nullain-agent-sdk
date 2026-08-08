@@ -37,8 +37,14 @@ EVENT_CLASS_MAP: dict[str, type[BaseEvent]] = {
 }
 
 
-class EventStore:
-    """Async SQLite persistence engine for conversation trajectory events."""
+class SQLiteEventStore:
+    """Async SQLite persistence engine for conversation trajectory events.
+
+    The SDK's standalone/dev default `EventStorePort` adapter — see
+    `nullain.events.postgres_store.PostgresEventStore` for the
+    Supabase/Postgres-backed production adapter (docs/FUSION_PLAN.md
+    ADR-2). Both implement identical resume/repair semantics.
+    """
 
     def __init__(self, db_path: str | Path = ":memory:") -> None:
         self.db_path = str(db_path)
@@ -170,4 +176,10 @@ class EventStore:
         return events
 
 
-__all__ = ["EVENT_CLASS_MAP", "EventStore"]
+#: Backward-compatible alias — `SQLiteEventStore` was named `EventStore`
+#: before `EventStorePort`/`PostgresEventStore` existed (docs/FUSION_PLAN.md
+#: ADR-2). Every existing `EventStore(...)`/`from nullain.events import
+#: EventStore` call site keeps working unchanged.
+EventStore = SQLiteEventStore
+
+__all__ = ["EVENT_CLASS_MAP", "EventStore", "SQLiteEventStore"]

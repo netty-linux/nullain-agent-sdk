@@ -66,6 +66,12 @@ signing = ["cryptography>=42.0.0"]
 # lazily, so the base SDK install stays free of ~2GB of ONNX model weights
 # for callers who don't use RAG.
 rag = ["fastembed>=0.4.0", "qdrant-client>=1.10.0"]
+# Postgres/Supabase-backed EventStorePort adapter (docs/FUSION_PLAN.md
+# ADR-2) for production deployments where multiple agent-process replicas
+# need to share one session-history store. Optional: EventStorePort itself
+# has zero dependency on asyncpg; only PostgresEventStore imports it,
+# lazily. SQLiteEventStore remains the SDK's standalone/dev default.
+postgres = ["asyncpg>=0.29.0"]
 
 [project.urls]
 Homepage = "https://github.com/netty-linux/nullain-agent-sdk"
