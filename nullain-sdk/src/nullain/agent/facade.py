@@ -26,7 +26,7 @@ from nullain.agent.result import RunResult
 from nullain.config import NullainSettings, load_settings
 from nullain.events import BaseEvent, EventBus, EventStore, repair_session_events
 from nullain.hooks import HookManager, HooksConfig
-from nullain.llm import LLMProvider, OllamaCloudProvider
+from nullain.llm import LLMProvider, OllamaCloudProvider, OpenAICompatibleProvider
 from nullain.memory import EpisodicMemory, PersistentMemory
 from nullain.router import ModelRouter
 from nullain.telemetry import get_logger
@@ -96,8 +96,10 @@ class Agent:
         Args:
             settings: Resolved settings; when None, loaded from ``nullain.toml``
                 (or ``NULLAIN_CONFIG``) via :func:`load_settings`.
-            provider: LLM provider; when None, an ``OllamaCloudProvider`` is
-                built from ``settings.ollama_*``.
+            provider: LLM provider; when None, built from ``settings.llm.provider``
+                (default ``"ollama"`` — ``OllamaCloudProvider`` from
+                ``settings.ollama_*``; ``"openai"`` — ``OpenAICompatibleProvider``
+                from ``settings.openai_*``, issue #40).
             tools: Tool registry; when None, a fresh registry is built with the
                 built-in tools under a fail-closed permission policy.
             workspace_root: Workspace root for the filesystem/bash/git tools.
@@ -160,10 +162,7 @@ class Agent:
         )
         self._timeout = timeout if timeout is not None else self._settings.agent.timeout
 
-        self._provider = provider or OllamaCloudProvider(
-            api_key=self._settings.ollama_api_key,
-            base_url=self._settings.ollama_base_url,
-        )
+        self._provider = provider or self._build_default_provider()
         self._sandbox: Sandbox = select_sandbox(self._settings.sandbox)
         self.event_bus = event_bus or EventBus()
         self._event_store = event_store or EventStore(
@@ -201,6 +200,36 @@ class Agent:
                 event_bus=self.event_bus,
                 bash_timeout=self._settings.agent.bash_timeout,
             )
+
+    def _build_default_provider(self) -> LLMProvider:
+        """Build the provider named by ``settings.llm.provider`` (issue #40).
+
+        ``"ollama"`` (default) builds ``OllamaCloudProvider`` from the
+        top-level ``ollama_api_key``/``ollama_base_url`` settings, preserving
+        every existing config's behavior exactly (this branch is what ran
+        unconditionally before #40). ``"openai"`` builds
+        ``OpenAICompatibleProvider`` from the top-level
+        ``openai_api_key``/``openai_base_url`` settings — and, via
+        ``openai_base_url``, works against any OpenAI-compatible endpoint,
+        not only OpenAI itself. An unrecognized value raises rather than
+        silently falling back to Ollama, since a typo'd provider name
+        silently talking to the wrong (or no) API would be a confusing
+        failure mode far downstream of the config file.
+        """
+        provider_name = self._settings.llm.provider
+        if provider_name == "ollama":
+            return OllamaCloudProvider(
+                api_key=self._settings.ollama_api_key,
+                base_url=self._settings.ollama_base_url,
+            )
+        if provider_name == "openai":
+            return OpenAICompatibleProvider(
+                api_key=self._settings.openai_api_key,
+                base_url=self._settings.openai_base_url,
+            )
+        raise ValueError(
+            f"Unknown [llm] provider {provider_name!r} in settings — expected 'ollama' or 'openai'"
+        )
 
     @classmethod
     def from_settings(

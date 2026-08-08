@@ -1,6 +1,7 @@
 """Nullain Agent SDK — LLM Module."""
 
 from nullain.llm.ollama import OllamaCloudProvider
+from nullain.llm.openai_compat import OpenAICompatibleProvider
 from nullain.llm.provider import LLMProvider
 from nullain.llm.response_models import (
     FunctionCall,
@@ -31,6 +32,7 @@ __all__ = [
     "OllamaCloudProvider",
     "OllamaMessage",
     "OllamaNativeResponse",
+    "OpenAICompatibleProvider",
     "OpenAIMessage",
     "OpenAIResponse",
     "Role",

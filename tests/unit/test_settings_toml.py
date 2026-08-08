@@ -183,3 +183,48 @@ def test_settings_prefixed_ollama_api_key_wins_over_bare(monkeypatch: pytest.Mon
     monkeypatch.setenv("OLLAMA_API_KEY", "bare-key")
     settings = NullainSettings()
     assert settings.ollama_api_key == "prefixed-key"
+
+
+# ---------------------------------------------------------------------------
+# [llm] + openai_* — issue #40 multi-provider config
+# ---------------------------------------------------------------------------
+
+
+def test_llm_defaults_to_ollama_provider() -> None:
+    settings = NullainSettings()
+    assert settings.llm.provider == "ollama"
+    assert settings.openai_base_url == "https://api.openai.com"
+    assert settings.openai_api_key is None
+
+
+def test_load_settings_llm_openai_section_from_toml(tmp_path: Path) -> None:
+    toml = tmp_path / "nullain.toml"
+    toml.write_text(
+        """
+openai_base_url = "https://openrouter.ai/api"
+openai_api_key = "sk-or-secret"
+
+[llm]
+provider = "openai"
+"""
+    )
+    settings = load_settings(toml)
+    assert settings.llm.provider == "openai"
+    assert settings.openai_base_url == "https://openrouter.ai/api"
+    assert settings.openai_api_key == "sk-or-secret"
+
+
+def test_settings_accepts_bare_openai_api_key_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Same AliasChoices pattern as ollama_api_key: OPENAI_API_KEY (the name
+    every OpenAI SDK/CLI already expects) works without the NULLAIN_ prefix."""
+    monkeypatch.delenv("NULLAIN_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "bare-openai-key")
+    settings = NullainSettings()
+    assert settings.openai_api_key == "bare-openai-key"
+
+
+def test_settings_prefixed_openai_api_key_wins_over_bare(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NULLAIN_OPENAI_API_KEY", "prefixed-openai-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "bare-openai-key")
+    settings = NullainSettings()
+    assert settings.openai_api_key == "prefixed-openai-key"

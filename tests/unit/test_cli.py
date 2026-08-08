@@ -402,7 +402,9 @@ async def test_setup_wizard_writes_config_and_gitignore(
     workspace that is a git repo gets nullain.toml auto-gitignored."""
     (tmp_path / ".git").mkdir()
 
-    _scripted_input(monkeypatch, "", "", "", "")  # base_url, then 3 model-tier prompts — defaulted
+    _scripted_input(
+        monkeypatch, "1", "", "", "", ""
+    )  # provider=ollama, base_url, then 3 model-tier prompts — defaulted
     _scripted_getpass(monkeypatch, "secret-key-123")
 
     async def _healthy(self: object) -> bool:
@@ -425,7 +427,7 @@ async def test_setup_wizard_writes_config_and_gitignore(
 
 @pytest.mark.asyncio
 async def test_setup_wizard_no_key_aborts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _scripted_input(monkeypatch, "")  # base_url only
+    _scripted_input(monkeypatch, "1", "")  # provider=ollama, base_url
     _scripted_getpass(monkeypatch, "")  # empty key
 
     ok = await cli._run_setup_wizard(str(tmp_path))
@@ -438,7 +440,9 @@ async def test_setup_wizard_failed_health_check_prompts_and_can_proceed(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """A failed health check still lets the user save anyway if they confirm."""
-    _scripted_input(monkeypatch, "", "y", "", "", "")  # base_url, confirm-anyway, 3 model tiers
+    _scripted_input(
+        monkeypatch, "1", "", "y", "", "", ""
+    )  # provider=ollama, base_url, confirm-anyway, 3 model tiers
     _scripted_getpass(monkeypatch, "bad-key")
 
     async def _unhealthy(self: object) -> bool:
@@ -455,7 +459,7 @@ async def test_setup_wizard_failed_health_check_prompts_and_can_proceed(
 async def test_setup_wizard_failed_health_check_declined_aborts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    _scripted_input(monkeypatch, "", "n")  # base_url, decline to save anyway
+    _scripted_input(monkeypatch, "1", "", "n")  # provider=ollama, base_url, decline to save anyway
     _scripted_getpass(monkeypatch, "bad-key")
 
     async def _unhealthy(self: object) -> bool:
@@ -466,6 +470,89 @@ async def test_setup_wizard_failed_health_check_declined_aborts(
     ok = await cli._run_setup_wizard(str(tmp_path))
     assert ok is False
     assert not (tmp_path / "nullain.toml").exists()
+
+
+# ---------------------------------------------------------------------------
+# setup wizard: OpenAI-compatible branch (issue #40)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_setup_wizard_openai_writes_provider_selection(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Choosing the OpenAI-compatible branch writes [llm] provider = "openai"
+    and openai_* settings, not the Ollama ones."""
+    _scripted_input(monkeypatch, "2", "", "")  # provider=openai, base_url, model
+    _scripted_getpass(monkeypatch, "sk-test-123")
+
+    async def _healthy(self: object) -> bool:
+        return True
+
+    monkeypatch.setattr(cli.OpenAICompatibleProvider, "health_check", _healthy)
+
+    ok = await cli._run_setup_wizard(str(tmp_path))
+    assert ok is True
+
+    config_path = tmp_path / "nullain.toml"
+    assert config_path.exists()
+    text = config_path.read_text(encoding="utf-8")
+    assert 'provider = "openai"' in text
+    assert "sk-test-123" in text
+    assert "openai_api_key" in text
+    assert "gpt-4o-mini" in text  # default model
+    assert "ollama_api_key" not in text
+
+
+@pytest.mark.asyncio
+async def test_setup_wizard_openai_custom_base_url(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A non-default base_url (e.g. OpenRouter) is preserved verbatim —
+    proves the wizard works for any OpenAI-compatible endpoint, not just
+    OpenAI itself."""
+    _scripted_input(monkeypatch, "2", "https://openrouter.ai/api", "anthropic/claude-3.5-sonnet")
+    _scripted_getpass(monkeypatch, "sk-or-test")
+
+    async def _healthy(self: object) -> bool:
+        return True
+
+    monkeypatch.setattr(cli.OpenAICompatibleProvider, "health_check", _healthy)
+
+    ok = await cli._run_setup_wizard(str(tmp_path))
+    assert ok is True
+
+    text = (tmp_path / "nullain.toml").read_text(encoding="utf-8")
+    assert "https://openrouter.ai/api" in text
+    assert "anthropic/claude-3.5-sonnet" in text
+
+
+@pytest.mark.asyncio
+async def test_setup_wizard_openai_no_key_aborts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _scripted_input(monkeypatch, "2", "")  # provider=openai, base_url
+    _scripted_getpass(monkeypatch, "")  # empty key
+
+    ok = await cli._run_setup_wizard(str(tmp_path))
+    assert ok is False
+    assert not (tmp_path / "nullain.toml").exists()
+
+
+def test_needs_setup_checks_openai_key_when_provider_is_openai(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """_needs_setup must check the credential for whichever provider
+    [llm] provider names, not always ollama_api_key."""
+    (tmp_path / "nullain.toml").write_text(
+        'openai_api_key = "sk-configured"\n\n[llm]\nprovider = "openai"\n'
+    )
+    assert cli._needs_setup(str(tmp_path)) is False
+
+
+def test_needs_setup_true_when_openai_provider_has_no_key(tmp_path: Path) -> None:
+    (tmp_path / "nullain.toml").write_text('[llm]\nprovider = "openai"\n')
+    assert cli._needs_setup(str(tmp_path)) is True
 
 
 def test_ensure_gitignored_noop_without_git_repo(tmp_path: Path) -> None:

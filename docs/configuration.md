@@ -14,6 +14,50 @@ ollama_base_url = "https://ollama.com"
 - `ollama_api_key` — API key (usually set via the `OLLAMA_API_KEY` env var
   instead, so it never lands in a committed file — `NULLAIN_OLLAMA_API_KEY`
   also works and takes precedence if both are set).
+- `openai_base_url` — base URL of an OpenAI-compatible endpoint (default
+  `https://api.openai.com`). See `[llm]` below.
+- `openai_api_key` — API key for the endpoint above (usually set via the
+  `OPENAI_API_KEY` env var instead — `NULLAIN_OPENAI_API_KEY` also works and
+  takes precedence if both are set).
+
+## `[llm]` — provider selection
+
+```toml
+[llm]
+provider = "ollama"  # or "openai"
+```
+
+Selects which `LLMProvider` the `Agent` facade builds by default when none
+is injected via `Agent(provider=...)`:
+
+- `"ollama"` (default) — `OllamaCloudProvider`, built from `ollama_api_key`
+  / `ollama_base_url` above.
+- `"openai"` — `OpenAICompatibleProvider`, built from `openai_api_key` /
+  `openai_base_url` above. Despite the name, this works against **any**
+  OpenAI-compatible chat-completions endpoint — OpenAI itself, OpenRouter,
+  Together, Groq, vLLM, LM Studio, and others — by pointing `openai_base_url`
+  at it. No other setting changes are needed to switch providers.
+
+```toml
+# Example: route through OpenRouter instead of OpenAI directly.
+openai_base_url = "https://openrouter.ai/api"
+openai_api_key = "sk-or-..."
+
+[llm]
+provider = "openai"
+
+[router.tiers.balanced]
+models = ["anthropic/claude-3.5-sonnet"]
+```
+
+An unrecognized `provider` value raises at `Agent()` construction time
+rather than silently falling back to Ollama.
+
+**Current limitation:** this selects *one* provider for the whole agent.
+Per-tier provider routing (e.g. `fast` on one provider, `deep` on another)
+is not yet implemented — `[router.tiers.*]` still only names models for
+whichever single provider `[llm] provider` selects; `ModelRouter` resolves a
+model name, not a `(provider, model)` pair. Tracked as a follow-up.
 
 ## `[agent]` — per-run budget/limits
 

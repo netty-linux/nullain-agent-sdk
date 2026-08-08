@@ -10,6 +10,36 @@ from nullain.hooks import HooksConfig
 from nullain.lsp.config import LSPConfig, LSPServerConfig
 
 
+class LLMConfig(BaseModel):
+    """Selects which LLM provider the ``Agent`` facade builds by default when
+    none is injected (issue #40).
+
+    ``provider = "ollama"`` (default) builds ``OllamaCloudProvider`` from the
+    top-level ``ollama_api_key``/``ollama_base_url`` settings.
+    ``provider = "openai"`` builds ``OpenAICompatibleProvider`` from the
+    top-level ``openai_api_key``/``openai_base_url`` settings — and, via
+    ``openai_base_url``, works against any OpenAI-compatible endpoint
+    (OpenRouter, Together, Groq, vLLM, LM Studio, ...), not only OpenAI
+    itself. Both providers' credentials live as direct ``NullainSettings``
+    fields (not nested under ``[llm]``) for the same reason
+    ``ollama_api_key``/``ollama_base_url`` already do: ``BaseSettings``'
+    ``AliasChoices``-based bare-env-var resolution (``OLLAMA_API_KEY``,
+    ``OPENAI_API_KEY`` — the names every provider's own SDK/CLI already
+    expects, with no ``NULLAIN_`` prefix required) only applies to fields
+    declared directly on the ``BaseSettings`` root; a field nested inside a
+    plain ``BaseModel`` sub-section does not inherit it (confirmed live: an
+    earlier ``[llm.openai]`` nested design silently dropped both the TOML
+    value and the env var).
+
+    This selects ONE provider for the whole agent. Per-tier provider routing
+    (fast/balanced/deep each on a different provider) is tracked as a
+    follow-up, not yet implemented — ``ModelRouter`` still only resolves a
+    model name, not a ``(provider, model)`` pair.
+    """
+
+    provider: str = "ollama"
+
+
 class AgentConfig(BaseModel):
     """Per-run budget/limits for ``AgentLoop`` (M18).
 
@@ -188,6 +218,19 @@ class NullainSettings(BaseSettings):
         default=None, validation_alias=AliasChoices("NULLAIN_OLLAMA_API_KEY", "OLLAMA_API_KEY")
     )
     ollama_base_url: str = "https://ollama.com"
+    # Same AliasChoices pattern as ollama_api_key above (issue #40):
+    # NULLAIN_OPENAI_API_KEY wins if both it and the bare OPENAI_API_KEY —
+    # the name every OpenAI-compatible SDK/CLI already expects — are set.
+    openai_api_key: str | None = Field(
+        default=None, validation_alias=AliasChoices("NULLAIN_OPENAI_API_KEY", "OPENAI_API_KEY")
+    )
+    # Defaults to OpenAI itself; pointing this at any other OpenAI-compatible
+    # chat-completions endpoint (OpenRouter, Together, Groq, vLLM, LM
+    # Studio, ...) is the entire mechanism for using a different provider —
+    # no other setting changes.
+    openai_base_url: str = "https://api.openai.com"
+    #: Provider selection (issue #40) — see LLMConfig's docstring.
+    llm: LLMConfig = Field(default_factory=LLMConfig)
 
 
 def load_settings(config_path: str | Path | None = None) -> NullainSettings:

@@ -29,7 +29,7 @@ from nullain.agent import Agent, RunResult
 from nullain.config import load_settings
 from nullain.events import EventStore, find_orphaned_tool_results
 from nullain.input_history import InputHistory
-from nullain.llm import OllamaCloudProvider
+from nullain.llm import OllamaCloudProvider, OpenAICompatibleProvider
 from nullain.prompt_select import select
 from nullain.tools.sandbox import select_sandbox
 from nullain.tui import TUIRenderer
@@ -506,11 +506,13 @@ def _ensure_gitignored(config_path: Path) -> None:
 def _needs_setup(workspace: str) -> bool:
     """Whether the first-run wizard should run before ``chat``/``run``.
 
-    True only when no Ollama Cloud API key is resolvable from any source
-    (``NULLAIN_CONFIG`` if set, else ``<workspace>/nullain.toml``, or the
-    ``OLLAMA_API_KEY``/``NULLAIN_OLLAMA_API_KEY`` env vars) — i.e. the
-    agent could not actually make a request yet. A key present anywhere in
-    that chain skips the wizard, so an already-configured workspace (or one
+    True only when no usable provider credential is resolvable from any
+    source (``NULLAIN_CONFIG`` if set, else ``<workspace>/nullain.toml``, or
+    the relevant env vars) — i.e. the agent could not actually make a
+    request yet. Checks whichever provider ``settings.llm.provider`` names
+    (issue #40): ``ollama_api_key`` for the default ``"ollama"``,
+    ``openai_api_key`` for ``"openai"``. A key present anywhere in that
+    chain skips the wizard, so an already-configured workspace (or one
     relying on a global env var) is never interrupted. Resolution always
     keys off the given ``workspace``, never the process's own cwd — this
     matters when ``workspace`` differs from where the CLI happens to be
@@ -522,15 +524,28 @@ def _needs_setup(workspace: str) -> bool:
         settings = load_settings(config_path if config_path.exists() else None)
     except Exception:
         return True
+    if settings.llm.provider == "openai":
+        return not settings.openai_api_key
     return not settings.ollama_api_key
 
 
-async def _run_setup_wizard(workspace: str) -> bool:
-    """Interactively configure Ollama Cloud access and write ``nullain.toml``.
+#: (display label, settings.llm.provider value) — order is the order offered
+#: in the wizard's selection menu.
+_WIZARD_PROVIDER_CHOICES: list[tuple[str, str]] = [
+    ("Ollama Cloud (open-weight models, default)", "ollama"),
+    ("OpenAI-compatible (OpenAI, OpenRouter, Groq, vLLM, ...)", "openai"),
+]
 
-    Writes the config to ``<workspace>/nullain.toml`` — kept separate from
-    any project source under that workspace, mirroring how ``chat``/``run``
-    already scope everything else (memory, checkpoints, sessions) under
+
+async def _run_setup_wizard(workspace: str) -> bool:
+    """Interactively configure LLM provider access and write ``nullain.toml``.
+
+    Offers a provider choice (issue #40) before asking for connection
+    details — Ollama Cloud (the long-standing default) or any
+    OpenAI-compatible endpoint. Writes the config to
+    ``<workspace>/nullain.toml`` — kept separate from any project source
+    under that workspace, mirroring how ``chat``/``run`` already scope
+    everything else (memory, checkpoints, sessions) under
     ``<workspace>/.nullain/`` rather than touching the repo the agent will
     act on. This intentionally does not reuse the MCP section's regex-based
     TOML editor (``_edit_mcp_server``): a first-run file is written once,
@@ -541,7 +556,26 @@ async def _run_setup_wizard(workspace: str) -> bool:
         the user chose to keep it), False if the user aborted (e.g. Ctrl-D
         or Ctrl-C) — the caller should not proceed to ``chat`` in that case.
     """
-    print("Nullain Agent SDK — first-run setup")
+    print("Nullain Agent SDK — first-run setup\n")
+
+    try:
+        provider_idx = select(
+            "Which LLM provider?", [label for label, _value in _WIZARD_PROVIDER_CHOICES]
+        )
+    except (EOFError, OSError):
+        print("\nSetup aborted (no input available).", file=sys.stderr)
+        return False
+    provider_name = _WIZARD_PROVIDER_CHOICES[provider_idx][1]
+
+    if provider_name == "openai":
+        return await _run_setup_wizard_openai(workspace)
+    return await _run_setup_wizard_ollama(workspace)
+
+
+async def _run_setup_wizard_ollama(workspace: str) -> bool:
+    """The Ollama Cloud branch of the setup wizard — unchanged behavior from
+    before issue #40, just extracted so ``_run_setup_wizard`` can dispatch to
+    either provider branch."""
     print("No Ollama Cloud API key found for this workspace.\n")
 
     config_path = Path(workspace).resolve() / "nullain.toml"
@@ -609,6 +643,92 @@ async def _run_setup_wizard(workspace: str) -> bool:
                 "",
                 "[router.tiers.deep]",
                 f'models = ["{models["deep"]}"]',
+                "max_context = 128000",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    print(f"\nSaved {config_path}.")
+    print("(The API key is stored in this file — keep it out of version control.)\n")
+    return True
+
+
+async def _run_setup_wizard_openai(workspace: str) -> bool:
+    """The OpenAI-compatible branch of the setup wizard (issue #40).
+
+    Asks for a base_url (defaulting to OpenAI itself, but any
+    OpenAI-compatible endpoint — OpenRouter, Together, Groq, vLLM, LM
+    Studio, ...) works unmodified) and a model name, verifies the key with
+    a real health check exactly as the Ollama branch does, and writes
+    ``[llm] provider = "openai"`` plus the connection details.
+    """
+    print("No OpenAI-compatible API key found for this workspace.\n")
+
+    config_path = Path(workspace).resolve() / "nullain.toml"
+
+    try:
+        base_url = (
+            input("API base URL [https://api.openai.com]: ").strip() or "https://api.openai.com"
+        )
+        api_key = getpass.getpass("API key (input hidden): ").strip()
+    except EOFError:
+        print("\nSetup aborted (no input available).", file=sys.stderr)
+        return False
+
+    if not api_key:
+        print("No key entered — aborting setup.", file=sys.stderr)
+        return False
+
+    print("\nVerifying key...")
+    provider = OpenAICompatibleProvider(api_key=api_key, base_url=base_url)
+    try:
+        healthy = await provider.health_check()
+    except Exception as err:
+        print(f"Could not reach {base_url}: {err}", file=sys.stderr)
+        healthy = False
+    if not healthy:
+        try:
+            proceed = input("Health check failed. Save this config anyway? [y/N]: ")
+        except EOFError:
+            proceed = ""
+        if proceed.strip().lower() not in ("y", "yes"):
+            print("Setup aborted.", file=sys.stderr)
+            return False
+    else:
+        print("Key verified.")
+
+    try:
+        model = input("Default model [gpt-4o-mini]: ").strip() or "gpt-4o-mini"
+    except EOFError:
+        model = "gpt-4o-mini"
+
+    _ensure_gitignored(config_path)
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        "\n".join(
+            [
+                "# Nullain Agent SDK — generated by first-run setup",
+                f'openai_base_url = "{base_url}"',
+                f'openai_api_key = "{api_key}"',
+                "",
+                "[llm]",
+                'provider = "openai"',
+                "",
+                "[router]",
+                'fallback_chain = ["deep", "balanced", "fast"]',
+                "",
+                "[router.tiers.fast]",
+                f'models = ["{model}"]',
+                "max_context = 64000",
+                "",
+                "[router.tiers.balanced]",
+                f'models = ["{model}"]',
+                "max_context = 128000",
+                "",
+                "[router.tiers.deep]",
+                f'models = ["{model}"]',
                 "max_context = 128000",
                 "",
             ]

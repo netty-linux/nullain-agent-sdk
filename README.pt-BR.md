@@ -141,7 +141,7 @@ Uma explicação completa do pipeline de execução em seis fases (Intent → Ro
 
 - **Python 3.12+**
 - [**uv**](https://github.com/astral-sh/uv) — instalador rápido de pacotes Python
-- Uma chave de API da **[Ollama Cloud](https://ollama.com)** — por padrão o SDK conversa com os modelos hospedados da Ollama Cloud. Crie uma conta e gere uma chave, ou simplesmente rode `nullain` sem configuração e o assistente de primeira execução vai perguntar por ela.
+- Uma chave de API do seu provedor de LLM — **[Ollama Cloud](https://ollama.com)** (padrão, modelos open-weight) ou **qualquer endpoint compatível com OpenAI** (OpenAI, OpenRouter, Together, Groq, vLLM, LM Studio, ...). Crie uma conta e gere uma chave, ou simplesmente rode `nullain` sem configuração e o assistente de primeira execução vai perguntar qual provedor usar e pedir a chave.
 
 ### Instalar via PyPI
 
@@ -240,7 +240,7 @@ if __name__ == "__main__":
 | [docs/architecture.md](docs/architecture.md) | O pipeline completo de execução e a divisão em camadas. |
 | [docs/api-stability.md](docs/api-stability.md) | O que é API pública sob SemVer. |
 | [CHANGELOG.md](CHANGELOG.md) | Mudanças relevantes entre versões. |
-| [`examples/`](examples/) | Exemplos executáveis: `01_basic_agent.py` … `05_mcp_server.py`. |
+| [`examples/`](examples/) | Exemplos executáveis: `01_basic_agent.py` … `06_openai_compat_smoke.py`. |
 
 > Nota: os documentos em `docs/` estão em inglês; este README é a referência em português.
 
