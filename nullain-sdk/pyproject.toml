@@ -57,6 +57,15 @@ dependencies = [
 # without it the loader's fail-closed default refuses signed plugins rather than
 # loading them unverified. Unsigned plugins still load under require_signature=false.
 signing = ["cryptography>=42.0.0"]
+# RAG (Cuckoo Filter + RAG Tree, docs/FUSION_PLAN.md ADR-1): FastEmbed runs
+# embedding models in-process via ONNX Runtime (no PyTorch, no separate
+# service, no Ollama — bge-m3 isn't available on Ollama Cloud). qdrant-client
+# is the vector-store adapter. Both optional: nullain.rag's ports
+# (EmbeddingProvider, VectorStore) have zero dependency on either package;
+# only the concrete FastEmbedProvider/QdrantStore adapters import them,
+# lazily, so the base SDK install stays free of ~2GB of ONNX model weights
+# for callers who don't use RAG.
+rag = ["fastembed>=0.4.0", "qdrant-client>=1.10.0"]
 
 [project.urls]
 Homepage = "https://github.com/netty-linux/nullain-agent-sdk"
