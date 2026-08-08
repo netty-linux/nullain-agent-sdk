@@ -1,4 +1,4 @@
-.PHONY: check test cov lint format typecheck schema audit build clean
+.PHONY: check test cov lint format typecheck schema audit build clean bump-version bump-version-apply
 
 check: lint typecheck test
 
@@ -34,3 +34,16 @@ build:
 
 clean:
 	rm -rf .pytest_cache .ruff_cache .pyright_cache .coverage htmlcov coverage.xml build dist *.egg-info
+
+# Preview a version bump across all 7 version-carrying files (4
+# pyproject.toml + 3 __init__.py) plus the 4 internal dependency pins.
+# Dry-run only — no files written. Usage: make bump-version VERSION=0.2.0
+bump-version:
+	@test -n "$(VERSION)" || (echo "usage: make bump-version VERSION=0.2.0" && exit 1)
+	uv run python scripts/bump_version.py $(VERSION)
+
+# Same as bump-version but actually writes the files. Usage:
+# make bump-version-apply VERSION=0.2.0
+bump-version-apply:
+	@test -n "$(VERSION)" || (echo "usage: make bump-version-apply VERSION=0.2.0" && exit 1)
+	uv run python scripts/bump_version.py $(VERSION) --apply
