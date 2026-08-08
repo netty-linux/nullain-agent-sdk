@@ -140,6 +140,36 @@ class LSPTransportError(LSPError):
     pass
 
 
+class RagError(NullainError):
+    """Base exception for RAG (embedding/vector-store) failures."""
+
+    pass
+
+
+class EmbeddingError(RagError):
+    """Raised when an EmbeddingProvider fails to produce vectors for text."""
+
+    pass
+
+
+class VectorStoreError(RagError):
+    """Raised when a VectorStore operation fails (connect, write, or search)."""
+
+    pass
+
+
+class TenantIsolationError(RagError):
+    """Raised when a vector operation is attempted without a tenant_id.
+
+    Fail-closed: every write and read against the vector store must be
+    scoped to a tenant (docs/FUSION_PLAN.md's multi-tenant isolation
+    requirement) — approximate vector search can otherwise return another
+    tenant's data, which is a data-leakage risk, not just a correctness bug.
+    """
+
+    pass
+
+
 class SandboxError(NullainError):
     """Base exception for OS-level sandbox failures."""
 
@@ -217,6 +247,7 @@ __all__ = [
     "BudgetExceededError",
     "ContextError",
     "ContextWindowExhaustedError",
+    "EmbeddingError",
     "LSPError",
     "LSPProtocolError",
     "LSPTransportError",
@@ -234,12 +265,15 @@ __all__ = [
     "ProviderError",
     "ProviderRateLimitError",
     "ProviderTimeoutError",
+    "RagError",
     "RouterError",
     "SandboxError",
     "SandboxUnavailableError",
     "SpecValidationError",
+    "TenantIsolationError",
     "ToolError",
     "ToolExecutionError",
     "ToolNotFoundError",
     "ToolPermissionError",
+    "VectorStoreError",
 ]
