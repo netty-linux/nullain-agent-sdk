@@ -19,6 +19,7 @@ RunStatus = Literal[
     "success",
     "max_steps",
     "budget",
+    "quota_exceeded",
     "timeout",
     "context_exhausted",
     "verification_failed",
@@ -39,7 +40,10 @@ class RunResult(BaseModel):
             acceptance criteria were not met. ``max_steps`` means the loop
             exhausted its step budget without a final answer. ``budget``,
             ``timeout`` and ``context_exhausted`` are terminal-resource
-            failures. ``loop_detected`` means the agent repeated the same
+            failures. ``quota_exceeded`` means a configured ``QuotaChecker``
+            (ADR-4) denied the step — a tenant/billing-level budget, distinct
+            from ``budget`` (the per-run token ceiling). ``loop_detected``
+            means the agent repeated the same
             tool calls for several consecutive steps and was stopped.
             ``cancelled`` means the run was cancelled (e.g. via a daemon
             ``session.cancel`` or closed stdin) and returned a structured

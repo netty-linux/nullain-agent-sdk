@@ -56,6 +56,7 @@ from nullain.llm import (
 )
 from nullain.memory import EpisodicMemory, PersistentMemory, TrajectoryRecord
 from nullain.ports.clock import Clock, SystemClock
+from nullain.quota import QuotaChecker, QuotaExceededError
 from nullain.router import Complexity, IntentParser, ModelRouter
 from nullain.telemetry import get_cost_tracker, get_logger
 from nullain.telemetry import span as telemetry_span
@@ -177,6 +178,7 @@ class AgentLoop:
         progress_window: int = 5,
         authority: Authority | None = None,
         tool_factory: Callable[[Path], ToolRegistry] | None = None,
+        quota_checker: QuotaChecker | None = None,
     ) -> None:
         """Initialize AgentLoop with integrated engine collaborators.
 
@@ -233,6 +235,13 @@ class AgentLoop:
                 workspace root at creation time, so a worktree-isolated child
                 needs a registry re-rooted at the worktree directory. When
                 None, worktree isolation is refused.
+            quota_checker: Optional per-tenant quota enforcement (ADR-4,
+                docs/FUSION_PLAN.md). Consulted before each step, alongside
+                ``max_tokens`` — a denial raises ``QuotaExceededError``,
+                distinct from ``BudgetExceededError`` (the per-run token
+                ceiling, unrelated to any tenant/billing concept). None (the
+                default) means no quota enforcement, identical to prior
+                behavior.
         """
         self.workspace_root = Path(workspace_root).resolve()
         self.provider = provider
@@ -242,6 +251,7 @@ class AgentLoop:
         self.event_store = event_store
         self.explicit_model = model
         self.router = router or ModelRouter()
+        self.quota_checker = quota_checker
         self.intent_parser = intent_parser or IntentParser()
         self.context_manager = context_manager or ContextManager()
         self.spec_validator = spec_validator or SpecValidator()
@@ -839,6 +849,18 @@ class AgentLoop:
             await self._emit(err_ev)
             raise BudgetExceededError(f"Token budget of {self.max_tokens} exceeded")
 
+        if self.quota_checker is not None:
+            try:
+                await self.quota_checker.check(sess_id)
+            except QuotaExceededError as err:
+                err_ev = ErrorEvent(
+                    session_id=sess_id,
+                    error_type="QuotaExceededError",
+                    message=str(err),
+                )
+                await self._emit(err_ev)
+                raise
+
         # Compact based on actual context size, not cumulative. Reuse the
         # incremental fold shared with _build_messages (M10 D3). Prefer the
         # provider-reported real prompt-token count (M10 D5) when available,
@@ -1300,6 +1322,9 @@ class AgentLoop:
         except BudgetExceededError as err:
             terminal_status = "budget"
             terminal_error = str(err)
+        except QuotaExceededError as err:
+            terminal_status = "quota_exceeded"
+            terminal_error = str(err)
         except ContextWindowExhaustedError as err:
             terminal_status = "context_exhausted"
             terminal_error = str(err)
@@ -1748,6 +1773,8 @@ class AgentLoop:
         """
         if result.status == "budget":
             raise BudgetExceededError(result.error or "Token budget exceeded")
+        if result.status == "quota_exceeded":
+            raise QuotaExceededError(result.error or "Quota exceeded")
         if result.status == "context_exhausted":
             raise ContextWindowExhaustedError(result.error or "Context window exhausted")
         if result.status == "timeout":
