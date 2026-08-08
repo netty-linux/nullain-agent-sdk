@@ -265,15 +265,17 @@ Coleção única `nullain_rag` (Free Tier tem limite de coleções — melhor 1 
 
 Suficiente com folga pro lançamento. Ativar quantização escalar quando passar de ~100 mil vetores — mudança de config da coleção, zero mudança de código. Texto completo dos chunks fica no Supabase; o Qdrant guarda só `text_preview`.
 
-### Supabase — schema (Free Tier)
+### Supabase — schema (Free Tier) — IMPLEMENTADO na Fase 4
 
-Tabelas relacionais (Postgres):
+SQL completo em [`docs/supabase/schema.sql`](supabase/schema.sql). Tabelas relacionais (Postgres):
 
-- `checkpoints` — substitui o `AsyncPostgresSaver` do LangGraph E complementa o `EventStore` (ver ADR-2)
-- `sessions` — thread_id, tenant_id, created_at, last_active_at, model, status
-- `users` — id, email, tier (free/pro/enterprise — já existe o conceito em `PlanTierLimits`)
-- `metadata` — chave-valor genérico por sessão/usuário (preferências, projeto ativo etc. — parecido com o que `agent/memory.py` faz hoje em Redis+local)
-- `traces` — log estruturado de execução (tool calls, decisões do router, erros) — observabilidade/read model derivado do EventBus, **nunca escrita paralela**, não é fonte da verdade
+- `events` — append-only, escrita por `nullain.events.postgres_store.PostgresEventStore` (`EventStorePort` adapter — ver ADR-2). **Substitui `checkpoints`**: na hora de desenhar o schema, ficou claro que uma tabela `checkpoints` separada seria redundante — `events` já é o mecanismo de resume/replay (mesmo papel do `AsyncPostgresSaver` do LangGraph), então não existe uma segunda tabela de checkpoint.
+- `sessions` — thread_id, tenant_id, created_at, last_active_at, model, status. Escrita pelo App, não pelo SDK.
+- `users` — id, email, tier (free/pro/enterprise — já existe o conceito em `PlanTierLimits`). Escrita pelo App.
+- `metadata` — chave-valor genérico por sessão/usuário (preferências, projeto ativo etc. — parecido com o que `agent/memory.py` faz hoje em Redis+local). Escrita pelo App.
+- `traces` — log estruturado de execução (tool calls, decisões do router, erros) — observabilidade/read model derivado do EventBus, **nunca escrita paralela**, não é fonte da verdade. Escrita pelo App.
+
+**Divisão de responsabilidade:** o SDK só é dono da tabela `events` (via `PostgresEventStore`) — `sessions`/`users`/`metadata`/`traces` são dado relacional da aplicação, o SDK nunca lê nem escreve nelas.
 
 
 ## 5. Injeção de contexto (SLM-first, per Raphael)
@@ -291,12 +293,12 @@ Registrar a decisão sem implementar ainda: quando sair do Free Tier, o processo
 
 ## 7. Fases de execução
 
-- **Fase 0 — Fundação (sem quebrar nada em prod):** criar `AgentBridge` no app, rodando em paralelo ao `build_agent()` atual atrás de um feature flag. Provar que `nullain.Agent` consegue: (a) rodar com `OpenAICompatibleProvider` apontando pro mesmo endpoint Ollama Cloud/xAI que o app já usa, (b) expor pelo menos 1 tool Composio real via `RegisteredTool`, (c) emitir eventos que o `AgentBridge` traduz pro formato SSE (status/token/tool/error/done) que o frontend já entende — **sem mudar o frontend**.
-- **Fase 1 — Paridade de tools:** portar Wavespeed, ZuckPay, sandbox tools, Composio (todas) pro `ToolRegistry` do SDK via `AgentBridge`. Resolver a injeção de `user_email`/tenant no contexto de execução da tool.
-- **Fase 2 — Cortar o LangGraph:** trocar `web/server.py` pra usar só `AgentBridge`, remover `agent/chat.py`'s `build_agent`/LangChain, remover singleton global por `app.state` scoped por tenant/sessão.
-- **Fase 3 — RAG novo:** construir Cuckoo Filter + RAG Tree + `EmbeddingProvider` (FastEmbed) + Qdrant no SDK, com o teste de isolamento multi-tenant como gate. Criar a coleção `nullain_rag` com a dimensão do adapter ativo. Rodar em paralelo ao AnythingLLM (flag), comparar qualidade, então remover AnythingLLM.
-- **Fase 4 — Supabase:** schema `users/sessions/metadata/traces` + **`PostgresEventStore` nativo no SDK** (ADR-2, opção b). Tabela `events` append-only (`session_id`, `seq`, `event_type`, `payload`, `created_at`), mesma semântica de resume/repair do SQLite — repair automático é feature do port, não do backend. SQLite continua default do SDK standalone e dev local; Postgres/Supabase entra via `nullain.toml` em prod. Um dono só da persistência por ambiente.
-- **Fase 5 — Limpeza final:** remover `agent/supervisor.py` (sem portar — ADR-3), `agent/resilience.py`, `agent/mcp_client.py` (langchain_mcp_adapters), duplicação de `ModelRouter` em `agent/models.py`. Implementar `QuotaHook` (ADR-4) se ainda não estiver feito.
+- ✅ **Fase 0 — Fundação (sem quebrar nada em prod):** criar `AgentBridge` no app, rodando em paralelo ao `build_agent()` atual atrás de um feature flag. Provar que `nullain.Agent` consegue: (a) rodar com `OpenAICompatibleProvider` apontando pro mesmo endpoint Ollama Cloud/xAI que o app já usa, (b) expor pelo menos 1 tool Composio real via `RegisteredTool`, (c) emitir eventos que o `AgentBridge` traduz pro formato SSE (status/token/tool/error/done) que o frontend já entende — **sem mudar o frontend**.
+- ✅ **Fase 1 — Paridade de tools:** portar Wavespeed, ZuckPay, sandbox tools, Composio (todas) pro `ToolRegistry` do SDK via `AgentBridge`. Resolver a injeção de `user_email`/tenant no contexto de execução da tool.
+- ✅ **Fase 2 — Cortar o LangGraph:** trocar `web/server.py` pra usar só `AgentBridge`, remover `agent/chat.py`'s `build_agent`/LangChain, remover singleton global por `app.state` scoped por tenant/sessão.
+- ✅ **Fase 3 — RAG novo:** construir Cuckoo Filter + RAG Tree + `EmbeddingProvider` (FastEmbed) + Qdrant no SDK, com o teste de isolamento multi-tenant como gate. Criar a coleção `nullain_rag` com a dimensão do adapter ativo. Rodar em paralelo ao AnythingLLM (flag), comparar qualidade, então remover AnythingLLM.
+- ✅ **Fase 4 — Supabase:** schema `users/sessions/metadata/traces` (`docs/supabase/schema.sql`) + **`PostgresEventStore` nativo no SDK** (`nullain.events.postgres_store`, ADR-2, opção b). Tabela `events` append-only (`session_id`, `seq`, `event_type`, `payload`, `created_at`), mesma semântica de resume/repair do SQLite — repair automático é feature do port (`EventStorePort`, extraído nesta fase), não do backend. SQLite (`SQLiteEventStore`) continua default do SDK standalone e dev local; Postgres/Supabase entra via `PostgresEventStore(dsn=...)`. Um dono só da persistência por ambiente.
+- ⬜ **Fase 5 — Limpeza final:** remover `agent/supervisor.py` (sem portar — ADR-3), `agent/resilience.py`, duplicação de `ModelRouter` em `agent/models.py` (trabalho no repo do App). Implementar `QuotaHook` (ADR-4) no SDK. `agent/mcp_client.py` (langchain_mcp_adapters) já foi removido na Fase 2 (ficou órfão quando `agent/chat.py` saiu).
 
 **Cada fase termina em app funcionando de ponta a ponta antes da próxima começar** — nunca um "big bang" de troca total.
 
