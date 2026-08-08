@@ -9,7 +9,29 @@ covered by that guarantee at this pre-1.0 stage.
 
 ## [Unreleased]
 
+## [0.2.0]
+
 ### Added
+- `nullain.rag`: Cuckoo Filter + RAG Tree + `EmbeddingProvider`
+  (`FastEmbedProvider`, in-process ONNX, no PyTorch/Ollama) +
+  `VectorStore` (`QdrantStore`), all tenant-scoped by construction —
+  `VectorStore.scoped_search` is the only search entry point, always
+  filtered by `tenant_id`. Optional `[rag]` extra
+  (`fastembed`, `qdrant-client`).
+- `nullain.events.PostgresEventStore`: production `EventStorePort`
+  adapter backed by Postgres/Supabase, for deployments running more than
+  one agent-process replica against shared session history. Same
+  append-only schema and `seq`-ordered resume semantics as
+  `SQLiteEventStore` (renamed from `EventStore`, kept as a backward
+  -compatible alias). `EventStorePort` extracted as the shared Protocol
+  both adapters implement. Optional `[postgres]` extra (`asyncpg`).
+- `nullain.quota.QuotaChecker`: an in-process Protocol consulted by
+  `AgentLoop` before each step, alongside the existing `max_tokens`
+  budget check — for tenant/billing-level quota enforcement, deliberately
+  separate from `HookManager` (subprocess-based, no pre-LLM-call
+  lifecycle point). A denial raises `QuotaExceededError` and surfaces as
+  `RunResult.status == "quota_exceeded"`, distinct from `"budget"` (the
+  per-run token ceiling).
 - Arrow-key Yes/No/Always permission menu for `ASK`-level tool calls in
   the interactive chat, replacing the typed `y/N` prompt.
 - Up/Down command history in the interactive chat, scoped to the current
@@ -51,6 +73,6 @@ covered by that guarantee at this pre-1.0 stage.
 - Configurable `bash_timeout` (default 300s, up from a hardcoded 120s)
   so long-running commands aren't killed mid-execution.
 
-## [0.1.0] — Unreleased
+## [0.1.0]
 
-Initial pre-release version. Not yet published to PyPI.
+Initial pre-release version.
