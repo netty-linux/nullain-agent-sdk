@@ -128,3 +128,95 @@ async def test_web_search_honors_custom_headers_override() -> None:
     tool = create_web_search_tool(headers={"User-Agent": "MyCompanyBot/1.0"})
     await tool.func(query="anything")
     assert route.calls.last.request.headers["user-agent"] == "MyCompanyBot/1.0"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_web_search_uses_searxng_when_configured_and_skips_ddg() -> None:
+    searxng_route = respx.get("http://searxng.local/search").respond(
+        200,
+        json={
+            "results": [
+                {
+                    "title": "SearXNG result",
+                    "url": "https://example.com/searxng-hit",
+                    "content": "a snippet from searxng",
+                }
+            ]
+        },
+    )
+    ddg_route = respx.get("https://html.duckduckgo.com/html/").respond(200, text=_SAMPLE_DDG_HTML)
+
+    tool = create_web_search_tool(searxng_base_url="http://searxng.local")
+    out = await tool.func(query="anything")
+
+    assert searxng_route.called
+    assert not ddg_route.called
+    assert "https://example.com/searxng-hit" in out
+    assert "a snippet from searxng" in out
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_web_search_falls_back_to_ddg_when_searxng_unreachable() -> None:
+    respx.get("http://searxng.local/search").mock(
+        side_effect=httpx.ConnectError("connection refused")
+    )
+    ddg_route = respx.get("https://html.duckduckgo.com/html/").respond(200, text=_SAMPLE_DDG_HTML)
+
+    tool = create_web_search_tool(searxng_base_url="http://searxng.local")
+    out = await tool.func(query="python asyncio tutorial")
+
+    assert ddg_route.called
+    assert "https://realpython.com/async-io-python/" in out
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_web_search_falls_back_to_ddg_on_searxng_http_error() -> None:
+    respx.get("http://searxng.local/search").respond(500, text="internal error")
+    ddg_route = respx.get("https://html.duckduckgo.com/html/").respond(200, text=_SAMPLE_DDG_HTML)
+
+    tool = create_web_search_tool(searxng_base_url="http://searxng.local")
+    out = await tool.func(query="python asyncio tutorial")
+
+    assert ddg_route.called
+    assert "https://realpython.com/async-io-python/" in out
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_web_search_falls_back_to_ddg_on_searxng_malformed_json() -> None:
+    respx.get("http://searxng.local/search").respond(200, text="not json at all")
+    ddg_route = respx.get("https://html.duckduckgo.com/html/").respond(200, text=_SAMPLE_DDG_HTML)
+
+    tool = create_web_search_tool(searxng_base_url="http://searxng.local")
+    out = await tool.func(query="python asyncio tutorial")
+
+    assert ddg_route.called
+    assert "https://realpython.com/async-io-python/" in out
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_web_search_falls_back_to_ddg_on_searxng_empty_results() -> None:
+    respx.get("http://searxng.local/search").respond(200, json={"results": []})
+    ddg_route = respx.get("https://html.duckduckgo.com/html/").respond(200, text=_SAMPLE_DDG_HTML)
+
+    tool = create_web_search_tool(searxng_base_url="http://searxng.local")
+    out = await tool.func(query="python asyncio tutorial")
+
+    assert ddg_route.called
+    assert "https://realpython.com/async-io-python/" in out
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_web_search_without_searxng_base_url_never_calls_searxng() -> None:
+    """Default behavior (searxng_base_url=None) must be identical to
+    before this parameter existed — DuckDuckGo only, no attempt to reach
+    any SearXNG endpoint at all."""
+    ddg_route = respx.get("https://html.duckduckgo.com/html/").respond(200, text=_SAMPLE_DDG_HTML)
+    tool = create_web_search_tool()
+    await tool.func(query="anything")
+    assert ddg_route.called
