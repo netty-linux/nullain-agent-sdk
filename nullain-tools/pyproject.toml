@@ -30,6 +30,15 @@ dependencies = [
     "httpx>=0.27.0",
 ]
 
+[project.optional-dependencies]
+# web_fetch's Crawl4AI/Playwright rendering path (create_web_fetch_tool's
+# use_crawl4ai=True). Optional: web_fetch works with plain httpx alone;
+# _fetch_via_crawl4ai degrades to a clean failure (never raises) when this
+# extra isn't installed, so the base install stays free of Playwright's
+# Chromium download. `playwright install chromium` is still needed
+# separately after installing this extra — pip can't run it for you.
+crawl = ["crawl4ai>=0.4.0"]
+
 [project.urls]
 Homepage = "https://github.com/netty-linux/nullain-agent-sdk"
 Repository = "https://github.com/netty-linux/nullain-agent-sdk"

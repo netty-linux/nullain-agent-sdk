@@ -174,6 +174,16 @@ class WebFetchConfig(BaseModel):
     #: it is the operator's own infrastructure commitment, hence opt-in
     #: rather than a new default.
     searxng_base_url: str | None = None
+    #: When True, ``web_fetch`` renders every fetch with a real headless
+    #: browser (Crawl4AI/Playwright) before falling back to plain httpx —
+    #: solves pages whose content only appears after JavaScript runs, and
+    #: as a side effect of looking like a real browser, some (not all)
+    #: sites that block bare HTTP clients. Requires the SDK's ``crawl``
+    #: extra and a Chromium install on the host; opt-in because of that
+    #: infrastructure cost (~600MB, browser memory per instance), not a
+    #: new default. False (the default) is unchanged from before this
+    #: setting existed.
+    use_crawl4ai: bool = False
 
 
 class PluginEntryConfig(BaseModel):
