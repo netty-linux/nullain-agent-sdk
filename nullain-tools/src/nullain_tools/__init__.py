@@ -34,6 +34,7 @@ def register_default_tools(
     web_fetch_headers: dict[str, str] | None = None,
     web_search_headers: dict[str, str] | None = None,
     searxng_base_url: str | None = None,
+    web_fetch_use_crawl4ai: bool = False,
 ) -> None:
     """Register all built-in tools into a ToolRegistry.
 
@@ -75,6 +76,11 @@ def register_default_tools(
         searxng_base_url: Base URL of a self-hosted SearXNG instance for
             ``web_search`` to try before falling back to DuckDuckGo. None
             (the default) uses DuckDuckGo directly.
+        web_fetch_use_crawl4ai: When True, ``web_fetch`` tries a real
+            headless browser (Crawl4AI/Playwright) before plain httpx.
+            Requires the ``crawl`` extra and a Chromium install at
+            runtime; degrades to plain httpx if either is missing. False
+            (the default) is identical to before this parameter existed.
     """
     tools: list[RegisteredTool] = []
     tools.extend(
@@ -96,7 +102,9 @@ def register_default_tools(
             workspace_root, sandbox=sandbox, sandbox_opts=sandbox_opts, timeout=bash_timeout
         )
     )
-    tools.append(create_web_fetch_tool(headers=web_fetch_headers))
+    tools.append(
+        create_web_fetch_tool(headers=web_fetch_headers, use_crawl4ai=web_fetch_use_crawl4ai)
+    )
     tools.append(
         create_web_search_tool(headers=web_search_headers, searxng_base_url=searxng_base_url)
     )

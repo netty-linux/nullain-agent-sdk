@@ -219,6 +219,7 @@ class Agent:
                     "Accept-Language": self._settings.web_fetch.accept_language,
                 },
                 searxng_base_url=self._settings.web_fetch.searxng_base_url,
+                web_fetch_use_crawl4ai=self._settings.web_fetch.use_crawl4ai,
             )
 
     def _build_default_provider(self) -> LLMProvider:
