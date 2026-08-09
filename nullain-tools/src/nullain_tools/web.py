@@ -16,6 +16,11 @@ _MAX_RESPONSE_CHARS = 50_000
 _REQUEST_TIMEOUT = 30.0
 _USER_AGENT = "Nullain-Agent-SDK/0.1 (+web_fetch)"
 
+#: Status codes a site commonly returns for bot detection, paywalls, or
+#: rate limiting — distinct from a genuine "this URL is broken" error, so
+#: the agent can tell "try a different source" apart from "fix the URL".
+_BOT_BLOCK_STATUS_CODES = frozenset({401, 403, 429})
+
 # Block-level tags that should introduce a line break when stripped.
 _BLOCK_TAGS = re.compile(r"</?(p|div|br|li|h[1-6]|tr|section|article|header|footer)[^>]*>", re.I)
 _SCRIPT_STYLE = re.compile(r"<(script|style)[^>]*>.*?</\1>", re.I | re.DOTALL)
@@ -35,7 +40,23 @@ def html_to_text(html: str) -> str:
     return "\n".join(line for line in lines if line)
 
 
-def create_web_fetch_tool() -> RegisteredTool:
+def create_web_fetch_tool(headers: dict[str, str] | None = None) -> RegisteredTool:
+    """Build the ``web_fetch`` tool.
+
+    Args:
+        headers: HTTP headers sent on every request, overriding the
+            default ``User-Agent``/``Accept``/``Accept-Language``. When
+            None, the honest bot-identifying defaults are used (see
+            ``nullain.config.WebFetchConfig``'s docstring for why those
+            are the default rather than a spoofed browser User-Agent).
+    """
+    request_headers = {
+        "User-Agent": _USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+        **(headers or {}),
+    }
+
     @tool(
         name="web_fetch",
         description=(
@@ -57,16 +78,20 @@ def create_web_fetch_tool() -> RegisteredTool:
             async with httpx.AsyncClient(
                 timeout=_REQUEST_TIMEOUT,
                 follow_redirects=True,
-                headers={"User-Agent": _USER_AGENT},
+                headers=request_headers,
             ) as client:
                 response = await client.get(url)
                 response.raise_for_status()
         except httpx.HTTPStatusError as err:
-            return ToolResult(
-                output=f"Error: HTTP {err.response.status_code} for '{url}'.",
-                is_error=True,
-                error_type="ToolError",
-            )
+            status = err.response.status_code
+            message = f"Error: HTTP {status} for '{url}'."
+            if status in _BOT_BLOCK_STATUS_CODES:
+                message += (
+                    " This site is likely blocking automated requests (bot "
+                    "detection, paywall, or rate limiting) — retrying this "
+                    "same URL will not help; use a different source instead."
+                )
+            return ToolResult(output=message, is_error=True, error_type="ToolError")
         except httpx.RequestError as err:
             return ToolResult(
                 output=f"Error: Request failed for '{url}': {err}.",

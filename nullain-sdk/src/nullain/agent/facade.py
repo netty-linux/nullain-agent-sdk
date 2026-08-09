@@ -205,6 +205,11 @@ class Agent:
                 ),
                 event_bus=self.event_bus,
                 bash_timeout=self._settings.agent.bash_timeout,
+                web_fetch_headers={
+                    "User-Agent": self._settings.web_fetch.user_agent,
+                    "Accept": self._settings.web_fetch.accept,
+                    "Accept-Language": self._settings.web_fetch.accept_language,
+                },
             )
 
     def _build_default_provider(self) -> LLMProvider:
