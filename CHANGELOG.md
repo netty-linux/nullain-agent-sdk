@@ -9,6 +9,24 @@ covered by that guarantee at this pre-1.0 stage.
 
 ## [Unreleased]
 
+## [0.3.0]
+
+### Added
+- `nullain.config.WebFetchConfig`: new `[web_fetch]` `nullain.toml` section
+  (`user_agent`, `accept`, `accept_language`) letting an operator override
+  the HTTP headers `web_fetch` sends on every request. Default stays an
+  honest bot-identifying `User-Agent` (`Nullain-Agent-SDK/0.1
+  (+web_fetch)`) — sites enforcing anti-scraping policy against it is
+  expected behavior, not something to route around with a spoofed
+  browser User-Agent by default.
+
+### Changed
+- `web_fetch` now appends a clear hint to HTTP 401/403/429 responses
+  ("this site is likely blocking automated requests ... use a different
+  source instead") so the agent stops retrying a blocked URL and looks
+  elsewhere. Left unchanged for other statuses (404, 400, ...), which are
+  usually a genuine broken-URL/bad-request error rather than a block.
+
 ## [0.2.0]
 
 ### Added
