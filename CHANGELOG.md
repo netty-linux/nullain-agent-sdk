@@ -9,6 +9,44 @@ covered by that guarantee at this pre-1.0 stage.
 
 ## [Unreleased]
 
+## [0.5.0] (nullain-sdk) / [0.4.0] (nullain-tools)
+
+### Added
+- `web_search` now tries a self-hosted SearXNG instance first (via
+  `WebSearchConfig`-equivalent `searxng_base_url` / `register_default_tools(searxng_base_url=...)`),
+  falling back automatically to the existing DuckDuckGo scrape on any
+  failure (timeout, non-2xx, malformed JSON, empty results). Unconfigured,
+  behavior is unchanged — DuckDuckGo only.
+- `web_fetch` can now render pages with Crawl4AI (a real headless browser)
+  before falling back, via `WebFetchConfig.use_crawl4ai` /
+  `register_default_tools(web_fetch_use_crawl4ai=True)`. Solves JS-heavy
+  pages plain `httpx` can't render. The existing Wayback Machine fallback
+  is unchanged and still triggers on a bot-block response from either
+  path. Requires the `nullain-tools[crawl]` extra; degrades to a clean
+  failure (never raises) if it's missing.
+- `PostgresEventStore.append()` now enqueues onto a bounded in-process
+  queue and returns immediately instead of awaiting the INSERT inline,
+  removing per-event Postgres round-trip latency from the agent loop's
+  critical path. A single background task drains the queue in batches via
+  `executemany`. New `flush()` method waits for the queue to fully drain;
+  `get_session_events`/`list_session_ids`/`get_latest_session_id` all call
+  it automatically before reading, so resume/replay never observes a
+  truncated trajectory. `close()` flushes before closing the pool. See the
+  module docstring for the full design and the "accepted for write" vs
+  "durably written" semantics this introduces (`SQLiteEventStore` is
+  unaffected — it remains synchronous).
+- `configure_tracing(exporter="otlp")`: ships spans to a real OTLP/HTTP
+  backend (Jaeger, Tempo, Honeycomb, ...) via the new `otlp` extra,
+  honoring the standard `OTEL_EXPORTER_OTLP_*` env vars. Previously, any
+  `exporter` value other than `"console"` silently installed no span
+  processor at all — that's now a `ValueError` instead of a silent no-op.
+- `ContextManager`'s LLM-based compaction now asks the model for a
+  structured `StateSummary` (key decisions, files changed, errors
+  encountered, outstanding work) via a forced tool call, rendered to the
+  same prose shape `CompactionEvent.summary` always had. Falls back to
+  free-text (then to the structural summary) if the model ignores the
+  tool or returns malformed arguments.
+
 ## [0.4.0] (nullain-sdk) / [0.3.0] (nullain-tools)
 
 ### Added
