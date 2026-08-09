@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shlex
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any, cast
@@ -16,6 +17,45 @@ from nullain.tools.result import ToolResult
 # Async callback invoked when a tool action resolves to ASK. Receives the tool
 # name and a human-readable description of the action; resolves True to grant.
 PermissionCallback = Callable[[str, str], Awaitable[bool]]
+
+
+def _normalize_bash_arguments(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Alias `bash`'s `command: str` to the real `command_args: list[str]`
+    parameter, in-place at the registry boundary.
+
+    `create_bash_tool`'s schema has always been `command_args: list[str]`
+    (a full argv, no shell interpretation) — the only shape execute_subprocess
+    accepts. In production, models across providers (confirmed with
+    glm-5.2:cloud) reliably guess the far more common `command: str` shape
+    used by most other agent frameworks' bash/shell tools instead of reading
+    the declared schema, and a raw TypeError from the tool function was the
+    only feedback the model got back. Normalizing here — BEFORE
+    `_evaluate_permission` runs, not inside the tool function — is required
+    for `evaluate_command`'s deny-pattern check to still see the real
+    command; normalizing only at the tool-function boundary would let a
+    `command` string bypass that check entirely (it falls through to
+    `PermissionLevel.ALLOW` for non-list `command_args` today).
+
+    `shlex.split` mirrors a POSIX shell's own tokenization (quoting,
+    escaping) without ever invoking a shell — the result is still a plain
+    argv list passed to `execute_subprocess`'s `cmd_args`, the same
+    no-shell-interpretation contract `command_args` already had.
+    """
+    if name != "bash" or "command_args" in arguments or "command" not in arguments:
+        return arguments
+    raw_command = arguments["command"]
+    if not isinstance(raw_command, str):
+        return arguments
+    normalized = dict(arguments)
+    del normalized["command"]
+    try:
+        normalized["command_args"] = shlex.split(raw_command)
+    except ValueError:
+        # Unbalanced quotes etc. — fall back to whitespace splitting so the
+        # tool still gets a list (and a sensible error from execute_subprocess
+        # if the command genuinely doesn't exist) instead of a TypeError.
+        normalized["command_args"] = raw_command.split()
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -247,6 +287,7 @@ class ToolRegistry:
         Returns:
             Structured :class:`ToolResult` of the execution.
         """
+        arguments = _normalize_bash_arguments(name, arguments)
         registered = self.get_tool(name)
         # Authority-intersection gate (subagents only; None = unrestricted root).
         if self.authority is not None and not self.authority.permits(name, registered.requires):
