@@ -9,6 +9,19 @@ covered by that guarantee at this pre-1.0 stage.
 
 ## [Unreleased]
 
+## [0.3.2]
+
+### Fixed
+- `ToolRegistry.execute` now aliases the `bash` tool's `command: str`
+  argument to its real `command_args: list[str]` parameter (via
+  `shlex.split`, still a plain argv — no shell interpretation). Models
+  across providers reliably guess `command: str` (the shape most other
+  agent frameworks use) instead of reading the actual schema, previously
+  crashing with a raw `TypeError`. The normalization happens before the
+  permission policy's deny-pattern check runs, so a `command` string
+  can't bypass `evaluate_command`'s destructive-command denial the way
+  an unrecognized non-list value would.
+
 ## [0.3.1]
 
 ### Fixed
