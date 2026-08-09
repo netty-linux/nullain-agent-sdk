@@ -1,7 +1,10 @@
 """Nullain Agent SDK — ContextManager for Context Window Compaction and Defenses."""
 
+import json
 from collections.abc import Sequence
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
+
+from pydantic import BaseModel, Field, ValidationError
 
 from nullain.agent.spec import TaskSpec
 from nullain.events import (
@@ -12,13 +15,60 @@ from nullain.events import (
     UserMessageEvent,
 )
 from nullain.llm.provider import LLMProvider
-from nullain.llm.types import ChatMessage, CompletionRequest
+from nullain.llm.types import ChatMessage, CompletionRequest, FunctionSpec, ToolSpec
 from nullain.telemetry import get_logger
 
 if TYPE_CHECKING:
     pass
 
 logger = get_logger(__name__)
+
+
+class StateSummary(BaseModel):
+    """Structured recap of a compacted trajectory segment — the same
+    information `_llm_summarize`'s free-text prompt always asked for
+    ("key decisions, file changes, errors encountered, and outstanding
+    work"), now as discrete fields instead of prose the caller can only
+    treat as an opaque string.
+
+    Obtained via forced tool-calling (see `_llm_summarize`'s
+    `emit_state_summary` tool), the same pattern `AgentLoop._generate_spec`
+    already uses for `TaskSpec` — not a new structured-output mechanism,
+    reusing the one this SDK already trusts for exactly this problem
+    (smaller open-source models are more prone to malformed free-text
+    JSON than to malformed tool-call arguments).
+
+    Rendered back to plain text before becoming `CompactionEvent.summary`
+    (still typed `str`, unchanged) rather than replacing it — keeping this
+    an internal implementation detail instead of a public schema change
+    to `EventStorePort`'s event shapes, and avoiding a ripple into
+    `events/store.py`, `events/repair.py`, and `events/conversation.py`'s
+    fold logic that a typed field on `CompactionEvent` itself would force.
+    """
+
+    key_decisions: list[str] = Field(default_factory=list)
+    files_changed: list[str] = Field(default_factory=list)
+    errors_encountered: list[str] = Field(default_factory=list)
+    outstanding_work: list[str] = Field(default_factory=list)
+
+    def render(self) -> str:
+        """Render back to the same prose shape `_llm_summarize` used to
+        return directly, so `CompactionEvent.summary` stays a `str` a
+        reader (human or model re-reading its own compacted history)
+        can consume without knowing this structure exists."""
+        parts: list[str] = []
+        if self.key_decisions:
+            parts.append("Key decisions:\n" + "\n".join(f"- {d}" for d in self.key_decisions))
+        if self.files_changed:
+            parts.append("Files changed:\n" + "\n".join(f"- {f}" for f in self.files_changed))
+        if self.errors_encountered:
+            parts.append(
+                "Errors encountered:\n" + "\n".join(f"- {e}" for e in self.errors_encountered)
+            )
+        if self.outstanding_work:
+            parts.append("Outstanding work:\n" + "\n".join(f"- {w}" for w in self.outstanding_work))
+        return "\n\n".join(parts) if parts else "(no notable decisions, changes, or errors)"
+
 
 # Number of recent events kept verbatim (not summarized) during compaction.
 _RECENT_KEEP = 4
@@ -56,9 +106,10 @@ class ContextManager:
       the active spec objective and the user prompts verbatim. Honest about
       being structural — it does NOT claim to semantically summarize.
     - **LLM summarization** (provider + model passed to ``compact``): asks the
-      model to recap the compacted events concisely, preserving key decisions,
-      file changes and outstanding work. Falls back to the structural summary
-      if the provider call fails.
+      model for a structured ``StateSummary`` (key decisions, file changes,
+      errors, outstanding work) via forced tool-calling, then renders it to
+      text — falls back to free-text prose if the model ignores the tool,
+      and to the structural summary if the provider call fails entirely.
     """
 
     def __init__(
@@ -242,6 +293,29 @@ class ContextManager:
             parts.append(f"User Prompts: {' | '.join(user_prompts)}")
         return "\n".join(parts)
 
+    #: JSON Schema for the synthetic `emit_state_summary` tool
+    #: `_llm_summarize` forces the model to call — mirrors
+    #: `StateSummary`'s fields exactly, and the same forced-tool-calling
+    #: pattern `AgentLoop._generate_spec` already uses for `TaskSpec`
+    #: (chosen there, and reused here, because smaller open-source models
+    #: are more prone to malformed free-text JSON than to malformed
+    #: tool-call arguments — see that method's docstring).
+    _STATE_SUMMARY_TOOL = ToolSpec(
+        function=FunctionSpec(
+            name="emit_state_summary",
+            description="Emit a structured recap of the compacted conversation trajectory.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "key_decisions": {"type": "array", "items": {"type": "string"}},
+                    "files_changed": {"type": "array", "items": {"type": "string"}},
+                    "errors_encountered": {"type": "array", "items": {"type": "string"}},
+                    "outstanding_work": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        )
+    )
+
     async def _llm_summarize(
         self,
         provider: LLMProvider,
@@ -249,7 +323,19 @@ class ContextManager:
         compacted_text: str,
         active_spec: TaskSpec | None,
     ) -> str:
-        """Ask the LLM to summarize the compacted trajectory text."""
+        """Ask the LLM to summarize the compacted trajectory text as a
+        structured `StateSummary`, via forced tool-calling.
+
+        Falls back to parsing `delta_text` as free-text prose if the
+        model ignores the tool and answers directly (some providers/
+        models do — same defensive fallback `_generate_spec` has for
+        `TaskSpec`), so a provider that doesn't honor `tools` at all
+        still produces a summary rather than an empty one. Raises
+        (never silently returns a placeholder) if both paths yield
+        nothing usable — `compact()`'s caller already treats any
+        exception from this method as "fall back to the structural
+        summary," so raising here is the correct, already-handled
+        failure mode, not a gap to patch over locally."""
         spec_context = ""
         if active_spec:
             spec_context = (
@@ -257,9 +343,11 @@ class ContextManager:
                 f"Planned steps: {', '.join(active_spec.steps)}\n"
             )
         prompt = (
-            "Summarize the following earlier conversation trajectory concisely. "
-            "Preserve key decisions, file changes, errors encountered, and "
-            "outstanding work so the agent can continue without losing context. "
+            "Summarize the following earlier conversation trajectory by calling "
+            "`emit_state_summary` with the key decisions made, files changed, "
+            "errors encountered, and outstanding work — so the agent can "
+            "continue without losing context. Omit any field with nothing to "
+            "report rather than inventing content for it."
             f"{spec_context}\n"
             f"Trajectory:\n{compacted_text}"
         )
@@ -272,9 +360,35 @@ class ContextManager:
                 ),
                 ChatMessage(role="user", content=prompt),
             ],
+            tools=[self._STATE_SUMMARY_TOOL],
             stream=False,
         )
         response = await provider.generate(req)
+
+        for tc in response.tool_calls or []:
+            if tc.name != "emit_state_summary":
+                continue
+            raw_args = tc.arguments
+            args: dict[str, Any]
+            if isinstance(raw_args, str):
+                try:
+                    parsed_args: object = json.loads(raw_args)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(parsed_args, dict):
+                    continue
+                args = cast(dict[str, Any], parsed_args)
+            else:
+                args = raw_args
+            try:
+                return StateSummary.model_validate(args).render()
+            except ValidationError:
+                logger.warning(
+                    "state_summary_tool_call_validation_failed", raw_args=str(args)[:200]
+                )
+
+        # Legacy fallback: some models/providers ignore `tools` and answer
+        # in prose — same discipline _generate_spec applies for TaskSpec.
         text = (response.delta_text or "").strip()
         if not text:
             raise ValueError("empty summary from provider")
@@ -331,4 +445,4 @@ class ContextManager:
         return messages
 
 
-__all__ = ["ContextManager"]
+__all__ = ["ContextManager", "StateSummary"]
