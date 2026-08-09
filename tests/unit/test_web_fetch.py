@@ -16,6 +16,8 @@ import pytest
 import respx
 from nullain_tools.web import (
     _MAX_RESPONSE_CHARS,  # type: ignore[reportPrivateUsage]
+    _Crawl4AIResult,  # type: ignore[reportPrivateUsage]
+    _fetch_via_crawl4ai,  # type: ignore[reportPrivateUsage]
     create_web_fetch_tool,
 )
 
@@ -264,3 +266,117 @@ async def test_web_fetch_wayback_availability_check_itself_failing_reports_clear
     out = await tool.func(url="https://example.com/blocked")
     assert out.is_error
     assert "403" in out.output
+
+
+@pytest.mark.asyncio
+async def test_web_fetch_uses_crawl4ai_markdown_when_enabled_and_successful(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """use_crawl4ai=True with a successful render returns the rendered
+    Markdown directly — plain httpx must never even be attempted."""
+
+    async def fake_crawl(url: str) -> _Crawl4AIResult:
+        return _Crawl4AIResult(markdown="# Rendered by a real browser\n\nJS-loaded content here.")
+
+    monkeypatch.setattr("nullain_tools.web._fetch_via_crawl4ai", fake_crawl)
+
+    tool = create_web_fetch_tool(use_crawl4ai=True)
+    out = await tool.func(url="https://example.com/js-heavy")
+    assert out == "# Rendered by a real browser\n\nJS-loaded content here."
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_web_fetch_crawl4ai_bot_block_triggers_wayback_not_httpx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When Crawl4AI itself hits a bot-block status, the fallback is
+    Wayback — not a second attempt via plain httpx, which would just hit
+    the same block."""
+
+    async def fake_crawl(url: str) -> _Crawl4AIResult:
+        return _Crawl4AIResult(status_code=403)
+
+    monkeypatch.setattr("nullain_tools.web._fetch_via_crawl4ai", fake_crawl)
+
+    ddg_route = respx.get("https://example.com/blocked")
+    respx.get("http://archive.org/wayback/available").respond(
+        200,
+        json=_wayback_available_response(
+            timestamp=_RECENT_TIMESTAMP,
+            snapshot_url="http://web.archive.org/web/20260101000000/x",
+        ),
+    )
+    respx.get("http://web.archive.org/web/20260101000000/x").respond(
+        200, text="archived via wayback", headers={"content-type": "text/plain"}
+    )
+
+    tool = create_web_fetch_tool(use_crawl4ai=True)
+    out = await tool.func(url="https://example.com/blocked")
+
+    assert not ddg_route.called
+    assert "archived via wayback" in out
+    assert "403" in out
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_web_fetch_crawl4ai_failure_falls_through_to_plain_httpx(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Crawl4AI-level failure (not installed, browser crash, timeout,
+    non-bot-block error) must fall through to the plain-httpx path
+    exactly as if use_crawl4ai had never been set — not surface an error
+    of its own."""
+
+    async def fake_crawl(url: str) -> _Crawl4AIResult:
+        return _Crawl4AIResult(failed=True)
+
+    monkeypatch.setattr("nullain_tools.web._fetch_via_crawl4ai", fake_crawl)
+
+    respx.get("https://example.com/data.txt").respond(
+        200, text="plain httpx content", headers={"content-type": "text/plain"}
+    )
+
+    tool = create_web_fetch_tool(use_crawl4ai=True)
+    out = await tool.func(url="https://example.com/data.txt")
+    assert out == "plain httpx content"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_web_fetch_use_crawl4ai_false_never_calls_crawl4ai(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Default (use_crawl4ai=False) must be identical to before this
+    parameter existed — plain httpx only, _fetch_via_crawl4ai never even
+    imported/called."""
+    called = False
+
+    async def fake_crawl(url: str) -> _Crawl4AIResult:
+        nonlocal called
+        called = True
+        return _Crawl4AIResult(failed=True)
+
+    monkeypatch.setattr("nullain_tools.web._fetch_via_crawl4ai", fake_crawl)
+
+    respx.get("https://example.com/data.txt").respond(
+        200, text="plain httpx content", headers={"content-type": "text/plain"}
+    )
+
+    tool = create_web_fetch_tool()
+    out = await tool.func(url="https://example.com/data.txt")
+    assert out == "plain httpx content"
+    assert called is False
+
+
+@pytest.mark.asyncio
+async def test_fetch_via_crawl4ai_missing_extra_degrades_to_failed_never_raises() -> None:
+    """The 'crawl' extra not being installed must degrade to failed=True
+    the same as any other Crawl4AI-level failure — never propagate
+    ImportError up to web_fetch's caller, which only opted into this path
+    as a best-effort enhancement over plain httpx, still expected to
+    work."""
+    result = await _fetch_via_crawl4ai("https://example.com")
+    assert result.failed is True
+    assert result.markdown is None
