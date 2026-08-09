@@ -5,6 +5,7 @@ Postgres's own behavior)."""
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock
@@ -37,6 +38,7 @@ def fake_asyncpg(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
 
     conn = MagicMock()
     conn.execute = AsyncMock()
+    conn.executemany = AsyncMock()
     conn.fetchrow = AsyncMock(return_value=None)
     conn.fetch = AsyncMock(return_value=[])
 
@@ -95,29 +97,158 @@ async def test_initialize_wraps_failure_in_connection_error(fake_asyncpg: Module
 
 
 @pytest.mark.asyncio
-async def test_append_auto_initializes_and_inserts(fake_asyncpg: ModuleType) -> None:
+async def test_append_auto_initializes_and_enqueues(fake_asyncpg: ModuleType) -> None:
+    """append() returns once the event is queued, not once it's written —
+    the write happens on the background drain task, verified here via
+    flush() (the explicit synchronization point for a caller that needs
+    the durably-written guarantee back)."""
     store = PostgresEventStore(dsn="postgresql://localhost/test")
     event = UserMessageEvent(session_id="s1", content="hello")
 
     await store.append(event)
-
     fake_asyncpg.create_pool.assert_called_once()  # auto-initialized
-    insert_calls = [
-        c for c in fake_asyncpg._conn.execute.call_args_list if "INSERT INTO events" in c.args[0]
-    ]
+    await store.flush()
+
+    insert_calls = fake_asyncpg._conn.executemany.call_args_list
     assert len(insert_calls) == 1
-    args = insert_calls[0].args
-    assert args[1] == event.id
-    assert args[2] == "s1"
+    sql, rows = insert_calls[0].args
+    assert "INSERT INTO events" in sql
+    assert len(rows) == 1
+    assert rows[0][0] == event.id
+    assert rows[0][1] == "s1"
+    await store.close()
 
 
 @pytest.mark.asyncio
-async def test_append_wraps_failure_in_connection_error(fake_asyncpg: ModuleType) -> None:
+async def test_append_drain_failure_is_logged_not_raised(fake_asyncpg: ModuleType) -> None:
+    """A Postgres-side failure during the background drain must never
+    surface as an exception from append() — append() already returned
+    successfully (the event was accepted onto the queue) by the time the
+    drain even runs. There is no caller left to raise to."""
     store = PostgresEventStore(dsn="postgresql://localhost/test")
-    await store.initialize()  # succeed first, so only the append's own INSERT fails
-    fake_asyncpg._conn.execute.side_effect = RuntimeError("timeout")
-    with pytest.raises(EventStoreConnectionError, match="Failed to append"):
+    await store.initialize()
+    fake_asyncpg._conn.executemany.side_effect = RuntimeError("timeout")
+
+    await store.append(UserMessageEvent(session_id="s1", content="x"))
+    await store.flush()  # must not raise despite the drain failing
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_append_after_close_raises(fake_asyncpg: ModuleType) -> None:
+    store = PostgresEventStore(dsn="postgresql://localhost/test")
+    await store.initialize()
+    await store.close()
+    with pytest.raises(EventStoreConnectionError, match="closed"):
         await store.append(UserMessageEvent(session_id="s1", content="x"))
+
+
+@pytest.mark.asyncio
+async def test_flush_waits_for_all_queued_events_to_drain(fake_asyncpg: ModuleType) -> None:
+    store = PostgresEventStore(dsn="postgresql://localhost/test")
+    await store.initialize()
+
+    for i in range(5):
+        await store.append(UserMessageEvent(session_id="s1", content=f"msg-{i}"))
+    await store.flush()
+
+    written_ids = [
+        row[0] for call in fake_asyncpg._conn.executemany.call_args_list for row in call.args[1]
+    ]
+    assert len(written_ids) == 5
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_close_flushes_pending_events_before_closing_pool(fake_asyncpg: ModuleType) -> None:
+    """No event loss on shutdown: close() must drain whatever is still
+    queued before it stops the drain task and closes the pool."""
+    store = PostgresEventStore(dsn="postgresql://localhost/test")
+    await store.initialize()
+
+    await store.append(UserMessageEvent(session_id="s1", content="last one"))
+    await store.close()
+
+    written_ids = [
+        row[0] for call in fake_asyncpg._conn.executemany.call_args_list for row in call.args[1]
+    ]
+    assert len(written_ids) == 1
+    fake_asyncpg._pool.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_close_is_idempotent_with_drain_task(fake_asyncpg: ModuleType) -> None:
+    store = PostgresEventStore(dsn="postgresql://localhost/test")
+    await store.initialize()
+    await store.append(UserMessageEvent(session_id="s1", content="x"))
+    await store.close()
+    await store.close()  # must not raise
+    fake_asyncpg._pool.close.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_reads_flush_pending_writes_first(fake_asyncpg: ModuleType) -> None:
+    """A resume/list/latest-session read must observe every append() that
+    happened-before it — never silently miss events still sitting in the
+    queue. Verified indirectly: after append() (no explicit flush), a
+    read call still triggers the drain (executemany called) before the
+    read's own SELECT runs."""
+    store = PostgresEventStore(dsn="postgresql://localhost/test")
+    await store.initialize()
+    await store.append(UserMessageEvent(session_id="s1", content="x"))
+
+    await store.list_session_ids()
+
+    assert fake_asyncpg._conn.executemany.call_count == 1
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_seq_ordering_survives_concurrent_appends(fake_asyncpg: ModuleType) -> None:
+    """The invariant the whole module depends on: seq is BIGSERIAL,
+    assigned at INSERT time, and every read path orders by it. A
+    concurrent multi-connection drain would let batches race and write
+    events out of the order they were actually appended in, silently
+    corrupting resume/replay. The single sequential drain task must
+    preserve strict append-order regardless of how concurrently append()
+    itself was called."""
+    store = PostgresEventStore(dsn="postgresql://localhost/test")
+    await store.initialize()
+
+    events = [UserMessageEvent(session_id="s1", content=f"msg-{i}") for i in range(50)]
+    # Concurrent append() calls — asyncio.gather runs these interleaved,
+    # not sequentially, to actually exercise the ordering guarantee
+    # rather than trivially satisfying it via sequential test code.
+    await asyncio.gather(*(store.append(e) for e in events))
+    await store.close()
+
+    written_ids = [
+        row[0] for call in fake_asyncpg._conn.executemany.call_args_list for row in call.args[1]
+    ]
+    assert written_ids == [e.id for e in events]
+
+
+@pytest.mark.asyncio
+async def test_drain_batches_do_not_exceed_configured_batch_size(fake_asyncpg: ModuleType) -> None:
+    """A single executemany() call must never exceed _DRAIN_BATCH_SIZE —
+    confirms batching actually bounds each write instead of accumulating
+    an unbounded batch when events arrive faster than the drain interval."""
+    from nullain.events.postgres_store import (
+        _DRAIN_BATCH_SIZE,  # type: ignore[reportPrivateUsage]
+    )
+
+    store = PostgresEventStore(dsn="postgresql://localhost/test")
+    await store.initialize()
+
+    events = [
+        UserMessageEvent(session_id="s1", content=f"msg-{i}") for i in range(_DRAIN_BATCH_SIZE + 20)
+    ]
+    await asyncio.gather(*(store.append(e) for e in events))
+    await store.close()
+
+    for call in fake_asyncpg._conn.executemany.call_args_list:
+        _, rows = call.args
+        assert len(rows) <= _DRAIN_BATCH_SIZE
 
 
 @pytest.mark.asyncio
