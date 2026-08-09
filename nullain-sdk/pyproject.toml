@@ -79,6 +79,13 @@ rag = ["fastembed>=0.4.0", "qdrant-client>=1.10.0"]
 # has zero dependency on asyncpg; only PostgresEventStore imports it,
 # lazily. SQLiteEventStore remains the SDK's standalone/dev default.
 postgres = ["asyncpg>=0.29.0"]
+# OTLP span export (nullain.telemetry.tracing.configure_tracing's
+# exporter="otlp") for shipping traces to a real backend (Jaeger, Tempo,
+# Honeycomb, ...) over HTTP/protobuf. Optional: opentelemetry-api/-sdk
+# (hard dependencies, tracing.py's console exporter needs no extra) work
+# without this; only the "otlp" exporter branch imports it, lazily. HTTP,
+# not gRPC — no native grpcio dependency to compile/ship.
+otlp = ["opentelemetry-exporter-otlp-proto-http>=1.24.0"]
 
 [project.urls]
 Homepage = "https://github.com/netty-linux/nullain-agent-sdk"

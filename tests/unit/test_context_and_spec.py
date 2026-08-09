@@ -178,6 +178,125 @@ async def test_context_manager_llm_summarization() -> None:
     assert "structural summary" in ev2.summary
 
 
+def test_state_summary_renders_only_populated_fields() -> None:
+    from nullain.context.manager import StateSummary
+
+    empty = StateSummary()
+    assert empty.render() == "(no notable decisions, changes, or errors)"
+
+    partial = StateSummary(
+        key_decisions=["Chose Postgres over dual-write"],
+        files_changed=["events/postgres_store.py"],
+    )
+    rendered = partial.render()
+    assert "Key decisions:" in rendered
+    assert "Chose Postgres over dual-write" in rendered
+    assert "Files changed:" in rendered
+    assert "Errors encountered:" not in rendered  # empty field omitted
+    assert "Outstanding work:" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_context_manager_llm_summarization_via_structured_tool_call() -> None:
+    """The primary path: a provider that honors `tools` and calls
+    `emit_state_summary` with structured arguments — the summary must be
+    the StateSummary rendered to text, not raw delta_text (there is none
+    in this scenario)."""
+    from collections.abc import AsyncGenerator
+
+    from nullain.events import BaseEvent
+    from nullain.llm import CompletionChunk, CompletionRequest, ToolCall
+    from nullain.llm.provider import LLMProvider
+
+    class StructuredSummaryProvider(LLMProvider):
+        def __init__(self) -> None:
+            self.calls = 0
+            self.last_request: CompletionRequest | None = None
+
+        async def generate(self, request: CompletionRequest) -> CompletionChunk:
+            self.calls += 1
+            self.last_request = request
+            return CompletionChunk(
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="emit_state_summary",
+                        arguments={
+                            "key_decisions": ["Chose queue-based batching for Postgres writes"],
+                            "files_changed": ["postgres_store.py"],
+                            "errors_encountered": [],
+                            "outstanding_work": ["Add flush() docs"],
+                        },
+                    ),
+                ]
+            )
+
+        async def stream(self, request: CompletionRequest) -> AsyncGenerator[CompletionChunk, None]:
+            yield await self.generate(request)
+
+        async def health_check(self) -> bool:
+            return True
+
+    cm = ContextManager(max_window_tokens=1000, compaction_threshold=0.75)
+    events: list[BaseEvent] = [
+        UserMessageEvent(session_id="s1", id=f"u{i}", content=f"prompt {i}") for i in range(8)
+    ]
+    provider = StructuredSummaryProvider()
+
+    ev = await cm.compact("s1", events, provider=provider, model="m")
+
+    assert provider.calls == 1
+    assert "Chose queue-based batching for Postgres writes" in ev.summary
+    assert "postgres_store.py" in ev.summary
+    assert "Add flush() docs" in ev.summary
+    # The forced-tool-calling request must actually offer the tool.
+    assert provider.last_request is not None
+    assert provider.last_request.tools is not None
+    assert any(t.function.name == "emit_state_summary" for t in provider.last_request.tools)
+
+
+@pytest.mark.asyncio
+async def test_context_manager_llm_summarization_falls_back_to_structural_on_bad_tool_args() -> (
+    None
+):
+    """A model calling emit_state_summary with arguments that fail
+    StateSummary validation must not crash compact() — it degrades all
+    the way to the structural summary, the same honest fallback a
+    provider outage produces."""
+    from collections.abc import AsyncGenerator
+
+    from nullain.events import BaseEvent
+    from nullain.llm import CompletionChunk, CompletionRequest, ToolCall
+    from nullain.llm.provider import LLMProvider
+
+    class BadArgsProvider(LLMProvider):
+        async def generate(self, request: CompletionRequest) -> CompletionChunk:
+            return CompletionChunk(
+                tool_calls=[
+                    ToolCall(
+                        id="call_1",
+                        name="emit_state_summary",
+                        # key_decisions must be a list of strings, not a bare string.
+                        arguments={"key_decisions": "not-a-list"},
+                    ),
+                ]
+            )
+
+        async def stream(self, request: CompletionRequest) -> AsyncGenerator[CompletionChunk, None]:
+            yield await self.generate(request)
+
+        async def health_check(self) -> bool:
+            return True
+
+    cm = ContextManager(max_window_tokens=1000, compaction_threshold=0.75)
+    events: list[BaseEvent] = [
+        UserMessageEvent(session_id="s1", id=f"u{i}", content=f"prompt {i}") for i in range(8)
+    ]
+
+    ev = await cm.compact("s1", events, provider=BadArgsProvider(), model="m")
+    assert "structural summary" in ev.summary
+
+
 @pytest.mark.asyncio
 async def test_spec_validator_verify_phase() -> None:
     validator = SpecValidator()
