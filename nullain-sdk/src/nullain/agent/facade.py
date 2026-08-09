@@ -210,6 +210,14 @@ class Agent:
                     "Accept": self._settings.web_fetch.accept,
                     "Accept-Language": self._settings.web_fetch.accept_language,
                 },
+                # web_search reuses [web_fetch]'s settings — same
+                # honest-bot-identifier discipline, no separate config
+                # section needed for what's conceptually the same policy.
+                web_search_headers={
+                    "User-Agent": self._settings.web_fetch.user_agent,
+                    "Accept": self._settings.web_fetch.accept,
+                    "Accept-Language": self._settings.web_fetch.accept_language,
+                },
             )
 
     def _build_default_provider(self) -> LLMProvider:
