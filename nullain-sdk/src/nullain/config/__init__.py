@@ -11,6 +11,7 @@ from nullain.config.settings import (
     RouterConfig,
     SandboxConfig,
     TierConfig,
+    WebFetchConfig,
     load_settings,
 )
 
@@ -25,5 +26,6 @@ __all__ = [
     "RouterConfig",
     "SandboxConfig",
     "TierConfig",
+    "WebFetchConfig",
     "load_settings",
 ]

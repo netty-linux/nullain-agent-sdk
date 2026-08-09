@@ -29,6 +29,7 @@ def register_default_tools(
     session_id: str = "default",
     checkpoint_store: CheckpointStore | None = None,
     bash_timeout: float = 300.0,
+    web_fetch_headers: dict[str, str] | None = None,
 ) -> None:
     """Register all built-in tools into a ToolRegistry.
 
@@ -61,6 +62,9 @@ def register_default_tools(
             subprocess (M20). Defaults to 300s — long enough for a real
             dependency install, test run, or build to finish rather than
             being killed mid-command.
+        web_fetch_headers: HTTP headers ``web_fetch`` sends on every
+            request, overriding the default bot-identifying ``User-Agent``
+            (``nullain.config.WebFetchConfig``). None uses the defaults.
     """
     tools: list[RegisteredTool] = []
     tools.extend(
@@ -82,7 +86,7 @@ def register_default_tools(
             workspace_root, sandbox=sandbox, sandbox_opts=sandbox_opts, timeout=bash_timeout
         )
     )
-    tools.append(create_web_fetch_tool())
+    tools.append(create_web_fetch_tool(headers=web_fetch_headers))
     tools.append(create_ask_user_tool(ask_user_callback))
     # Tool discovery (P4.26): lets the agent search for and hydrate deferred-
     # schema MCP tools. Registered last so it is always present.

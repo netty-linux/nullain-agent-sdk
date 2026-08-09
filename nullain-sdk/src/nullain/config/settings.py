@@ -145,6 +145,26 @@ class SandboxConfig(BaseModel):
     deny_network: bool = True
 
 
+class WebFetchConfig(BaseModel):
+    """HTTP headers the ``web_fetch`` tool sends on every request.
+
+    Defaults identify the SDK honestly as an automated client
+    (``User-Agent: Nullain-Agent-SDK/0.1 (+web_fetch)``) — many sites
+    (news outlets, paywalled content, some API docs) reject requests from
+    an unrecognized bot User-Agent with 401/403/429, which is the site's
+    own anti-scraping policy working as intended, not a bug to route
+    around by spoofing a browser. An operator who has a legitimate reason
+    to send different headers (a site they own, an internal service, a
+    documented partnership) can override any of these explicitly via
+    ``nullain.toml``'s ``[web_fetch]`` section — this is an intentional,
+    visible opt-in, not a silent default change.
+    """
+
+    user_agent: str = "Nullain-Agent-SDK/0.1 (+web_fetch)"
+    accept: str = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+    accept_language: str = "en-US,en;q=0.9"
+
+
 class PluginEntryConfig(BaseModel):
     """Configuration for a single plugin entry.
 
@@ -209,6 +229,7 @@ class NullainSettings(BaseSettings):
     lsp: LSPConfig = Field(default_factory=LSPConfig)
     sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     plugins: PluginsConfig = Field(default_factory=PluginsConfig)
+    web_fetch: WebFetchConfig = Field(default_factory=WebFetchConfig)
     # Accepts both the prefixed env var (NULLAIN_OLLAMA_API_KEY, consistent
     # with every other setting here) and the bare OLLAMA_API_KEY — the name
     # docs/configuration.md always documented and the one other CLIs' API-key
@@ -276,5 +297,6 @@ __all__ = [
     "RouterConfig",
     "SandboxConfig",
     "TierConfig",
+    "WebFetchConfig",
     "load_settings",
 ]
