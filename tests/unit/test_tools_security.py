@@ -9,10 +9,12 @@ from nullain.errors import ToolExecutionError, ToolPermissionError
 from nullain.tools import (
     PermissionLevel,
     PermissionPolicy,
+    ToolRegistry,
     execute_subprocess,
     redact_secrets,
     resolve_and_validate_path,
 )
+from nullain_tools.bash import create_bash_tool
 
 
 def test_path_traversal_prevention(tmp_path: Path) -> None:
@@ -167,6 +169,59 @@ async def test_bash_tool_honors_configured_timeout(tmp_path: Path) -> None:
     bash_tool = create_bash_tool(tmp_path, timeout=0.5)
     with pytest.raises(ToolExecutionError, match="timed out"):
         await bash_tool.func(["python", "-c", "import time; time.sleep(5)"])
+
+
+@pytest.mark.asyncio
+async def test_bash_command_string_is_normalized_to_command_args(tmp_path: Path) -> None:
+    """Regression: models across providers (confirmed with glm-5.2:cloud in
+    production) reliably guess `command: str` for the bash tool instead of
+    reading its real `command_args: list[str]` schema — the far more common
+    shape in other agent frameworks. `ToolRegistry.execute` normalizes the
+    alias so the call still works instead of crashing with a raw TypeError
+    from the tool function."""
+    reg = ToolRegistry(
+        permission_policy=PermissionPolicy(
+            workspace_root=str(tmp_path), default_exec_level=PermissionLevel.ALLOW
+        )
+    )
+    reg.register(create_bash_tool(tmp_path))
+
+    result = await reg.execute("bash", {"command": "echo hello"})
+    assert not result.is_error
+    assert "hello" in result.output
+
+
+@pytest.mark.asyncio
+async def test_bash_command_args_list_still_works_unnormalized(tmp_path: Path) -> None:
+    """The pre-existing, correctly-schema'd call shape must keep working
+    unchanged — normalization only kicks in when `command` (not
+    `command_args`) is present."""
+    reg = ToolRegistry(
+        permission_policy=PermissionPolicy(
+            workspace_root=str(tmp_path), default_exec_level=PermissionLevel.ALLOW
+        )
+    )
+    reg.register(create_bash_tool(tmp_path))
+
+    result = await reg.execute("bash", {"command_args": ["echo", "hello"]})
+    assert not result.is_error
+    assert "hello" in result.output
+
+
+@pytest.mark.asyncio
+async def test_bash_command_string_still_honors_deny_pattern(tmp_path: Path) -> None:
+    """The normalization must happen BEFORE _evaluate_permission runs — a
+    `command` string must not bypass evaluate_command's deny-pattern check
+    the way an unrecognized non-list command_args value would (falls
+    through to ALLOW). This is the actual security property the fix must
+    preserve, not just "the call works"."""
+    reg = ToolRegistry(
+        permission_policy=PermissionPolicy(workspace_root=str(tmp_path), deny_patterns=["rm -rf"])
+    )
+    reg.register(create_bash_tool(tmp_path))
+
+    with pytest.raises(ToolPermissionError):
+        await reg.execute("bash", {"command": "rm -rf /"})
 
 
 @given(subpath=st.text(min_size=1, max_size=50))
