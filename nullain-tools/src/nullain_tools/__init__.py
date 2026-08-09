@@ -1,5 +1,6 @@
 """Nullain Tools — Package Initialization and Helper functions."""
 
+import importlib.metadata
 from pathlib import Path
 
 from nullain.events import EventBus
@@ -15,6 +16,7 @@ from nullain_tools.git import create_git_tools
 from nullain_tools.memory import create_memory_tools
 from nullain_tools.search import create_search_tools_tool
 from nullain_tools.web import create_web_fetch_tool
+from nullain_tools.web_search import create_web_search_tool
 
 
 def register_default_tools(
@@ -30,6 +32,7 @@ def register_default_tools(
     checkpoint_store: CheckpointStore | None = None,
     bash_timeout: float = 300.0,
     web_fetch_headers: dict[str, str] | None = None,
+    web_search_headers: dict[str, str] | None = None,
 ) -> None:
     """Register all built-in tools into a ToolRegistry.
 
@@ -65,6 +68,9 @@ def register_default_tools(
         web_fetch_headers: HTTP headers ``web_fetch`` sends on every
             request, overriding the default bot-identifying ``User-Agent``
             (``nullain.config.WebFetchConfig``). None uses the defaults.
+        web_search_headers: HTTP headers ``web_search`` sends on every
+            request, same override shape as ``web_fetch_headers``. None
+            uses the defaults.
     """
     tools: list[RegisteredTool] = []
     tools.extend(
@@ -87,6 +93,7 @@ def register_default_tools(
         )
     )
     tools.append(create_web_fetch_tool(headers=web_fetch_headers))
+    tools.append(create_web_search_tool(headers=web_search_headers))
     tools.append(create_ask_user_tool(ask_user_callback))
     # Tool discovery (P4.26): lets the agent search for and hydrate deferred-
     # schema MCP tools. Registered last so it is always present.
@@ -98,7 +105,7 @@ def register_default_tools(
         registry.register(t)
 
 
-__version__ = "0.1.0"
+__version__ = importlib.metadata.version("nullain-tools")
 
 __all__ = [
     "AskUserCallback",
@@ -111,5 +118,6 @@ __all__ = [
     "create_memory_tools",
     "create_search_tools_tool",
     "create_web_fetch_tool",
+    "create_web_search_tool",
     "register_default_tools",
 ]

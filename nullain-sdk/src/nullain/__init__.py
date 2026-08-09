@@ -1,5 +1,7 @@
 """Nullain Agent SDK — Production Agentic Framework for Python."""
 
+import importlib.metadata
+
 from nullain.agent import Agent, AgentLoop, RunResult, RunStatus
 from nullain.authority import Authority, Capability
 from nullain.config import NullainSettings, load_settings
@@ -38,7 +40,7 @@ from nullain.events import (
 from nullain.llm import LLMProvider, OllamaCloudProvider
 from nullain.tools import ToolRegistry, tool
 
-__version__ = "0.1.0"
+__version__ = importlib.metadata.version("nullain-sdk")
 
 # The public API is deliberately minimal (AGENTS.md rule 11). Everything else
 # remains importable by its full module path (e.g. ``from nullain.plugins
