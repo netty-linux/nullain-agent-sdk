@@ -9,6 +9,31 @@ covered by that guarantee at this pre-1.0 stage.
 
 ## [Unreleased]
 
+## [0.4.0] (nullain-sdk) / [0.3.0] (nullain-tools)
+
+### Added
+- `web_search` tool: scrapes DuckDuckGo's public HTML endpoint (no API
+  key, no JavaScript) and returns real result URLs with titles and
+  snippets. Fills a real gap — `web_fetch` requires already knowing a
+  URL, so without a search tool a model has no way to find one besides
+  guessing from (often stale or wrong) training knowledge, which was
+  producing repeated 404s in production.
+
+### Changed
+- `web_fetch` now automatically falls back to the Wayback Machine on a
+  bot-block response (401/403/429) instead of just reporting the error.
+  A snapshot older than 7 days triggers a fresh capture first
+  (best-effort — a failed capture falls back to whatever snapshot
+  already exists). The result always states the snapshot's date, so
+  stale content is never presented as if it were live. 404 and other
+  non-bot-block statuses are unaffected.
+
+### Fixed
+- `nullain.__version__`/`nullain_tools.__version__` were hardcoded and
+  two releases stale (`"0.1.0"` while `0.3.2`/`0.2.0` were live on
+  PyPI). Both (and `nullain_agentd.__version__`) now derive from
+  `importlib.metadata` at import time instead of a hand-copied string.
+
 ## [0.3.2]
 
 ### Fixed
