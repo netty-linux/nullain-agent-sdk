@@ -218,6 +218,8 @@ class Agent:
                     "Accept": self._settings.web_fetch.accept,
                     "Accept-Language": self._settings.web_fetch.accept_language,
                 },
+                searxng_base_url=self._settings.web_fetch.searxng_base_url,
+                web_fetch_use_crawl4ai=self._settings.web_fetch.use_crawl4ai,
             )
 
     def _build_default_provider(self) -> LLMProvider:
@@ -514,7 +516,7 @@ class Agent:
         return asyncio.run(self.run(prompt, session_id=session_id))
 
     async def close(self) -> None:
-        """Release the SQLite connections opened by ``run``/``stream``.
+        """Release the connections opened by ``run``/``stream``.
 
         ``EventStore`` and ``EpisodicMemory`` each open an ``aiosqlite``
         connection lazily on first use, backed by a dedicated worker thread
@@ -527,6 +529,13 @@ class Agent:
         indefinitely after a fully successful run, never producing an
         error, because two live ``aiosqlite`` worker threads kept the
         interpreter from exiting).
+
+        When ``event_store`` is a ``PostgresEventStore``, this is also the
+        point that flushes any events still sitting in its background
+        write queue before closing the pool — skipping ``close()`` risks
+        losing whatever hadn't drained yet, exactly the failure mode a
+        caller reaching for a lower-level shutdown path (killing the
+        process directly, forgetting to await this) would hit.
 
         Safe to call even if neither store was ever initialized (each
         ``close()`` is itself a no-op on an unopened connection). Idempotent.

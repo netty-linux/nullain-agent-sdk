@@ -38,7 +38,21 @@ class EventStorePort(Protocol):
         ...
 
     async def append(self, event: BaseEvent) -> None:
-        """Persist one event. Auto-initializes if not already initialized."""
+        """Persist one event. Auto-initializes if not already initialized.
+
+        Returning without raising means the event is *accepted for
+        write* — for `SQLiteEventStore` this is synchronous and
+        immediate, so "accepted" and "durably written" coincide. An
+        adapter is free to relax that to background/batched persistence
+        for latency reasons (`PostgresEventStore` does, to keep Postgres
+        round-trip latency out of `AgentLoop`'s hot path); such an
+        adapter must still guarantee its own read methods
+        (`get_session_events`, `list_session_ids`,
+        `get_latest_session_id`) observe every `append()` that
+        happened-before the read, and should expose an explicit
+        synchronization point (e.g. `flush()`) for callers that need a
+        hard "durably written" guarantee rather than relying on
+        `append()`'s return alone."""
         ...
 
     async def get_session_events(self, session_id: str) -> list[BaseEvent]:
