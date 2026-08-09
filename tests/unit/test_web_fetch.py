@@ -9,6 +9,7 @@ previously exercised at all.
 """
 
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import httpx
 import pytest
@@ -22,7 +23,7 @@ _RECENT_TIMESTAMP = (datetime.now(UTC) - timedelta(days=1)).strftime("%Y%m%d%H%M
 _STALE_TIMESTAMP = (datetime.now(UTC) - timedelta(days=30)).strftime("%Y%m%d%H%M%S")
 
 
-def _wayback_available_response(*, timestamp: str, snapshot_url: str) -> dict:
+def _wayback_available_response(*, timestamp: str, snapshot_url: str) -> dict[str, Any]:
     return {
         "url": "example.com/blocked",
         "archived_snapshots": {
@@ -36,7 +37,7 @@ def _wayback_available_response(*, timestamp: str, snapshot_url: str) -> dict:
     }
 
 
-def _wayback_unavailable_response() -> dict:
+def _wayback_unavailable_response() -> dict[str, Any]:
     return {"url": "example.com/blocked", "archived_snapshots": {}}
 
 
