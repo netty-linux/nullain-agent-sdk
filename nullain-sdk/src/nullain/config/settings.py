@@ -163,6 +163,17 @@ class WebFetchConfig(BaseModel):
     user_agent: str = "Nullain-Agent-SDK/0.1 (+web_fetch)"
     accept: str = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     accept_language: str = "en-US,en;q=0.9"
+    #: Base URL of a self-hosted SearXNG instance (e.g.
+    #: ``http://searxng:8080`` on an internal Docker network) — when set,
+    #: ``web_search`` tries it first and falls back to DuckDuckGo scraping
+    #: on any failure (unreachable, timeout, malformed response). None
+    #: (the default) uses DuckDuckGo directly, unchanged from before this
+    #: setting existed. A self-hosted meta-search instance aggregates
+    #: multiple upstream engines and isn't subject to any single engine's
+    #: bot detection the way scraping DuckDuckGo directly is — but running
+    #: it is the operator's own infrastructure commitment, hence opt-in
+    #: rather than a new default.
+    searxng_base_url: str | None = None
 
 
 class PluginEntryConfig(BaseModel):
