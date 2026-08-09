@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nullain-sdk"
-version = "0.3.0"
+version = "0.3.1"
 description = "Production agentic framework for Python — model routing, plan/act/verify, fail-closed sandboxing, and provable subagent authority"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -45,7 +45,12 @@ dependencies = [
     "opentelemetry-api>=1.24.0",
     "opentelemetry-sdk>=1.24.0",
     "rich>=13.7.0",
-    "nullain-tools>=0.1.0",
+    # >=0.2.0: register_default_tools() gained web_fetch_headers in 0.2.0,
+    # which nullain.agent.facade always passes — a plain >=0.1.0 let pip
+    # resolve the older nullain-tools (no matching kwarg) alongside a
+    # newer nullain-sdk, breaking Agent() construction with a TypeError
+    # (confirmed in production: nullain-sdk 0.3.0 + nullain-tools 0.1.0).
+    "nullain-tools>=0.2.0",
     # structlog's ConsoleRenderer(colors=True) raises SystemError on Windows
     # without colorama installed to translate ANSI escapes for the console;
     # every other platform's terminal handles them natively.

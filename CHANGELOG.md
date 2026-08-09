@@ -9,6 +9,21 @@ covered by that guarantee at this pre-1.0 stage.
 
 ## [Unreleased]
 
+## [0.3.1]
+
+### Fixed
+- `nullain-sdk`'s dependency on `nullain-tools` tightened from `>=0.1.0`
+  to `>=0.2.0`. `nullain.agent.facade.Agent.__init__` always passes
+  `web_fetch_headers` to `register_default_tools()` (added in
+  `nullain-tools` 0.2.0, alongside 0.3.0's web_fetch changes) — a plain
+  `>=0.1.0` let pip resolve the older `nullain-tools` release (no
+  matching keyword argument) next to the newer `nullain-sdk`, which broke
+  every `Agent()` construction with `TypeError: register_default_tools()
+  got an unexpected keyword argument 'web_fetch_headers'`. Confirmed in
+  production before this fix; PyPI installs of `nullain-sdk` before
+  0.3.1 need `pip install --upgrade nullain-tools` alongside upgrading
+  the SDK.
+
 ## [0.3.0]
 
 ### Added
