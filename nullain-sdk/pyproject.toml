@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "nullain-sdk"
-version = "0.5.0"
+version = "0.6.0"
 description = "Production agentic framework for Python — model routing, plan/act/verify, fail-closed sandboxing, and provable subagent authority"
 readme = "README.md"
 requires-python = ">=3.12"
