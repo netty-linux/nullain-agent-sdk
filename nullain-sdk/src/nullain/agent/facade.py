@@ -395,6 +395,7 @@ class Agent:
             max_tokens=self._max_tokens,
             timeout=self._timeout,
             quota_checker=self._quota_checker,
+            plan_complexity_threshold=self._settings.agent.plan_complexity_threshold,
         )
 
     async def run(self, prompt: str, session_id: str | None = None) -> RunResult:

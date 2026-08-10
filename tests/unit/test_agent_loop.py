@@ -16,6 +16,7 @@ from nullain.llm import (
     TokenUsage,
     ToolCall,
 )
+from nullain.router import Complexity
 from nullain.tools import ToolRegistry
 from nullain_tools import register_default_tools
 
@@ -1362,3 +1363,167 @@ async def test_agent_loop_provider_error_surfaces_as_error_not_timeout(tmp_path:
     agent2 = AgentLoop(provider=FailingProvider(), tools=registry, model="m")
     with pytest.raises(ProviderError):
         await agent2.run("Do something")
+
+
+# ---------------------------------------------------------------------------
+# Plan phase gating (plan_complexity_threshold)
+# ---------------------------------------------------------------------------
+
+
+def _loop_with_threshold(threshold: str) -> AgentLoop:
+    return AgentLoop(
+        provider=FakeSequenceProvider([]),
+        tools=ToolRegistry(),
+        model="m",
+        plan_complexity_threshold=threshold,
+    )
+
+
+def test_plan_threshold_medium_is_the_default_and_plans_medium_and_high() -> None:
+    """Default preserves the behavior AgentLoop always had."""
+    loop = AgentLoop(provider=FakeSequenceProvider([]), tools=ToolRegistry(), model="m")
+    assert loop.plan_complexity_threshold == "medium"
+    assert loop._should_plan(Complexity.MEDIUM) is True  # type: ignore[reportPrivateUsage]
+    assert loop._should_plan(Complexity.HIGH) is True  # type: ignore[reportPrivateUsage]
+    assert loop._should_plan(Complexity.LOW) is False  # type: ignore[reportPrivateUsage]
+
+
+def test_plan_threshold_high_skips_medium() -> None:
+    """A chat deployment can plan only for genuinely complex work.
+
+    IntentParser defaults to MEDIUM whenever no heuristic matches and no
+    classifier_model is set, so "high" is what stops a general-purpose
+    product from planning every conversational turn.
+    """
+    loop = _loop_with_threshold("high")
+    assert loop._should_plan(Complexity.MEDIUM) is False  # type: ignore[reportPrivateUsage]
+    assert loop._should_plan(Complexity.HIGH) is True  # type: ignore[reportPrivateUsage]
+
+
+def test_plan_threshold_never_disables_planning_entirely() -> None:
+    loop = _loop_with_threshold("never")
+    assert loop._should_plan(Complexity.LOW) is False  # type: ignore[reportPrivateUsage]
+    assert loop._should_plan(Complexity.MEDIUM) is False  # type: ignore[reportPrivateUsage]
+    assert loop._should_plan(Complexity.HIGH) is False  # type: ignore[reportPrivateUsage]
+
+
+def test_plan_threshold_unknown_value_falls_back_to_default() -> None:
+    """A config typo must not silently strip the Plan phase."""
+    loop = _loop_with_threshold("nonsense")
+    assert loop._should_plan(Complexity.MEDIUM) is True  # type: ignore[reportPrivateUsage]
+    assert loop._should_plan(Complexity.HIGH) is True  # type: ignore[reportPrivateUsage]
+
+
+@pytest.mark.asyncio
+async def test_plan_phase_skipped_end_to_end_when_threshold_is_high(tmp_path: Path) -> None:
+    """No SpecCreatedEvent is emitted for a MEDIUM task under "high".
+
+    Guards the wiring, not just _should_plan: a threshold that never
+    reaches the run pipeline would leave the phase running regardless.
+    """
+    registry = ToolRegistry()
+    register_default_tools(registry, tmp_path)
+    seen: list[BaseEvent] = []
+    bus = EventBus()
+
+    async def _track(ev: BaseEvent) -> None:
+        seen.append(ev)
+
+    bus.subscribe("*", _track)
+    provider = FakeSequenceProvider([CompletionChunk(delta_text="Done.")])
+    agent = AgentLoop(
+        provider=provider,
+        tools=registry,
+        model="m",
+        workspace_root=tmp_path,
+        event_bus=bus,
+        plan_complexity_threshold="high",
+    )
+
+    result = await agent.run_result("what is the capital of France")
+
+    assert result.status == "success"
+    assert not any(type(ev).__name__ == "SpecCreatedEvent" for ev in seen)
+
+
+@pytest.mark.asyncio
+async def test_plan_phase_runs_end_to_end_under_default_threshold(tmp_path: Path) -> None:
+    """The same MEDIUM task still plans under the default — no regression."""
+    registry = ToolRegistry()
+    register_default_tools(registry, tmp_path)
+    provider = FakeSequenceProvider(
+        [
+            CompletionChunk(
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        name="emit_task_spec",
+                        arguments={"objective": "answer", "steps": ["reply"]},
+                    )
+                ]
+            ),
+            CompletionChunk(delta_text="Done."),
+        ]
+    )
+    seen: list[BaseEvent] = []
+    bus = EventBus()
+
+    async def _track(ev: BaseEvent) -> None:
+        seen.append(ev)
+
+    bus.subscribe("*", _track)
+    agent = AgentLoop(
+        provider=provider,
+        tools=registry,
+        model="m",
+        workspace_root=tmp_path,
+        event_bus=bus,
+    )
+
+    await agent.run_result("what is the capital of France")
+
+    assert any(type(ev).__name__ == "SpecCreatedEvent" for ev in seen)
+
+
+@pytest.mark.asyncio
+async def test_spec_prompt_tells_the_model_to_leave_target_files_empty(tmp_path: Path) -> None:
+    """The Plan instruction must not demand files for file-less tasks.
+
+    Asking unconditionally is what made a payment/search/answer task
+    invent target_files, which verify then failed for not existing.
+    """
+    captured: list[CompletionRequest] = []
+
+    class CapturingProvider(LLMProvider):
+        async def generate(self, request: CompletionRequest) -> CompletionChunk:
+            captured.append(request)
+            return CompletionChunk(
+                tool_calls=[
+                    ToolCall(
+                        id="c1",
+                        name="emit_task_spec",
+                        arguments={"objective": "o", "steps": ["s"]},
+                    )
+                ]
+            )
+
+        async def stream(self, request: CompletionRequest) -> AsyncGenerator[CompletionChunk, None]:
+            yield await self.generate(request)
+
+        async def health_check(self) -> bool:
+            return True
+
+    agent = AgentLoop(
+        provider=CapturingProvider(),
+        tools=ToolRegistry(),
+        model="m",
+        workspace_root=tmp_path,
+    )
+    spec = await agent._generate_spec("create a PIX charge", "m", "sys")  # type: ignore[reportPrivateUsage]
+
+    instruction = captured[0].messages[-1].content or ""
+    assert "Only list `target_files` if the task genuinely" in instruction
+    assert "do not invent filenames" in instruction.lower()
+    # A model that follows it yields an empty list, and verify has nothing
+    # to fail on.
+    assert list(spec.target_files) == []
