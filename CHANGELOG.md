@@ -9,6 +9,35 @@ covered by that guarantee at this pre-1.0 stage.
 
 ## [Unreleased]
 
+## [0.6.0] (nullain-sdk)
+
+### Fixed
+- The Plan phase no longer demands `target_files` from tasks that
+  produce no files. `_generate_spec` asked every MEDIUM/HIGH task for
+  "any files you expect to create or modify" unconditionally — but
+  `target_files` is load-bearing past the plan itself: `SpecValidator.
+  verify` fails the run when a listed file is absent from disk, and only
+  writes to a listed file count as progress for the adaptive step
+  budget. A file-less task (a payment charge, a web search, a plain
+  answer) was therefore pushed to invent filenames, failed verification
+  for not creating them, and entered a `[VERIFY-CORRECTION]` round
+  chasing a file it had made up. Both the JSON schema and the
+  instruction now state the field is optional, belongs empty in that
+  case, and explain why. Observed downstream as an agent answering
+  "generate a PIX charge" with `write_file` + `python_sandbox` +
+  `read_file` + `list_directory` and an error reading a nonexistent
+  `output/test_results.txt`, never calling the dedicated payment tool.
+
+### Added
+- `AgentConfig.plan_complexity_threshold` (`"medium"` | `"high"` |
+  `"never"`, default `"medium"` — unchanged behavior) sets the lowest
+  complexity that still runs the Plan phase. `IntentParser` falls back
+  to MEDIUM whenever no keyword heuristic matches and no
+  `router.classifier_model` is configured, so a general-purpose
+  deployment plans on effectively every turn; `"high"` restricts
+  planning to explicitly complex work. An unrecognized value falls back
+  to the default rather than silently disabling the phase.
+
 ## [0.5.0] (nullain-sdk) / [0.4.0] (nullain-tools)
 
 ### Added
