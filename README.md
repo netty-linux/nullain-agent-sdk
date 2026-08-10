@@ -40,6 +40,12 @@ The SDK ships as three packages in one workspace:
 | [`nullain-tools`](nullain-tools/) | Built-in developer tools — paged file reads, safe edits, `ripgrep` search, shell execution, git, checkpoints/undo. |
 | [`nullain-agentd`](nullain-agentd/) | A stdio NDJSON daemon that exposes the SDK to non-Python hosts (CLIs, IDE extensions, other services) with a versioned, schema-exported protocol. |
 
+### Built with it
+
+**[Nullain Agent](https://github.com/netty-linux/nullain-agent)** is the reference product built on this SDK — a general-purpose chat assistant (web UI, live streaming, payments, image generation, RAG, a live-VNC code sandbox) that consumes `nullain-sdk` as a plain PyPI dependency.
+
+It is worth reading as a worked example of the extension points this SDK is designed around: registering domain tools alongside the built-ins, overriding the agent's identity through `SOUL.md`/`AGENTS.md`, gating side-effecting tools with a `permission_callback`, and running a shared `PostgresEventStore` across replicas. See [its architecture section](https://github.com/netty-linux/nullain-agent#-arquitetura) for how those pieces fit together in a real deployment.
+
 ---
 
 ## ✨ Features
@@ -66,6 +72,14 @@ The SDK ships as three packages in one workspace:
   A workflow is a Python function that composes subagents deterministically — fan-out, pipelines, and ordering are fixed by the script, never decided by an LLM.
 - ⚡ **Zero-Drift Stdio NDJSON Daemon (`nullain-agentd`)**
   A typed protocol with automated JSON Schema export (`make schema`), so any language can consume the SDK without hand-maintained bindings.
+- 🌐 **Self-Hosted Search & Browser-Grade Fetch**
+  `web_search` queries your own [SearXNG](https://docs.searxng.org/) instance first and falls back to DuckDuckGo on any failure. `web_fetch` can render JavaScript-heavy pages through a real headless browser ([Crawl4AI](https://github.com/unclecode/crawl4ai)) and still falls back to the Wayback Machine on a bot-block response. Both opt-in; unconfigured behavior is unchanged.
+- 🗄️ **Non-Blocking Event Persistence (`PostgresEventStore`)**
+  `append()` enqueues and returns immediately; a single background writer drains the queue in batches via `executemany`, keeping per-event database round-trips off the agent loop's critical path. Reads flush first, so session resume never observes a truncated trajectory.
+- 📊 **OTLP Span Export**
+  `configure_tracing(exporter="otlp")` ships spans to any OTLP/HTTP backend (Jaeger, Tempo, Honeycomb) honoring the standard `OTEL_EXPORTER_OTLP_*` environment variables.
+- 🎛️ **Tunable Plan Phase (`plan_complexity_threshold`)**
+  Planning is what makes multi-file work coherent — and pure overhead for a conversational turn. The threshold (`medium` default · `high` · `never`) lets a deployment decide where the Plan phase earns its round-trip.
 
 ---
 
@@ -286,6 +300,8 @@ make schema   # regenerates schema/protocol_v1.json
 4. **Subagent authority-intersection** — a child's effective authority is the meet of parent ∧ delegation ∧ child definition ∧ policy; any single denial removes a capability outright.
 5. **Signed plugins & SBOM** — the signature covers identity, transport, capabilities, tool declarations, and a content-hashed SBOM; the loader is fail-closed at every branch.
 6. **Secret redaction** — automatic redaction patterns keep API keys and credentials out of logs and LLM context.
+
+> **A note for host applications.** `ASK` is only as strong as the `permission_callback` behind it. With no callback configured, `ToolRegistry.execute` denies `ASK` outright (fail-closed). A host that supplies a callback owns that decision — approving indiscriminately silently flattens `ASK` into `ALLOW` for *every* tool at that level, including any registered later. Scope the approval to the specific tools whose blast radius you have actually reasoned about, and deny the rest.
 
 Found a vulnerability? See [SECURITY.md](SECURITY.md) for how to report it responsibly.
 
