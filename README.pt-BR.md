@@ -40,6 +40,12 @@ O SDK é distribuído como três pacotes num único workspace:
 | [`nullain-tools`](nullain-tools/) | Ferramentas de desenvolvimento embutidas — leitura paginada de arquivos, edições seguras, busca via `ripgrep`, execução de shell, git, checkpoints/undo. |
 | [`nullain-agentd`](nullain-agentd/) | Um daemon NDJSON sobre stdio que expõe o SDK para hosts que não são Python (CLIs, extensões de IDE, outros serviços) com um protocolo versionado e exportado como schema. |
 
+### Construído com ele
+
+A **[Nullain Agent](https://github.com/netty-linux/nullain-agent)** é o produto de referência construído sobre este SDK — uma assistente de chat de uso geral (interface web, streaming ao vivo, pagamentos, geração de imagem, RAG, sandbox de código com VNC ao vivo) que consome o `nullain-sdk` como uma dependência PyPI comum.
+
+Vale ler como exemplo prático dos pontos de extensão para os quais este SDK foi desenhado: registrar ferramentas de domínio ao lado das embutidas, sobrescrever a identidade do agente via `SOUL.md`/`AGENTS.md`, controlar ferramentas com efeito colateral por um `permission_callback`, e compartilhar um `PostgresEventStore` entre réplicas. Veja [a seção de arquitetura dela](https://github.com/netty-linux/nullain-agent#-arquitetura) para entender como essas peças se encaixam num deployment real.
+
 ---
 
 ## ✨ Funcionalidades
@@ -66,6 +72,14 @@ O SDK é distribuído como três pacotes num único workspace:
   Um workflow é uma função Python que compõe subagentes de forma determinística — fan-out, pipelines e ordem são fixados pelo script, nunca decididos por um LLM.
 - ⚡ **Daemon NDJSON sobre stdio sem drift (`nullain-agentd`)**
   Um protocolo tipado com exportação automática de JSON Schema (`make schema`), permitindo que qualquer linguagem consuma o SDK sem bindings mantidos manualmente.
+- 🌐 **Busca self-hosted e fetch com browser de verdade**
+  `web_search` consulta primeiro a sua própria instância [SearXNG](https://docs.searxng.org/) e cai no DuckDuckGo em caso de falha. `web_fetch` pode renderizar páginas pesadas em JavaScript num browser headless real ([Crawl4AI](https://github.com/unclecode/crawl4ai)) e ainda cai no Wayback Machine quando recebe bloqueio anti-bot. Ambos opt-in; sem configuração, o comportamento é o mesmo de antes.
+- 🗄️ **Persistência de eventos sem bloquear (`PostgresEventStore`)**
+  `append()` enfileira e retorna na hora; um único writer em background drena a fila em lote via `executemany`, tirando as idas ao banco do caminho crítico do loop. As leituras dão flush antes, então o resume de sessão nunca enxerga uma trajetória truncada.
+- 📊 **Exportação de spans via OTLP**
+  `configure_tracing(exporter="otlp")` envia spans para qualquer backend OTLP/HTTP (Jaeger, Tempo, Honeycomb) respeitando as variáveis padrão `OTEL_EXPORTER_OTLP_*`.
+- 🎛️ **Fase de Plan ajustável (`plan_complexity_threshold`)**
+  Planejar é o que dá coerência a trabalho multi-arquivo — e é puro custo numa conversa. O threshold (`medium` padrão · `high` · `never`) deixa cada deployment decidir onde a fase de Plan compensa a chamada extra.
 
 ---
 
@@ -290,6 +304,8 @@ make schema   # regenera schema/protocol_v1.json
 4. **Interseção de autoridade de subagentes** — a autoridade efetiva de um filho é o encontro entre pai ∧ delegação ∧ definição do filho ∧ política; qualquer negação isolada remove uma capacidade por completo.
 5. **Plugins assinados & SBOM** — a assinatura cobre identidade, transporte, capacidades, declarações de ferramentas e um SBOM com hash de conteúdo; o loader é fail-closed em cada ramificação.
 6. **Redação de segredos** — padrões automáticos de redação mantêm chaves de API e credenciais fora de logs e do contexto enviado ao LLM.
+
+> **Uma nota para aplicações host.** O `ASK` vale exatamente o que valer o `permission_callback` por trás dele. Sem callback configurado, `ToolRegistry.execute` nega `ASK` de saída (fail-closed). Um host que fornece um callback assume essa decisão — aprovar indiscriminadamente achata silenciosamente o `ASK` em `ALLOW` para *toda* ferramenta nesse nível, inclusive as registradas depois. Restrinja a aprovação às ferramentas cujo raio de impacto você de fato analisou, e negue o resto.
 
 Encontrou uma vulnerabilidade? Veja [SECURITY.md](SECURITY.md) para saber como reportar de forma responsável.
 
