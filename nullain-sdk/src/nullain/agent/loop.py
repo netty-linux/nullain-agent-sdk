@@ -179,6 +179,7 @@ class AgentLoop:
         authority: Authority | None = None,
         tool_factory: Callable[[Path], ToolRegistry] | None = None,
         quota_checker: QuotaChecker | None = None,
+        plan_complexity_threshold: str = "medium",
     ) -> None:
         """Initialize AgentLoop with integrated engine collaborators.
 
@@ -278,6 +279,7 @@ class AgentLoop:
         self.verify_retry_max = verify_retry_max
         self.max_steps_extension_ratio = max_steps_extension_ratio
         self.progress_window = progress_window
+        self.plan_complexity_threshold = plan_complexity_threshold
         self.tool_factory = tool_factory
         self._compaction_attempts = 0
         self._step_extension_granted = False
@@ -307,6 +309,23 @@ class AgentLoop:
             memory_index=self.persistent_memory.to_context() if self.persistent_memory else None,
         )
 
+    def _should_plan(self, complexity: Complexity) -> bool:
+        """Whether the Plan phase runs for a task of this complexity.
+
+        ``plan_complexity_threshold`` selects the floor: ``"medium"`` (the
+        default, and the behavior `AgentLoop` has always had) plans for
+        MEDIUM and HIGH, ``"high"`` only for HIGH, ``"never"`` for nothing.
+        An unrecognized value falls back to the default rather than
+        silently disabling planning — a typo in config should not quietly
+        strip a phase the caller expects to run.
+        """
+        threshold = self.plan_complexity_threshold
+        if threshold == "never":
+            return False
+        if threshold == "high":
+            return complexity is Complexity.HIGH
+        return complexity in (Complexity.MEDIUM, Complexity.HIGH)
+
     async def _generate_spec(self, prompt: str, model: str, system_prompt: str) -> TaskSpec:
         """Ask the LLM to generate a structured TaskSpec via forced tool-calling.
 
@@ -321,6 +340,19 @@ class AgentLoop:
         Falls back to parsing ``delta_text`` as JSON (legacy path, for models
         or providers that ignore the tool and answer in prose), then to a
         minimal generic spec if both fail.
+
+        ``target_files`` is load-bearing beyond the plan itself: ``verify``
+        fails the run when a listed file is absent from disk
+        (:meth:`SpecValidator.verify`), and only writes to a listed file
+        count as progress for the adaptive step budget
+        (``_step_touched_target_file``). A model that pads the list to look
+        thorough therefore doesn't just produce a cosmetically wrong plan —
+        it manufactures a verification failure, triggers a correction
+        round, and can starve a legitimately file-less task of its step
+        extension. Asking for files unconditionally invited exactly that on
+        tasks that produce no files at all (a payment charge, a web search,
+        a plain answer), so both the schema and the instruction now say
+        explicitly that the list is optional and belongs empty in that case.
         """
         spec_tool = ToolSpec(
             function=FunctionSpec(
@@ -331,7 +363,16 @@ class AgentLoop:
                     "properties": {
                         "objective": {"type": "string"},
                         "steps": {"type": "array", "items": {"type": "string"}},
-                        "target_files": {"type": "array", "items": {"type": "string"}},
+                        "target_files": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "Files this task will actually create or modify. "
+                                "Omit or leave empty when the task produces no "
+                                "files — every listed file is later checked for "
+                                "existence and a missing one fails the task."
+                            ),
+                        },
                         "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
                     },
                     "required": ["objective", "steps"],
@@ -340,9 +381,14 @@ class AgentLoop:
         )
         spec_instruction = (
             "Analyze the following task and call `emit_task_spec` with a "
-            "structured plan: the objective, ordered steps, any files you "
-            "expect to create or modify, and the acceptance criteria a "
-            "verifier could check.\n\n"
+            "structured plan: the objective, ordered steps, and the "
+            "acceptance criteria a verifier could check.\n\n"
+            "Only list `target_files` if the task genuinely creates or "
+            "modifies files. Many tasks do not — answering a question, "
+            "searching the web, or calling a domain tool produce no files. "
+            "Leave `target_files` empty for those; do not invent filenames "
+            "to fill the field, because each one is verified to exist "
+            "afterwards and a file you never create will fail the task.\n\n"
             f"Task: {prompt}"
         )
         spec_messages = [
@@ -1448,12 +1494,10 @@ class AgentLoop:
         # memory / AGENTS.md survive compaction — see _assemble_system_prompt).
         system_prompt = self._assemble_system_prompt()
 
-        # 3. Plan Phase — LLM generates spec for MEDIUM/HIGH tasks
+        # 3. Plan Phase — LLM generates spec for tasks at/above the
+        # configured complexity threshold (default MEDIUM, as always).
         active_spec: TaskSpec | None = None
-        if intent_res.complexity in (
-            Complexity.MEDIUM,
-            Complexity.HIGH,
-        ):
+        if self._should_plan(intent_res.complexity):
             # A provider failure during Plan (e.g. the API rejecting the
             # request, or exhausted-retry auth/rate-limit errors) must not
             # propagate as a raw exception — run_result() promises to always

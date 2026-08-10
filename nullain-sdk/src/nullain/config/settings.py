@@ -2,6 +2,7 @@
 
 import os
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AliasChoices, BaseModel, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -66,6 +67,20 @@ class AgentConfig(BaseModel):
     max_steps: int = 100
     max_tokens: int | None = 2_000_000
     timeout: float = 300.0
+    #: Lowest task complexity that still runs the Plan phase (the
+    #: ``emit_task_spec`` call preceding the Act loop). ``"medium"`` — the
+    #: default — plans for MEDIUM and HIGH, which is what `AgentLoop` has
+    #: always done. ``"high"`` plans only for explicitly complex work, and
+    #: ``"never"`` disables the phase outright.
+    #:
+    #: Worth tuning for a deployment whose tasks are mostly conversational:
+    #: ``IntentParser`` falls back to MEDIUM whenever no keyword heuristic
+    #: matches and no ``router.classifier_model`` is configured, so in a
+    #: general-purpose chat product effectively *every* turn plans, and a
+    #: plan for "what's the weather" costs a model round-trip and invites a
+    #: spec that doesn't fit the request. Coding deployments should keep
+    #: the default — planning is what makes multi-file work coherent.
+    plan_complexity_threshold: Literal["medium", "high", "never"] = "medium"
     # Wall-clock timeout for a single bash/git subprocess (M20). The 120s
     # default `execute_subprocess` shipped with cuts off real coding-session
     # commands early — dependency installs, full test suites, builds — well
