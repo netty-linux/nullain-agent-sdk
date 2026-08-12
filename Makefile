@@ -35,18 +35,23 @@ build:
 clean:
 	rm -rf .pytest_cache .ruff_cache .pyright_cache .coverage htmlcov coverage.xml build dist *.egg-info
 
-# Preview a version bump across all 7 version-carrying files (4
-# pyproject.toml + 3 __init__.py) plus the 4 internal dependency pins.
-# Dry-run only — no files written. Usage: make bump-version VERSION=0.2.0
+# Preview a version bump for ONE package (nullain-sdk / nullain-tools /
+# nullain-agentd — each versions independently, see docs/releasing.md).
+# Dry-run only — no files written.
+# Usage: make bump-version PACKAGE=nullain-sdk VERSION=0.7.2
+# Add BUMP_DEPENDENTS=1 to also preview tightening other packages' pins
+# on this one (opt-in — see scripts/bump_version.py's docstring for why).
 bump-version:
-	@test -n "$(VERSION)" || (echo "usage: make bump-version VERSION=0.2.0" && exit 1)
-	uv run python scripts/bump_version.py $(VERSION)
+	@test -n "$(PACKAGE)" || (echo "usage: make bump-version PACKAGE=nullain-sdk VERSION=0.7.2" && exit 1)
+	@test -n "$(VERSION)" || (echo "usage: make bump-version PACKAGE=nullain-sdk VERSION=0.7.2" && exit 1)
+	uv run python scripts/bump_version.py $(PACKAGE) $(VERSION) $(if $(BUMP_DEPENDENTS),--bump-dependents,)
 
 # Same as bump-version but actually writes the files. Usage:
-# make bump-version-apply VERSION=0.2.0
+# make bump-version-apply PACKAGE=nullain-sdk VERSION=0.7.2
 bump-version-apply:
-	@test -n "$(VERSION)" || (echo "usage: make bump-version-apply VERSION=0.2.0" && exit 1)
-	uv run python scripts/bump_version.py $(VERSION) --apply
+	@test -n "$(PACKAGE)" || (echo "usage: make bump-version-apply PACKAGE=nullain-sdk VERSION=0.7.2" && exit 1)
+	@test -n "$(VERSION)" || (echo "usage: make bump-version-apply PACKAGE=nullain-sdk VERSION=0.7.2" && exit 1)
+	uv run python scripts/bump_version.py $(PACKAGE) $(VERSION) --apply $(if $(BUMP_DEPENDENTS),--bump-dependents,)
 
 # Run the eval suite's own unit tests (grader correctness, report schema
 # stability, replay determinism) — separate from the SDK's own coverage-gated
