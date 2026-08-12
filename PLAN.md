@@ -31,16 +31,18 @@ Aplicando a regra:
 |---|---|---|
 | Memory, Planning, Tools, Security | **Manter como módulos** do `nullain-sdk` | Nenhum critério atende; extrair só adiciona overhead de versionamento |
 | **SDK Search (Rust)** | **Extrair — novo repo `nullain-sdk-search`** | Critério 1: linguagem diferente, hot path de performance |
-| **SDK Vision** | **Extrair — novo repo/pacote `nullain-sdk-vision`** | Critério 3: deps pesadas (OCR, Chromium ~600MB já hoje atrás de build args) |
+| **SDK Vision (VLM)** | **Manter como módulo** do `nullain-sdk` | Nenhum critério atende: a implementação real (VLM hospedado via `ModelRouter`/`LLMProvider`) não traz dependência pesada — revisado em 2026-08-12, ver Fase 2 |
+| Vision local (OCR/CV, pasta `vision/` do `nullain-agent`) | **Decisão adiada** | Critério 3 se aplicaria (≈600MB, majoritariamente sem uso em produção hoje) — extrair só se/quando essa via for de fato adotada |
 | Voice, Emotion (futuros) | Módulo primeiro, extrair depois se crescer | Começar dentro do SDK, promover se justificar |
 
-Resultado: o diagrama vira realidade com **4 repositórios**, não 8:
+Resultado: o diagrama vira realidade com **3 repositórios**, não 8 (vision
+VLM vira módulo do core, não repo novo — ver Fase 2):
 
 ```
 nullain-agent            (produto)
   └── nullain-agent-sdk  (facade + core, Python)
-        ├── nullain-sdk-search   (Rust + bindings PyO3)   ← novo
-        └── nullain-sdk-vision   (Python, deps pesadas)   ← novo
+        │     ├── port VisionProvider → adapter ModelRouterVisionProvider (módulo, sem deps novas)
+        └── nullain-sdk-search   (Rust + bindings PyO3)   ← novo
 ```
 
 ---
@@ -75,7 +77,7 @@ nullain-sdk (Facade)
     │       └── adapter WebSearch   → SearXNG/DDG (fallback, já existe)
     │
     └── port VisionProvider (Protocol)
-            └── adapter NullainVision → pacote nullain-vision (extra opcional)
+            └── adapter ModelRouterVisionProvider → módulo do core, VLM via ModelRouter/LLMProvider (sem deps novas)
 ```
 
 Regras do contrato:
@@ -107,11 +109,43 @@ Regras do contrato:
 - **Entregue:** `nullain-sdk-search` publicado no GitHub com a API `SearchIndex` (index/index_directory/query/fetch); `RustSearchAdapter` no SDK traduzindo exceções PyO3 para `SearchError` e envolvendo as chamadas bloqueantes em `asyncio.to_thread`; `fetch` composto com `WebSearchProvider` injetado (o índice Rust não busca URLs); contract tests passando contra a wheel real, com skip automático quando ausente; extra `search-rust` no `pyproject.toml`.
 - **Pendente:** wheel ainda não publicada no PyPI (issue #77 — `tool.uv.sources` aponta para o path local do repo irmão como solução temporária); benchmark comparativo vs ripgrep não feito nesta fase.
 
-### Fase 2 — `nullain-sdk-vision`
-- Extrair a pasta `vision/` do `nullain-agent` + `requirements-vision.txt` para pacote próprio `nullain-vision`.
-- Implementar o `VisionProvider` Protocol; VLM routing delega ao ModelRouter do core (injetado, não instanciado).
-- No `nullain-agent`: substituir o import direto por consumo via port do SDK.
-- **Gate:** imagem Docker base do agent SEM vision fica menor; `WITH_VISION` instala o extra.
+### Fase 2 — `VisionProvider`: adapter VLM dentro do `nullain-sdk` (reescopada em 2026-08-12)
+- **Reescopo:** o plano original assumia que `VisionProvider` precisaria de
+  extração para um pacote `nullain-vision` separado, pelo critério 3 da
+  seção 2 (dependências pesadas — OCR/Chromium, ~600MB). Um diagnóstico da
+  pasta `vision/` do `nullain-agent` mostrou que essa suposição não
+  corresponde ao que roda em produção: a pasta `vision/` (4.400 LOC,
+  OpenCV/Tesseract/Playwright, ~600MB de deps) está **majoritariamente sem
+  uso** — só 2 call-sites reais, nenhuma rota de API dedicada, e as 14 tools
+  que ela expõe nunca são registradas no agente rodando. A implementação de
+  visão **realmente usada** é `agent/vision_groq.py`: uma chamada VLM
+  hospedada (Groq, Llama 3.2 vision), sem dependência pesada nenhuma — só
+  `httpx`, que o SDK já tem. Essa é a peça que encaixa naturalmente no
+  Protocol `VisionProvider` (`bytes` + `mime_type` → `str`), então ela vira
+  o Fase 2, e o critério 3 simplesmente não se aplica a ela: nenhuma
+  dependência nova, nenhum peso de instalação. A pasta `vision/`
+  local (OCR/CV) fica para uma decisão futura separada, não bloqueia esta
+  fase.
+- Estender `nullain.llm.types.ChatMessage.content` para aceitar uma lista
+  de blocos (`TextPart`/`ImagePart`), preservando o caminho `str`/`None`
+  existente sem nenhuma mudança de payload — pré-requisito para qualquer
+  request multimodal, feito como commit separado do adapter.
+- Implementar `ModelRouterVisionProvider` (`nullain.ports.vision`) —
+  `describe_image`/`ocr`/`analyze_screenshot` delegando a um `ModelRouter` +
+  `LLMProvider` **injetados** (nunca instanciados pelo adapter); os três
+  métodos diferem só no prompt, não no caminho de código.
+- `VisionError` (`nullain.errors`), seguindo o padrão de `SearchError`:
+  qualquer falha do provider subjacente (incluindo rejeição de conteúdo
+  multimodal por um modelo sem suporte) vira `VisionError`, nunca falha
+  silenciosa.
+- `ModelRouterVisionProvider` plugado em `_ADAPTER_FACTORIES` de
+  `test_vision_provider_contract.py`, validado pela mesma suíte de
+  contrato usada por qualquer adapter futuro.
+- No `nullain-agent`: substituir o import direto de `agent/vision_groq.py`
+  por consumo via port do SDK fica para a Fase 3 (Integração e promoção no
+  produto) — não faz parte do escopo desta fase.
+- **Gate:** `make check` verde; nenhuma dependência nova no `pyproject.toml`;
+  nenhuma quebra de API pública.
 
 ### Fase 3 — Integração e promoção no produto
 - `nullain-agent`: expor as novas capacidades como ferramentas com `PermissionLevel` adequado.

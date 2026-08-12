@@ -1522,6 +1522,7 @@ async def test_spec_prompt_tells_the_model_to_leave_target_files_empty(tmp_path:
     spec = await agent._generate_spec("create a PIX charge", "m", "sys")  # type: ignore[reportPrivateUsage]
 
     instruction = captured[0].messages[-1].content or ""
+    assert isinstance(instruction, str)
     assert "Only list `target_files` if the task genuinely" in instruction
     assert "do not invent filenames" in instruction.lower()
     # A model that follows it yields an empty list, and verify has nothing

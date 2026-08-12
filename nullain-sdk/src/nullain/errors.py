@@ -249,6 +249,19 @@ class PluginCapabilityError(PluginError):
     pass
 
 
+class VisionError(NullainError):
+    """Base exception for VisionProvider adapter failures.
+
+    Covers a provider that rejects multimodal content (no vision support),
+    a malformed/unsupported image payload, or any other failure surfaced
+    while delegating an image-understanding request to the underlying
+    ModelRouter/LLMProvider — translated here so callers see one error type
+    regardless of which model actually served the request.
+    """
+
+    pass
+
+
 __all__ = [
     "BudgetExceededError",
     "ContextError",
@@ -283,4 +296,5 @@ __all__ = [
     "ToolNotFoundError",
     "ToolPermissionError",
     "VectorStoreError",
+    "VisionError",
 ]

@@ -2,32 +2,58 @@
 
 Mirrors `test_search_provider_contract.py`'s shape (a parametrized
 `adapter_factory` fixture whose test bodies run unchanged against any
-`VisionProvider` implementation), but no adapter exists yet in this repo —
-per PLAN.md Fase 0 scope, `VisionProvider` implementations live in the
-separate `nullain-vision` package (Fase 2), installed as an optional extra.
-
-`_ADAPTER_FACTORIES` is intentionally empty: this suite defines the
-contract's *shape* (the Protocol conformance and call-signature checks
-below), so it is ready to validate the first real adapter the moment one is
-added — add a `pytest.param(factory, id="...")` to `_ADAPTER_FACTORIES`
-then, with no other changes needed here. Until then, the parametrized tests
-collect zero cases (pytest reports them as no-ops, not failures) and the
-protocol-shape test runs unconditionally, so this file stays green in
-`make check` without depending on any vision implementation existing.
+`VisionProvider` implementation). `ModelRouterVisionProvider` (PLAN.md
+Fase 2, rescoped: a plain multimodal-chat adapter routed through the core's
+own `ModelRouter`/`LLMProvider`, not the separate `nullain-vision` package
+Fase 0 originally assumed) is the first adapter validated here, via a fake
+`LLMProvider` so this suite stays offline (AGENTS.md rule 8) — no real
+network call, no API key needed.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import AsyncGenerator, Callable
 
 import pytest
-from nullain.ports.vision import VisionProvider
+from nullain.config.settings import RouterConfig, TierConfig
+from nullain.errors import VisionError
+from nullain.llm.types import CompletionChunk, CompletionRequest, ImagePart
+from nullain.ports.vision import ModelRouterVisionProvider, VisionProvider
+from nullain.router.router import ModelRouter
 
-#: One entry per `VisionProvider` adapter this suite must validate. Empty
-#: today (PLAN.md Fase 0: no vision adapter ships here) — add a
-#: `pytest.param(factory, id="...")` once `nullain-vision` (Fase 2) has a
-#: concrete implementation to test against.
-_ADAPTER_FACTORIES: list[Callable[[], VisionProvider]] = []
+
+class _FakeLLMProvider:
+    """Offline `LLMProvider` stub: echoes back a fixed reply, or raises."""
+
+    def __init__(self, reply: str = "a fake vision reply", *, raises: bool = False) -> None:
+        self.reply = reply
+        self.raises = raises
+        self.last_request: CompletionRequest | None = None
+
+    async def generate(self, request: CompletionRequest) -> CompletionChunk:
+        self.last_request = request
+        if self.raises:
+            raise RuntimeError("model rejected multimodal content")
+        return CompletionChunk(delta_text=self.reply)
+
+    async def stream(self, request: CompletionRequest) -> AsyncGenerator[CompletionChunk, None]:
+        yield CompletionChunk(delta_text=self.reply)
+
+    async def health_check(self) -> bool:
+        return True
+
+
+def _model_router_vision_provider_factory() -> VisionProvider:
+    router = ModelRouter(config=RouterConfig(tiers={"vision": TierConfig(models=["fake-vlm"])}))
+    return ModelRouterVisionProvider(router, _FakeLLMProvider())
+
+
+#: One entry per `VisionProvider` adapter this suite must validate. Add a
+#: new `pytest.param(factory, id="...")` here when a new adapter is ready
+#: for contract testing.
+_ADAPTER_FACTORIES: list[Callable[[], VisionProvider]] = [
+    pytest.param(_model_router_vision_provider_factory, id="model_router_vlm"),  # type: ignore[list-item]
+]
 
 
 @pytest.fixture(params=_ADAPTER_FACTORIES)
@@ -61,3 +87,32 @@ async def test_ocr_returns_text(provider: VisionProvider) -> None:
 async def test_analyze_screenshot_returns_text(provider: VisionProvider) -> None:
     result = await provider.analyze_screenshot(b"\x89PNG...", mime_type="image/png")
     assert isinstance(result, str)
+
+
+async def test_model_router_vision_provider_wraps_provider_failure_as_vision_error() -> None:
+    """Adapter-specific, not part of the shared contract: pins
+    `ModelRouterVisionProvider`'s translation of an underlying `LLMProvider`
+    failure (e.g. a model rejecting multimodal content) to `VisionError`,
+    so callers never see a raw provider exception leak through the port."""
+    router = ModelRouter(config=RouterConfig(tiers={"vision": TierConfig(models=["fake-vlm"])}))
+    adapter = ModelRouterVisionProvider(router, _FakeLLMProvider(raises=True))
+    with pytest.raises(VisionError):
+        await adapter.describe_image(b"\x89PNG...", mime_type="image/png")
+
+
+async def test_model_router_vision_provider_sends_image_as_content_part() -> None:
+    """Adapter-specific: confirms the image travels as an `ImagePart`
+    content block on the request `ModelRouterVisionProvider` builds, not
+    just that some string comes back."""
+    router = ModelRouter(config=RouterConfig(tiers={"vision": TierConfig(models=["fake-vlm"])}))
+    llm = _FakeLLMProvider()
+    adapter = ModelRouterVisionProvider(router, llm)
+    await adapter.ocr(b"\x89PNG...", mime_type="image/png")
+    assert llm.last_request is not None
+    assert llm.last_request.model == "fake-vlm"
+    content = llm.last_request.messages[0].content
+    assert isinstance(content, list)
+    image_part = content[1]
+    assert isinstance(image_part, ImagePart)
+    assert image_part.data == b"\x89PNG..."
+    assert image_part.mime_type == "image/png"
