@@ -1982,7 +1982,7 @@ requires-dist = [
     { name = "cryptography", marker = "extra == 'signing'", specifier = ">=42.0.0" },
     { name = "fastembed", marker = "extra == 'rag'", specifier = ">=0.4.0" },
     { name = "httpx", specifier = ">=0.27.0" },
-    { name = "nullain-search", marker = "extra == 'search-rust'", editable = "../nullain-sdk-search/nullain-search-py" },
+    { name = "nullain-search", marker = "extra == 'search-rust'", specifier = ">=0.1.0,<0.2.0" },
     { name = "nullain-tools", editable = "nullain-tools" },
     { name = "opentelemetry-api", specifier = ">=1.24.0" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otlp'", specifier = ">=1.24.0" },
@@ -1999,7 +1999,15 @@ provides-extras = ["signing", "rag", "postgres", "otlp", "search-rust"]
 [[package]]
 name = "nullain-search"
 version = "0.1.0"
-source = { editable = "../nullain-sdk-search/nullain-search-py" }
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/3e/90/08a84a1c80c497fa91d2a42727ca284777631202ed7c5d96c347e872f5c9/nullain_search-0.1.0.tar.gz", hash = "sha256:ac6d238103b6cdd28363ce997bb52dffe3353505e6785bdb77b2f98d44e6ebdd", size = 17822, upload-time = "2026-08-12T09:45:15.051Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ed/7f/5d815aafe15bfeafac7d5a438e1b0437e4d62f88a2889f8087cad33e70c6/nullain_search-0.1.0-cp312-abi3-macosx_10_12_x86_64.whl", hash = "sha256:00bd6f243e80cf35ebaf36ff7b371c4bd4540da96899578b9d63aa5f1423ea38", size = 2364698, upload-time = "2026-08-12T09:45:06.569Z" },
+    { url = "https://files.pythonhosted.org/packages/14/80/38d247b352311e766424ab21dde21a50eb662cadb1f23cf114bca8a41ce5/nullain_search-0.1.0-cp312-abi3-macosx_11_0_arm64.whl", hash = "sha256:009e4709f62fab516653b348dc60b9b480e1a32107b8a369df30f6ec721aabb7", size = 2208573, upload-time = "2026-08-12T09:45:08.682Z" },
+    { url = "https://files.pythonhosted.org/packages/c2/22/c8144967495d2bc15f6f36e45e1be3ffb687db6d52a083d9b4f7243dd63c/nullain_search-0.1.0-cp312-abi3-manylinux_2_17_aarch64.manylinux2014_aarch64.whl", hash = "sha256:a312485cc0b585a1d92d762dec00f7cc8cb1640c2500d56e67bdce8cd3ce0907", size = 2525889, upload-time = "2026-08-12T09:45:10.475Z" },
+    { url = "https://files.pythonhosted.org/packages/80/24/fcf6307188bc7f9583700e2a31cfd3915970e889fda9742ee6c81c74bd95/nullain_search-0.1.0-cp312-abi3-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:6b32300d289625637569a0bc694d045e5d634afb50d8030984b72db36cc3e2b3", size = 2500787, upload-time = "2026-08-12T09:45:12.159Z" },
+    { url = "https://files.pythonhosted.org/packages/01/30/b198a7a64784d24d22b233503faa653874b56bd760abe30422858c960f3e/nullain_search-0.1.0-cp312-abi3-win_amd64.whl", hash = "sha256:67d6588b66bd4149eb1f6a50f5a2aedae23c0afdf6d7b11af0ff09289751ee2e", size = 2137058, upload-time = "2026-08-12T09:45:13.707Z" },
+]
 
 [[package]]
 name = "nullain-tools"
