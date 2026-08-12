@@ -76,6 +76,74 @@ the final `RunResult`; `run_sync` is a thin synchronous facade.
   `seatbelt` (macOS), `windows_job` (Windows). Fail-closed when required.
 - **`Clock`** (port) ← `SystemClock` (adapter), injectable for deterministic
   tests.
+- **`SearchProvider`** (port, `nullain/ports/search.py`) ← `WebSearchProvider`
+  (`nullain-tools`, always-available default: SearXNG/DuckDuckGo web search)
+  and `RustSearchAdapter` (optional, `nullain-sdk[search-rust]`: a local
+  tantivy BM25 index via the `nullain-search` wheel). `index`/`query`/`fetch`
+  are three orthogonal operations — an adapter documents any it can't perform
+  as a no-op rather than raising (e.g. `WebSearchProvider.index` is a no-op;
+  `RustSearchAdapter.fetch` delegates to an injected `WebSearchProvider`
+  rather than querying its own index, since "fetch a URL" and "retrieve what
+  I indexed" are different contracts). See PLAN.md Fases 0–1 for how this
+  port was built out.
+- **`VisionProvider`** (port, `nullain/ports/vision.py`) — contract only so
+  far; no adapter ships in this repo (PLAN.md Fase 2, a separate
+  `nullain-vision` package).
+
+### Where a new port/adapter pair lives
+
+Two established layouts, pick based on how many concrete adapters exist:
+
+- **One adapter, or adapters that don't compete for the same slot**: port
+  and adapter(s) co-located in one module (`nullain/rag/embedding.py` has
+  both `EmbeddingProvider` and `FastEmbedProvider`; `nullain/ports/search.py`
+  has `SearchProvider` and `RustSearchAdapter` together — `WebSearchProvider`
+  lives in `nullain-tools` instead because it's the tools package's own
+  always-on default, not an optional extra).
+- **Several mutually exclusive adapters selected by platform/config**: a
+  sibling `adapters/` subpackage plus a selector function
+  (`nullain/tools/sandbox/adapters/` + `sandbox/selector.py`'s
+  `select_sandbox()`, picking by `sys.platform`).
+
+### Conditional registration for optional adapters
+
+An adapter backed by an optional dependency (FastEmbed, Qdrant,
+`nullain-search`, …) must never make the port's own module — or the base SDK
+install — require that dependency. The established pattern:
+
+1. The port module has zero import of the optional package at top level.
+2. The adapter's `__init__` does a **lazy** `importlib.import_module(...)`
+   wrapped in `try/except ImportError`, re-raising a clear message pointing
+   at the extra to install (e.g. `RustSearchAdapter` →
+   `pip install nullain-sdk[search-rust]`). This is a **fail-open-for-capability**
+   check at construction time, not a runtime probe on every call — whoever
+   decides to instantiate the adapter has already decided the dependency
+   should be present.
+3. The dependency is declared as an extra in `nullain-sdk/pyproject.toml`'s
+   `[project.optional-dependencies]`, with a comment stating what it
+   unlocks and which module stays dependency-free.
+4. Tests use `importlib.util.find_spec("the_package") is not None` +
+   `@pytest.mark.skipif` to skip real-dependency tests cleanly when the
+   package isn't installed (`tests/unit/test_plugins.py`'s `_HAS_CRYPTO`,
+   `test_search_provider_contract.py`'s `_HAS_NULLAIN_SEARCH`) — never
+   `pytest.importorskip`, which isn't used elsewhere in this suite.
+
+### Contract tests
+
+Any new adapter for an existing port is required to pass that port's
+contract-test suite (`tests/unit/test_*_provider_contract.py`) before it's
+considered done — not just its own adapter-specific unit tests. The suite
+parametrizes a `provider` fixture over a list of adapter factories
+(`_ADAPTER_FACTORIES`) and runs the exact same behavioral assertions against
+every one of them; adding a new adapter means adding one `pytest.param(...)`
+to that list, never writing new test bodies. `test_search_provider_contract.py`
+is the reference implementation — both `WebSearchProvider` and
+`RustSearchAdapter` run through it, with the Rust case marked
+`skipif`-gated on the optional wheel. Adapter-only concerns that don't fit
+the shared contract (e.g. `RustSearchAdapter`'s PyO3 exception translation,
+or its `to_thread` wrapping) get their own file
+(`test_rust_search_adapter.py`) alongside the contract suite, not instead
+of it.
 
 ## Security model
 

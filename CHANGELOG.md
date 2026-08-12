@@ -9,6 +9,33 @@ covered by that guarantee at this pre-1.0 stage.
 
 ## [Unreleased]
 
+### Added
+- `SearchProvider` port (`nullain.ports.search`) — the contract the core
+  owns for search capability (`index`/`query`/`fetch`), per PLAN.md's
+  ports-and-adapters split for optional sub-SDKs. `WebSearchProvider`
+  (`nullain-tools`) is the always-available default adapter, refactored
+  from the prior standalone `web_search` implementation with no change in
+  observable behavior. `RustSearchAdapter` is the optional adapter backed
+  by the `nullain-search` wheel (tantivy BM25 core + PyO3 bindings,
+  [nullain-sdk-search](https://github.com/netty-linux/nullain-sdk-search)):
+  `index`/`query` delegate to the Rust index via `asyncio.to_thread`;
+  `fetch` delegates to an injected `WebSearchProvider` instead, since the
+  Rust index's own `fetch` only retrieves content it indexed itself.
+  Installed via the new `nullain-sdk[search-rust]` extra.
+- `VisionProvider` port (`nullain.ports.vision`) — contract only
+  (`describe_image`/`ocr`/`analyze_screenshot`); no adapter ships in this
+  package yet (PLAN.md Fase 2, a separate `nullain-vision` package).
+- `SearchError` (`nullain.errors`) — base exception for `SearchProvider`
+  adapter failures, raised by both `WebSearchProvider` and
+  `RustSearchAdapter` (replacing the adapter-local `WebSearchQueryError`),
+  so a `SearchProvider` contract test suite can assert against one error
+  type regardless of adapter.
+- Contract-test suites (`tests/unit/test_search_provider_contract.py`,
+  `test_vision_provider_contract.py`) — a shared, parametrized pytest
+  suite any `SearchProvider`/`VisionProvider` adapter must pass, run
+  against every registered adapter factory (skipped cleanly when an
+  optional adapter's dependency isn't installed).
+
 ## [0.6.0] (nullain-sdk)
 
 ### Fixed
