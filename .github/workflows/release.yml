@@ -2,12 +2,29 @@ name: Release
 
 # Publishing is deliberately manual-or-tagged, never on every push: a release
 # is irreversible (a version can never be re-uploaded to PyPI).
+#
+# One tag == one package, never all three (see docs/releasing.md). A tag
+# looks like `<package>-v<version>` — e.g. `nullain-sdk-v0.7.2` — so the
+# publish jobs below can select on it directly (startsWith) instead of
+# inferring which package changed from a git diff. Bare `vX.Y.Z` tags are
+# legacy (pre-dates per-package tagging) and are NOT matched here — do not
+# recreate that format; see docs/releasing.md.
 on:
   push:
     tags:
-      - "v*"
+      - "nullain-sdk-v*"
+      - "nullain-tools-v*"
+      - "nullain-agentd-v*"
   workflow_dispatch:
     inputs:
+      package:
+        description: "Which package to publish"
+        required: true
+        type: choice
+        options:
+          - nullain-sdk
+          - nullain-tools
+          - nullain-agentd
       target:
         description: "Where to publish"
         required: true
@@ -67,7 +84,9 @@ jobs:
         with:
           python-version: "3.12"
 
-      # Order matters only for readability; each package builds independently.
+      # Builds all three regardless of which one is being released — cheap,
+      # and keeps this job identical across every release instead of
+      # branching on which package the run is for.
       - name: Build all distributions
         run: |
           uv build --package nullain-sdk --out-dir dist
@@ -84,6 +103,77 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # Resolves which package this run targets ONCE, so every downstream job's
+  # `if:` is a plain string comparison instead of re-deriving it from the
+  # tag/input. A tag push and a workflow_dispatch each name their package a
+  # different way (tag prefix vs. an input), reconciled here.
+  #
+  # Also the home for the "does this version already exist on PyPI" check
+  # (issue #80/#81's second requirement): this runs and can fail BEFORE any
+  # publish-* job starts, which means before the required-reviewer gate on
+  # its environment — a duplicate version is caught without ever prompting
+  # for (and burning) an approval that was going to fail anyway.
+  resolve-target:
+    name: Resolve release target
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      package: ${{ steps.resolve.outputs.package }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Determine package + version from tag or dispatch input
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            package="${{ inputs.package }}"
+            # No version available from a dispatch input alone — read it
+            # straight off the built wheel's metadata name instead of
+            # re-parsing pyproject.toml here.
+          else
+            ref="${{ github.ref_name }}"
+            package="${ref%-v*}"
+          fi
+          echo "package=$package" >> "$GITHUB_OUTPUT"
+
+      - name: Download distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist
+
+      - name: Resolve exact version being released
+        id: version
+        run: |
+          package="${{ steps.resolve.outputs.package }}"
+          wheel_prefix="$(echo "$package" | tr '-' '_')"
+          wheel="$(find dist -maxdepth 1 -type f -name "${wheel_prefix}-*" | head -n1)"
+          if [ -z "$wheel" ]; then
+            echo "::error::no built distribution found for package '$package' (dist/${wheel_prefix}-*)"
+            exit 1
+          fi
+          # dist/nullain_sdk-0.7.2-py3-none-any.whl (or a .tar.gz sdist) ->
+          # 0.7.2 — version is always the second '-'-delimited field.
+          filename="$(basename "$wheel")"
+          version="$(echo "$filename" | cut -d- -f2)"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Resolved: package=$package version=$version"
+
+      - name: Check version isn't already on PyPI
+        run: |
+          package="${{ steps.resolve.outputs.package }}"
+          version="${{ steps.version.outputs.version }}"
+          target="${{ github.event_name == 'workflow_dispatch' && inputs.target || 'pypi' }}"
+          if [ "$target" = "testpypi" ]; then
+            index_url="https://test.pypi.org/pypi/$package/$version/json"
+          else
+            index_url="https://pypi.org/pypi/$package/$version/json"
+          fi
+          status="$(curl -s -o /dev/null -w '%{http_code}' "$index_url")"
+          if [ "$status" = "200" ]; then
+            echo "::error::$package $version is already published to $target — a version can never be re-uploaded. Bump the version and re-tag."
+            exit 1
+          fi
+
   # PyPI's trusted-publisher registration is keyed on (owner, repo, workflow,
   # environment) — NOT on the PyPI project name. Three packages published
   # from the same workflow file each need their OWN GitHub environment
@@ -91,11 +181,19 @@ jobs:
   # testpypi-* equivalents), or PyPI refuses the second/third registration
   # as a duplicate of the first. Hence one job per package below instead of
   # a single job publishing dist/* in bulk.
+  #
+  # Each job's `if:` selects on `resolve-target`'s output, which already
+  # covers both a tag push (`nullain-sdk-v0.7.2` -> package=nullain-sdk)
+  # and workflow_dispatch (package chosen via the `package` input) — so the
+  # two OTHER packages' jobs are simply not part of this run at all. GitHub
+  # Actions marks a job whose `if:` is false as skipped, never `waiting`;
+  # nothing here ever sits at a reviewer-approval gate for a package this
+  # run was never going to publish.
 
   publish-testpypi-sdk:
     name: Publish nullain-sdk to TestPyPI
-    needs: build
-    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    needs: resolve-target
+    if: needs.resolve-target.outputs.package == 'nullain-sdk' && github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
     runs-on: ubuntu-latest
     environment: testpypi-nullain-sdk
     permissions:
@@ -115,8 +213,8 @@ jobs:
 
   publish-testpypi-tools:
     name: Publish nullain-tools to TestPyPI
-    needs: build
-    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    needs: resolve-target
+    if: needs.resolve-target.outputs.package == 'nullain-tools' && github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
     runs-on: ubuntu-latest
     environment: testpypi-nullain-tools
     permissions:
@@ -136,8 +234,8 @@ jobs:
 
   publish-testpypi-agentd:
     name: Publish nullain-agentd to TestPyPI
-    needs: build
-    if: github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
+    needs: resolve-target
+    if: needs.resolve-target.outputs.package == 'nullain-agentd' && github.event_name == 'workflow_dispatch' && inputs.target == 'testpypi'
     runs-on: ubuntu-latest
     environment: testpypi-nullain-agentd
     permissions:
@@ -157,8 +255,8 @@ jobs:
 
   publish-pypi-sdk:
     name: Publish nullain-sdk to PyPI
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    needs: resolve-target
+    if: needs.resolve-target.outputs.package == 'nullain-sdk' && (startsWith(github.ref, 'refs/tags/nullain-sdk-v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi'))
     runs-on: ubuntu-latest
     environment: pypi-nullain-sdk
     permissions:
@@ -176,8 +274,8 @@ jobs:
 
   publish-pypi-tools:
     name: Publish nullain-tools to PyPI
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    needs: resolve-target
+    if: needs.resolve-target.outputs.package == 'nullain-tools' && (startsWith(github.ref, 'refs/tags/nullain-tools-v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi'))
     runs-on: ubuntu-latest
     environment: pypi-nullain-tools
     permissions:
@@ -195,8 +293,8 @@ jobs:
 
   publish-pypi-agentd:
     name: Publish nullain-agentd to PyPI
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi')
+    needs: resolve-target
+    if: needs.resolve-target.outputs.package == 'nullain-agentd' && (startsWith(github.ref, 'refs/tags/nullain-agentd-v') || (github.event_name == 'workflow_dispatch' && inputs.target == 'pypi'))
     runs-on: ubuntu-latest
     environment: pypi-nullain-agentd
     permissions:

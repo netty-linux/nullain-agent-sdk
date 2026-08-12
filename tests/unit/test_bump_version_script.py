@@ -1,11 +1,10 @@
 """Unit tests for scripts/bump_version.py.
 
-Runs against a temporary copy of the monorepo's 7 version-carrying files
-(4 pyproject.toml + 3 __init__.py) laid out in the same relative structure
-the real script expects, rather than mocking file I/O — the bug this
-script exists to prevent (a second transform on the same file silently
-discarding the first) only shows up against a real accumulate-then-write
-flow, not a mocked one.
+Runs against a temporary copy of the three packages' pyproject.toml files
+laid out in the same relative structure the real script expects, rather
+than mocking file I/O — the bug this script exists to prevent (a second
+transform on the same file silently discarding the first) only shows up
+against a real accumulate-then-write flow, not a mocked one.
 
 scripts/ isn't on pytest's pythonpath (it's a one-off utility, not part of
 the package), so the module is loaded directly from its file path.
@@ -32,85 +31,65 @@ def _load_module(repo_root: Path) -> types.ModuleType:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    # REPO_ROOT and everything derived from it (VERSIONED_FILES, etc.) was
+    # REPO_ROOT and everything derived from it (PACKAGES, INTERNAL_PINS) was
     # computed against the real repo on exec — rebuild it against the test
     # fixture's root instead. types.ModuleType has no static attributes for
     # any of this (they're module-level names created dynamically by
     # exec_module), hence the ignores below rather than a false structural
     # type for a dynamically-loaded module.
     module.REPO_ROOT = repo_root  # pyright: ignore[reportAttributeAccessIssue]
-    module.PYPROJECT_FILES = [  # pyright: ignore[reportAttributeAccessIssue]
-        repo_root / "pyproject.toml",
-        repo_root / "nullain-sdk" / "pyproject.toml",
-        repo_root / "nullain-tools" / "pyproject.toml",
-        repo_root / "nullain-agentd" / "pyproject.toml",
-    ]
-    module.DUNDER_VERSION_FILES = [  # pyright: ignore[reportAttributeAccessIssue]
-        repo_root / "nullain-sdk" / "src" / "nullain" / "__init__.py",
-        repo_root / "nullain-tools" / "src" / "nullain_tools" / "__init__.py",
-        repo_root / "nullain-agentd" / "src" / "nullain_agentd" / "__init__.py",
-    ]
-    module.VERSIONED_FILES = (  # pyright: ignore[reportAttributeAccessIssue]
-        module.PYPROJECT_FILES + module.DUNDER_VERSION_FILES  # pyright: ignore[reportAttributeAccessIssue]
-    )
+    module.PACKAGES = {  # pyright: ignore[reportAttributeAccessIssue]
+        "nullain-sdk": repo_root / "nullain-sdk" / "pyproject.toml",
+        "nullain-tools": repo_root / "nullain-tools" / "pyproject.toml",
+        "nullain-agentd": repo_root / "nullain-agentd" / "pyproject.toml",
+    }
     module.INTERNAL_PINS = [  # pyright: ignore[reportAttributeAccessIssue]
         (repo_root / "nullain-sdk" / "pyproject.toml", "nullain-tools"),
         (repo_root / "nullain-tools" / "pyproject.toml", "nullain-sdk"),
         (repo_root / "nullain-agentd" / "pyproject.toml", "nullain-sdk"),
         (repo_root / "nullain-agentd" / "pyproject.toml", "nullain-tools"),
     ]
-    module._MARKER_RE = {  # pyright: ignore[reportAttributeAccessIssue]
-        **{
-            p: module.re.compile(r'^version = "[^"]*"$', module.re.MULTILINE)  # pyright: ignore[reportAttributeAccessIssue]
-            for p in module.PYPROJECT_FILES  # pyright: ignore[reportAttributeAccessIssue]
-        },
-        **{
-            p: module.re.compile(r'^__version__ = "[^"]*"$', module.re.MULTILINE)  # pyright: ignore[reportAttributeAccessIssue]
-            for p in module.DUNDER_VERSION_FILES  # pyright: ignore[reportAttributeAccessIssue]
-        },
-    }
     return module
 
 
-def _write_fixture_repo(root: Path, version: str = "0.1.0") -> None:
-    """Lay out the 7 version-carrying files + their internal pins, matching
-    the real monorepo's structure closely enough for the script's path
-    logic to work unmodified."""
+def _write_fixture_repo(
+    root: Path,
+    *,
+    sdk_version: str = "0.7.1",
+    tools_version: str = "0.4.0",
+    agentd_version: str = "0.1.0",
+) -> None:
+    """Lay out the three packages' pyproject.toml + internal pins, matching
+    the real monorepo's independent-versioning structure: each package has
+    its own version, and pins on other packages start deliberately stale
+    (mirroring nullain-tools/nullain-agentd's real >=0.1.0 pin on
+    nullain-sdk while nullain-sdk itself has moved on)."""
     (root / "pyproject.toml").write_text(
-        f'[project]\nname = "nullain-monorepo"\nversion = "{version}"\n', encoding="utf-8"
+        '[project]\nname = "nullain-monorepo"\nversion = "0.1.0"\n', encoding="utf-8"
     )
 
     sdk = root / "nullain-sdk"
-    (sdk / "src" / "nullain").mkdir(parents=True)
+    sdk.mkdir(parents=True)
     (sdk / "pyproject.toml").write_text(
-        f'[project]\nname = "nullain-sdk"\nversion = "{version}"\n'
-        f'dependencies = [\n    "nullain-tools>={version}",\n]\n',
+        f'[project]\nname = "nullain-sdk"\nversion = "{sdk_version}"\n'
+        f'dependencies = [\n    "nullain-tools>={tools_version}",\n]\n',
         encoding="utf-8",
-    )
-    (sdk / "src" / "nullain" / "__init__.py").write_text(
-        f'"""Docstring."""\n\n__version__ = "{version}"\n', encoding="utf-8"
     )
 
     tools = root / "nullain-tools"
-    (tools / "src" / "nullain_tools").mkdir(parents=True)
+    tools.mkdir(parents=True)
     (tools / "pyproject.toml").write_text(
-        f'[project]\nname = "nullain-tools"\nversion = "{version}"\n'
-        f'dependencies = [\n    "nullain-sdk>={version}",\n]\n',
+        f'[project]\nname = "nullain-tools"\nversion = "{tools_version}"\n'
+        f'dependencies = [\n    "nullain-sdk>=0.1.0",\n]\n',
         encoding="utf-8",
-    )
-    (tools / "src" / "nullain_tools" / "__init__.py").write_text(
-        f'__version__ = "{version}"\n', encoding="utf-8"
     )
 
     agentd = root / "nullain-agentd"
-    (agentd / "src" / "nullain_agentd").mkdir(parents=True)
+    agentd.mkdir(parents=True)
     (agentd / "pyproject.toml").write_text(
-        f'[project]\nname = "nullain-agentd"\nversion = "{version}"\n'
-        f'dependencies = [\n    "nullain-sdk>={version}",\n    "nullain-tools>={version}",\n]\n',
+        f'[project]\nname = "nullain-agentd"\nversion = "{agentd_version}"\n'
+        f'dependencies = [\n    "nullain-sdk>=0.1.0",\n    "nullain-tools>=0.1.0",\n]\n',
         encoding="utf-8",
-    )
-    (agentd / "src" / "nullain_agentd" / "__init__.py").write_text(
-        f'__version__ = "{version}"\n', encoding="utf-8"
     )
 
 
@@ -120,81 +99,93 @@ def fixture_repo(tmp_path: Path) -> Path:
     return tmp_path
 
 
-def test_current_version_reads_root_pyproject(fixture_repo: Path) -> None:
+def test_current_version_reads_the_named_package(fixture_repo: Path) -> None:
     mod = _load_module(fixture_repo)
-    assert mod._current_version() == "0.1.0"
+    assert mod._current_version(mod.PACKAGES["nullain-sdk"]) == "0.7.1"
+    assert mod._current_version(mod.PACKAGES["nullain-tools"]) == "0.4.0"
 
 
-def test_check_all_synced_passes_when_consistent(fixture_repo: Path) -> None:
+def test_compute_changes_only_touches_the_named_package_by_default(fixture_repo: Path) -> None:
+    """Without --bump-dependents, bumping nullain-sdk must not touch
+    nullain-tools/nullain-agentd's pins on it — that's the whole point of
+    making dependent-pin bumps opt-in."""
     mod = _load_module(fixture_repo)
-    mod._check_all_synced("0.1.0")  # must not raise
+    changes = mod._compute_changes("nullain-sdk", "0.8.0", bump_dependents=False)
+
+    assert len(changes) == 1
+    sdk_content = changes[fixture_repo / "nullain-sdk" / "pyproject.toml"]
+    assert 'version = "0.8.0"' in sdk_content
 
 
-def test_check_all_synced_rejects_a_mismatched_file(fixture_repo: Path) -> None:
+def test_compute_changes_with_bump_dependents_updates_all_pins(fixture_repo: Path) -> None:
+    """Regression shape carried over from the old synchronized-bump test:
+    a file targeted by MULTIPLE transforms (nullain-agentd/pyproject.toml
+    pins both nullain-sdk and nullain-tools) must apply every transform on
+    the ACCUMULATED content, not silently discard all but the last."""
     mod = _load_module(fixture_repo)
-    # Desync one file, mirroring a partial manual edit.
-    tools_init = fixture_repo / "nullain-tools" / "src" / "nullain_tools" / "__init__.py"
-    tools_init.write_text('__version__ = "0.0.9"\n', encoding="utf-8")
+    changes = mod._compute_changes("nullain-sdk", "0.8.0", bump_dependents=True)
 
-    with pytest.raises(SystemExit, match="out of sync"):
-        mod._check_all_synced("0.1.0")
-
-
-def test_compute_changes_bumps_all_seven_files(fixture_repo: Path) -> None:
-    """Regression: a naive implementation returned separate (path, old, new)
-    tuples per transform, so a file targeted by MULTIPLE transforms (like
-    nullain-agentd/pyproject.toml, which needs both its own version line
-    AND two internal pins updated) had all but the last transform silently
-    discarded when writing — confirmed live: only the root pyproject.toml
-    ended up bumped, everything else stayed on the old version."""
-    mod = _load_module(fixture_repo)
-    changes = mod._compute_changes("0.2.0")
-
-    assert len(changes) == 7
-
-    root_content = changes[fixture_repo / "pyproject.toml"]
-    assert 'version = "0.2.0"' in root_content
+    assert len(changes) == 3  # sdk's own pyproject + tools' pin + agentd's pin
 
     sdk_content = changes[fixture_repo / "nullain-sdk" / "pyproject.toml"]
-    assert 'version = "0.2.0"' in sdk_content
-    assert '"nullain-tools>=0.2.0"' in sdk_content
+    assert 'version = "0.8.0"' in sdk_content
 
-    sdk_init_content = changes[fixture_repo / "nullain-sdk" / "src" / "nullain" / "__init__.py"]
-    assert '__version__ = "0.2.0"' in sdk_init_content
+    tools_content = changes[fixture_repo / "nullain-tools" / "pyproject.toml"]
+    assert '"nullain-sdk>=0.8.0"' in tools_content
 
-    # The critical case: nullain-agentd/pyproject.toml needs its OWN version
-    # line updated AND both internal pins bumped — all three in one file.
     agentd_content = changes[fixture_repo / "nullain-agentd" / "pyproject.toml"]
-    assert 'version = "0.2.0"' in agentd_content
-    assert '"nullain-sdk>=0.2.0"' in agentd_content
-    assert '"nullain-tools>=0.2.0"' in agentd_content
-    # And the old version must not linger anywhere in that file.
-    assert "0.1.0" not in agentd_content
+    assert '"nullain-sdk>=0.8.0"' in agentd_content
+    # agentd's OTHER pin (nullain-tools) must survive untouched.
+    assert '"nullain-tools>=0.1.0"' in agentd_content
 
 
-def test_apply_writes_all_seven_files_to_disk(fixture_repo: Path) -> None:
+def test_pins_referencing_finds_stale_pins_excluding_self(fixture_repo: Path) -> None:
     mod = _load_module(fixture_repo)
-    changes = mod._compute_changes("0.3.0")
+    pins = mod._pins_referencing("nullain-sdk")
+    paths = {p for p, _version in pins}
+    assert paths == {
+        fixture_repo / "nullain-tools" / "pyproject.toml",
+        fixture_repo / "nullain-agentd" / "pyproject.toml",
+    }
+    # nullain-sdk's own pyproject.toml pins nullain-tools, not itself —
+    # must never appear when asking "who pins nullain-sdk".
+    assert fixture_repo / "nullain-sdk" / "pyproject.toml" not in paths
+
+
+def test_apply_writes_only_the_named_package_file(fixture_repo: Path) -> None:
+    mod = _load_module(fixture_repo)
+    changes = mod._compute_changes("nullain-tools", "0.5.0", bump_dependents=False)
     for path, new_content in changes.items():
         path.write_text(new_content, encoding="utf-8")
 
-    for path in mod.VERSIONED_FILES:
-        text = path.read_text(encoding="utf-8")
-        assert "0.3.0" in text
-        assert "0.1.0" not in text
+    assert "0.5.0" in (fixture_repo / "nullain-tools" / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    # sdk/agentd's pins on nullain-tools were NOT touched.
+    assert "0.5.0" not in (fixture_repo / "nullain-sdk" / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    assert "0.5.0" not in (fixture_repo / "nullain-agentd" / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
 
-    agentd_text = (fixture_repo / "nullain-agentd" / "pyproject.toml").read_text(encoding="utf-8")
-    assert agentd_text.count("0.3.0") == 3  # own version + 2 pins
 
-
-def test_compute_changes_rejects_missing_pin(fixture_repo: Path) -> None:
+def test_bump_dependents_skips_packages_with_no_pin_at_all(fixture_repo: Path) -> None:
+    """`INTERNAL_PINS` lists every POSSIBLE pin relationship, not a promise
+    that each one exists in every fixture — `_pins_referencing` filters to
+    only files that actually pin the package, so --bump-dependents must
+    silently skip a package that has no pin on this one rather than error."""
     mod = _load_module(fixture_repo)
     sdk_pyproject = fixture_repo / "nullain-sdk" / "pyproject.toml"
     text = sdk_pyproject.read_text(encoding="utf-8")
-    sdk_pyproject.write_text(text.replace('"nullain-tools>=0.1.0",\n', ""), encoding="utf-8")
+    sdk_pyproject.write_text(text.replace('"nullain-tools>=0.4.0",\n', ""), encoding="utf-8")
 
-    with pytest.raises(SystemExit, match="no pin for"):
-        mod._compute_changes("0.2.0")
+    # nullain-sdk no longer pins nullain-tools at all — bumping
+    # nullain-tools with --bump-dependents must not raise just because one
+    # of the (up to) two possible pinning files doesn't have the pin.
+    changes = mod._compute_changes("nullain-tools", "0.5.0", bump_dependents=True)
+    assert fixture_repo / "nullain-sdk" / "pyproject.toml" not in changes
+    assert fixture_repo / "nullain-agentd" / "pyproject.toml" in changes
 
 
 def test_semver_regex_accepts_valid_and_rejects_invalid() -> None:
@@ -210,35 +201,68 @@ def test_semver_regex_accepts_valid_and_rejects_invalid() -> None:
         assert not mod._SEMVER_RE.match(invalid), invalid
 
 
-def test_main_rejects_invalid_version_string(
-    fixture_repo: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_main_rejects_invalid_version_string(fixture_repo: Path) -> None:
     mod = _load_module(fixture_repo)
-    sys.argv = ["bump_version.py", "not-a-version"]
+    sys.argv = ["bump_version.py", "nullain-sdk", "not-a-version"]
+    with pytest.raises(SystemExit):
+        mod.main()
+
+
+def test_main_rejects_unknown_package(fixture_repo: Path) -> None:
+    mod = _load_module(fixture_repo)
+    sys.argv = ["bump_version.py", "not-a-real-package", "0.8.0"]
     with pytest.raises(SystemExit):
         mod.main()
 
 
 def test_main_rejects_same_as_current_version(fixture_repo: Path) -> None:
     mod = _load_module(fixture_repo)
-    sys.argv = ["bump_version.py", "0.1.0"]
-    with pytest.raises(SystemExit, match="already the current version"):
+    sys.argv = ["bump_version.py", "nullain-sdk", "0.7.1"]
+    with pytest.raises(SystemExit, match="already nullain-sdk's current version"):
         mod.main()
 
 
 def test_main_dry_run_does_not_write_files(fixture_repo: Path) -> None:
     mod = _load_module(fixture_repo)
-    sys.argv = ["bump_version.py", "0.2.0"]
+    sys.argv = ["bump_version.py", "nullain-sdk", "0.8.0"]
     mod.main()
 
-    text = (fixture_repo / "pyproject.toml").read_text(encoding="utf-8")
-    assert '"0.1.0"' in text  # unchanged — no --apply flag
+    text = (fixture_repo / "nullain-sdk" / "pyproject.toml").read_text(encoding="utf-8")
+    assert '"0.7.1"' in text  # unchanged — no --apply flag
 
 
-def test_main_apply_writes_all_files(fixture_repo: Path) -> None:
+def test_main_dry_run_warns_about_stale_dependent_pins(
+    fixture_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     mod = _load_module(fixture_repo)
-    sys.argv = ["bump_version.py", "0.2.0", "--apply"]
+    sys.argv = ["bump_version.py", "nullain-sdk", "0.8.0"]
     mod.main()
 
-    for path in mod.VERSIONED_FILES:
-        assert "0.2.0" in path.read_text(encoding="utf-8")
+    out = capsys.readouterr().out
+    assert "other packages pin nullain-sdk" in out
+    assert "--bump-dependents" in out
+
+
+def test_main_apply_without_bump_dependents_only_writes_own_file(fixture_repo: Path) -> None:
+    mod = _load_module(fixture_repo)
+    sys.argv = ["bump_version.py", "nullain-sdk", "0.8.0", "--apply"]
+    mod.main()
+
+    assert "0.8.0" in (fixture_repo / "nullain-sdk" / "pyproject.toml").read_text(encoding="utf-8")
+    assert "0.8.0" not in (fixture_repo / "nullain-tools" / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_main_apply_with_bump_dependents_writes_pins_too(fixture_repo: Path) -> None:
+    mod = _load_module(fixture_repo)
+    sys.argv = ["bump_version.py", "nullain-sdk", "0.8.0", "--apply", "--bump-dependents"]
+    mod.main()
+
+    assert "0.8.0" in (fixture_repo / "nullain-sdk" / "pyproject.toml").read_text(encoding="utf-8")
+    assert '"nullain-sdk>=0.8.0"' in (fixture_repo / "nullain-tools" / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    assert '"nullain-sdk>=0.8.0"' in (fixture_repo / "nullain-agentd" / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
