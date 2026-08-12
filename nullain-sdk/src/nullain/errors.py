@@ -170,6 +170,12 @@ class TenantIsolationError(RagError):
     pass
 
 
+class SearchError(NullainError):
+    """Base exception for SearchProvider adapter failures (web or local index)."""
+
+    pass
+
+
 class SandboxError(NullainError):
     """Base exception for OS-level sandbox failures."""
 
@@ -269,6 +275,7 @@ __all__ = [
     "RouterError",
     "SandboxError",
     "SandboxUnavailableError",
+    "SearchError",
     "SpecValidationError",
     "TenantIsolationError",
     "ToolError",

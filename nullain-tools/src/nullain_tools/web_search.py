@@ -23,6 +23,16 @@ Two backends, tried in order:
 
 Same honest-bot-identifier discipline as `web_fetch` (see its module
 docstring) for both — no spoofed browser headers.
+
+`WebSearchProvider` wraps this logic behind the SDK's `SearchProvider` port
+(`nullain.ports.search`) as the always-available default adapter: `query`
+is exactly the search behavior above, `fetch` retrieves one URL's content
+(mirroring `web_fetch`'s plain-httpx path, without web_fetch's Crawl4AI/
+Wayback fallback layers — those are that tool's concern, not this port's),
+and `index` is a documented no-op since a web-search adapter has no local
+store to ingest into. `create_web_search_tool` is unchanged behavior:
+it now builds a `WebSearchProvider` internally and its `web_search`
+closure delegates to `provider.query(...)`.
 """
 
 import re
@@ -32,8 +42,11 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 import httpx
 from nullain.authority import Capability
+from nullain.errors import SearchError
 from nullain.tools import RegisteredTool, tool
 from nullain.tools.result import ToolResult
+
+from nullain_tools.web import html_to_text
 
 _REQUEST_TIMEOUT = 30.0
 _SEARXNG_TIMEOUT = 15.0
@@ -131,6 +144,96 @@ def _duckduckgo_search(body: str, limit: int) -> list[str]:
     return results
 
 
+class WebSearchProvider:
+    """Default `SearchProvider` (`nullain.ports.search`) adapter: SearXNG
+    (opt-in) with a DuckDuckGo HTML fallback for `query`, plain-httpx GET
+    for `fetch`. Always available — no API key, no server required for the
+    DuckDuckGo path. Has no local index, so `index` is a no-op.
+
+    This is the same two-backend logic `create_web_search_tool` has always
+    used; wrapping it as a `SearchProvider` adapter here lets the tool
+    delegate to it instead of duplicating the request logic, and lets
+    future callers (or a contract-test suite) exercise the same behavior
+    directly, without going through the `@tool`-wrapped closure.
+    """
+
+    def __init__(
+        self, headers: dict[str, str] | None = None, searxng_base_url: str | None = None
+    ) -> None:
+        self._headers = {
+            "User-Agent": _USER_AGENT,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            **(headers or {}),
+        }
+        self._searxng_base_url = searxng_base_url
+
+    async def index(self, content: str, *, source: str) -> None:
+        """No-op: a web-search adapter has no local store to ingest into."""
+        return None
+
+    async def query(self, text: str, *, limit: int = 5) -> str:
+        """Search the web via SearXNG (if configured) then DuckDuckGo.
+
+        Raises:
+            SearchError: on an empty query or a request failure.
+        """
+        text = text.strip()
+        if not text:
+            raise SearchError("query must not be empty.")
+        limit = max(1, min(limit, _MAX_RESULTS))
+
+        async with httpx.AsyncClient(
+            timeout=_REQUEST_TIMEOUT, follow_redirects=True, headers=self._headers
+        ) as client:
+            if self._searxng_base_url:
+                searxng_results = await _searxng_search(client, self._searxng_base_url, text, limit)
+                if searxng_results is not None:
+                    return "\n\n".join(searxng_results)
+
+            try:
+                response = await client.get("https://html.duckduckgo.com/html/", params={"q": text})
+                response.raise_for_status()
+            except httpx.HTTPStatusError as err:
+                raise SearchError(f"search failed with HTTP {err.response.status_code}.") from err
+            except httpx.RequestError as err:
+                raise SearchError(f"search request failed: {err}.") from err
+
+            results = _duckduckgo_search(response.text, limit)
+
+        if not results:
+            return f"No results found for '{text}'."
+        return "\n\n".join(results)
+
+    async def fetch(self, source: str) -> str:
+        """Fetch `source`'s content via plain HTTP GET (HTML is stripped to
+        text). Mirrors `web_fetch`'s plain-httpx path; does not layer on
+        `web_fetch`'s Crawl4AI or Wayback Machine fallbacks — those belong
+        to that tool, not to this port's minimal contract.
+
+        Raises:
+            SearchError: on a request failure.
+        """
+        async with httpx.AsyncClient(
+            timeout=_REQUEST_TIMEOUT, follow_redirects=True, headers=self._headers
+        ) as client:
+            try:
+                response = await client.get(source)
+                response.raise_for_status()
+            except httpx.HTTPStatusError as err:
+                raise SearchError(
+                    f"fetch failed with HTTP {err.response.status_code} for '{source}'."
+                ) from err
+            except httpx.RequestError as err:
+                raise SearchError(f"fetch request failed for '{source}': {err}.") from err
+
+        content_type = response.headers.get("content-type", "")
+        body = response.text
+        if "html" in content_type.lower():
+            body = html_to_text(body)
+        return body or "(empty page)"
+
+
 def create_web_search_tool(
     headers: dict[str, str] | None = None, searxng_base_url: str | None = None
 ) -> RegisteredTool:
@@ -147,12 +250,7 @@ def create_web_search_tool(
             is used directly — identical behavior to before this
             parameter existed.
     """
-    request_headers = {
-        "User-Agent": _USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-        **(headers or {}),
-    }
+    provider = WebSearchProvider(headers=headers, searxng_base_url=searxng_base_url)
 
     @tool(
         name="web_search",
@@ -168,46 +266,12 @@ def create_web_search_tool(
         requires=frozenset({Capability.READ, Capability.NETWORK}),
     )
     async def web_search(query: str, limit: int = 5) -> str | ToolResult:
-        query = query.strip()
-        if not query:
-            return ToolResult(
-                output="Error: query must not be empty.", is_error=True, error_type="ToolError"
-            )
-        limit = max(1, min(limit, _MAX_RESULTS))
-
-        async with httpx.AsyncClient(
-            timeout=_REQUEST_TIMEOUT, follow_redirects=True, headers=request_headers
-        ) as client:
-            if searxng_base_url:
-                searxng_results = await _searxng_search(client, searxng_base_url, query, limit)
-                if searxng_results is not None:
-                    return "\n\n".join(searxng_results)
-
-            try:
-                response = await client.get(
-                    "https://html.duckduckgo.com/html/", params={"q": query}
-                )
-                response.raise_for_status()
-            except httpx.HTTPStatusError as err:
-                return ToolResult(
-                    output=f"Error: search failed with HTTP {err.response.status_code}.",
-                    is_error=True,
-                    error_type="ToolError",
-                )
-            except httpx.RequestError as err:
-                return ToolResult(
-                    output=f"Error: search request failed: {err}.",
-                    is_error=True,
-                    error_type="ToolError",
-                )
-
-            results = _duckduckgo_search(response.text, limit)
-
-        if not results:
-            return f"No results found for '{query}'."
-        return "\n\n".join(results)
+        try:
+            return await provider.query(query, limit=limit)
+        except SearchError as err:
+            return ToolResult(output=f"Error: {err}", is_error=True, error_type="ToolError")
 
     return web_search
 
 
-__all__ = ["create_web_search_tool"]
+__all__ = ["WebSearchProvider", "create_web_search_tool"]

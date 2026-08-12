@@ -17,6 +17,14 @@ members = [
 nullain-sdk = { workspace = true }
 nullain-tools = { workspace = true }
 nullain-agentd = { workspace = true }
+# TEMPORARY (tracked in #77): `nullain-search` (nullain-sdk's `search-rust`
+# extra) is not yet published to PyPI — without a source override, `uv`
+# fails to resolve the workspace lockfile entirely (it resolves every
+# declared extra, even uninstalled ones). Points at the sibling repo's
+# PyO3 binding crate until a real release lands on PyPI; replace with a
+# plain version constraint (already declared in nullain-sdk/pyproject.toml)
+# once it does — see #77.
+nullain-search = { path = "../nullain-sdk-search/nullain-search-py", editable = true }
 
 [dependency-groups]
 dev = [

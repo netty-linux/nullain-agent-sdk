@@ -109,7 +109,7 @@ flowchart TB
 
     subgraph TOOLS["🔧 Ferramentas & Execução"]
         direction LR
-        Registry(["ToolRegistry"]) --- MCP(["MCPClient"]) --- Policy(["PermissionPolicy"]) --- Sandbox(["Sandbox\nfail-closed"]) --- Auth(["Authority gate"])
+        Registry(["ToolRegistry"]) --- MCP(["MCPClient"]) --- Policy(["PermissionPolicy"]) --- Sandbox(["Sandbox\nfail-closed"]) --- Auth(["Authority gate"]) --- Search(["SearchProvider\nWebSearch · Rust BM25"])
     end
 
     subgraph TRUST["🔐 Plugins & Confiança"]
@@ -146,6 +146,19 @@ flowchart TB
 ```
 
 Uma explicação completa do pipeline de execução em seis fases (Intent → Route → Plan → Act → Verify → Memory) está em [docs/architecture.md](docs/architecture.md) (em inglês).
+
+### Sub-SDKs opcionais
+
+Alguns ports oferecem um adapter opcional e mais pesado como extra separado
+em vez de dependência obrigatória — a instalação base continua leve, e a
+ausência do extra degrada para um fallback documentado em vez de quebrar:
+
+- **Search** — `SearchProvider` (port) tem como padrão sempre disponível o
+  `WebSearchProvider` (SearXNG/DuckDuckGo, sem instalação extra) e um índice
+  local BM25 opcional em Rust, `RustSearchAdapter`, publicado a partir do
+  [nullain-sdk-search](https://github.com/netty-linux/nullain-sdk-search)
+  (core em tantivy + bindings PyO3). Instale com
+  `pip install nullain-sdk[search-rust]`.
 
 ---
 

@@ -1966,6 +1966,9 @@ rag = [
     { name = "fastembed" },
     { name = "qdrant-client" },
 ]
+search-rust = [
+    { name = "nullain-search" },
+]
 signing = [
     { name = "cryptography" },
 ]
@@ -1979,6 +1982,7 @@ requires-dist = [
     { name = "cryptography", marker = "extra == 'signing'", specifier = ">=42.0.0" },
     { name = "fastembed", marker = "extra == 'rag'", specifier = ">=0.4.0" },
     { name = "httpx", specifier = ">=0.27.0" },
+    { name = "nullain-search", marker = "extra == 'search-rust'", editable = "../nullain-sdk-search/nullain-search-py" },
     { name = "nullain-tools", editable = "nullain-tools" },
     { name = "opentelemetry-api", specifier = ">=1.24.0" },
     { name = "opentelemetry-exporter-otlp-proto-http", marker = "extra == 'otlp'", specifier = ">=1.24.0" },
@@ -1990,7 +1994,12 @@ requires-dist = [
     { name = "structlog", specifier = ">=24.1.0" },
     { name = "tenacity", specifier = ">=8.3.0" },
 ]
-provides-extras = ["signing", "rag", "postgres", "otlp"]
+provides-extras = ["signing", "rag", "postgres", "otlp", "search-rust"]
+
+[[package]]
+name = "nullain-search"
+version = "0.1.0"
+source = { editable = "../nullain-sdk-search/nullain-search-py" }
 
 [[package]]
 name = "nullain-tools"
