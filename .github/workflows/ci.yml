@@ -5,6 +5,12 @@ on:
     branches: [ main, master ]
   pull_request:
     branches: [ main, master ]
+  schedule:
+    # Daily, independent of any commit — pypi-consumer-install below tests
+    # what's actually live on PyPI, which can break with zero code change
+    # here (a yanked version, index downtime, a transitive dependency
+    # publishing a breaking release). A push-only trigger would miss that.
+    - cron: "17 6 * * *"
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -40,6 +46,35 @@ jobs:
 
       - name: Pyright type check
         run: uv run pyright
+
+  # Proves the workspace resolves and installs from a cold start — no
+  # Actions cache, no sibling repo, nothing carried over from a prior run.
+  # `enable-cache: true` on the other jobs is right for day-to-day CI speed,
+  # but it means a genuine resolution break (a missing extra, a version that
+  # no longer exists on the index — exactly the class of bug behind #77/#80)
+  # can hide behind a cache hit from before the break landed. This job is
+  # the one place that's guaranteed to notice.
+  clean-install:
+    name: Clean install (no cache)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          enable-cache: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies (cold)
+        run: uv sync --all-packages
+
+      - name: Smoke test import
+        run: uv run python -c "import nullain, nullain_tools, nullain_agentd; print('ok')"
 
   # The test matrix spans all three platforms because the sandbox adapters
   # (landlock / seatbelt / Windows Job Object), the subprocess launcher and the
@@ -254,3 +289,65 @@ jobs:
           name: distributions
           path: dist/*
           if-no-files-found: error
+
+  # Installs what's actually LIVE on PyPI, from a fresh venv with no
+  # checkout of this repo on sys.path — the scenario clean-install (above)
+  # cannot cover, because it always installs from source. This is what
+  # would have caught #77 (nullain-search's search-rust extra pointing at
+  # a local path that only exists on a contributor's disk): that repo was
+  # always internally consistent from source, so no from-source job would
+  # have failed — only actually resolving the published extra from the
+  # public index catches it. Runs on push to main/master (not PRs — a
+  # PR's own code can't fix a broken public package) and daily via the
+  # `schedule` trigger, since PyPI itself can break with zero commits here
+  # (a yanked release, index downtime, a transitive dependency's breaking
+  # publish). Not gated to any particular version — always installs
+  # whatever `pip` resolves as latest, matching what a new user gets today.
+  pypi-consumer-install:
+    name: PyPI consumer install (published packages)
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Deliberately no `actions/checkout` — this job must prove the
+      # published packages work with nothing from this repo on disk, the
+      # same starting point as `pip install nullain-sdk` on a machine that
+      # has never cloned anything here.
+      - name: Install nullain-sdk from PyPI
+        run: pip install --no-cache-dir nullain-sdk
+
+      - name: Smoke test public API surface
+        run: |
+          python -c "
+          from nullain import Agent, AgentLoop, ToolRegistry, load_settings
+          print('nullain-sdk public API import: ok')
+          "
+
+      - name: Install nullain-sdk[search-rust] from PyPI
+        run: pip install --no-cache-dir "nullain-sdk[search-rust]"
+
+      - name: Smoke test RustSearchAdapter import
+        run: |
+          python -c "
+          from nullain.ports.search import RustSearchAdapter, SearchProvider
+          assert issubclass(RustSearchAdapter, object)
+          print('search-rust extra resolves and RustSearchAdapter imports: ok')
+          "
+
+      - name: Install nullain-search from PyPI directly
+        run: pip install --no-cache-dir nullain-search
+
+      - name: Smoke test SearchIndex end-to-end
+        run: |
+          python -c "
+          import nullain_search
+          idx = nullain_search.SearchIndex()
+          idx.index('the quick brown fox', source='a.txt')
+          hits = idx.query('fox', 5)
+          assert hits and hits[0].source == 'a.txt', hits
+          print('nullain-search SearchIndex index/query: ok')
+          "
