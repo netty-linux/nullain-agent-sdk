@@ -19,6 +19,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # TEMPORARY (tracked in #77): `nullain-search` (nullain-sdk's
+      # `search-rust` extra) is not yet published to PyPI, so the root
+      # pyproject.toml's `tool.uv.sources` points at this sibling repo's
+      # local path — `uv sync` needs it checked out at `../nullain-sdk-search`
+      # relative to this repo, mirroring local dev layout. Remove this step
+      # once the wheel is on PyPI and the source override is replaced with a
+      # plain version constraint (see #77).
+      - name: Checkout nullain-sdk-search (sibling repo, temporary)
+        uses: actions/checkout@v4
+        with:
+          repository: netty-linux/nullain-sdk-search
+          path: ../nullain-sdk-search
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
@@ -55,6 +68,19 @@ jobs:
         python-version: ["3.12", "3.13"]
     steps:
       - uses: actions/checkout@v4
+
+      # TEMPORARY (tracked in #77): `nullain-search` (nullain-sdk's
+      # `search-rust` extra) is not yet published to PyPI, so the root
+      # pyproject.toml's `tool.uv.sources` points at this sibling repo's
+      # local path — `uv sync` needs it checked out at `../nullain-sdk-search`
+      # relative to this repo, mirroring local dev layout. Remove this step
+      # once the wheel is on PyPI and the source override is replaced with a
+      # plain version constraint (see #77).
+      - name: Checkout nullain-sdk-search (sibling repo, temporary)
+        uses: actions/checkout@v4
+        with:
+          repository: netty-linux/nullain-sdk-search
+          path: ../nullain-sdk-search
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -128,6 +154,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # TEMPORARY (tracked in #77): `nullain-search` (nullain-sdk's
+      # `search-rust` extra) is not yet published to PyPI, so the root
+      # pyproject.toml's `tool.uv.sources` points at this sibling repo's
+      # local path — `uv sync` needs it checked out at `../nullain-sdk-search`
+      # relative to this repo, mirroring local dev layout. Remove this step
+      # once the wheel is on PyPI and the source override is replaced with a
+      # plain version constraint (see #77).
+      - name: Checkout nullain-sdk-search (sibling repo, temporary)
+        uses: actions/checkout@v4
+        with:
+          repository: netty-linux/nullain-sdk-search
+          path: ../nullain-sdk-search
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
@@ -166,6 +205,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # TEMPORARY (tracked in #77): `nullain-search` (nullain-sdk's
+      # `search-rust` extra) is not yet published to PyPI, so the root
+      # pyproject.toml's `tool.uv.sources` points at this sibling repo's
+      # local path — `uv sync` needs it checked out at `../nullain-sdk-search`
+      # relative to this repo, mirroring local dev layout. Remove this step
+      # once the wheel is on PyPI and the source override is replaced with a
+      # plain version constraint (see #77).
+      - name: Checkout nullain-sdk-search (sibling repo, temporary)
+        uses: actions/checkout@v4
+        with:
+          repository: netty-linux/nullain-sdk-search
+          path: ../nullain-sdk-search
+
       - name: Install uv
         uses: astral-sh/setup-uv@v3
         with:
@@ -194,6 +246,19 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
+
+      # TEMPORARY (tracked in #77): `nullain-search` (nullain-sdk's
+      # `search-rust` extra) is not yet published to PyPI, so the root
+      # pyproject.toml's `tool.uv.sources` points at this sibling repo's
+      # local path — `uv sync` needs it checked out at `../nullain-sdk-search`
+      # relative to this repo, mirroring local dev layout. Remove this step
+      # once the wheel is on PyPI and the source override is replaced with a
+      # plain version constraint (see #77).
+      - name: Checkout nullain-sdk-search (sibling repo, temporary)
+        uses: actions/checkout@v4
+        with:
+          repository: netty-linux/nullain-sdk-search
+          path: ../nullain-sdk-search
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
@@ -228,6 +293,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # TEMPORARY (tracked in #77): `nullain-search` (nullain-sdk's
+      # `search-rust` extra) is not yet published to PyPI, so the root
+      # pyproject.toml's `tool.uv.sources` points at this sibling repo's
+      # local path — `uv sync` needs it checked out at `../nullain-sdk-search`
+      # relative to this repo, mirroring local dev layout. Remove this step
+      # once the wheel is on PyPI and the source override is replaced with a
+      # plain version constraint (see #77).
+      - name: Checkout nullain-sdk-search (sibling repo, temporary)
+        uses: actions/checkout@v4
+        with:
+          repository: netty-linux/nullain-sdk-search
+          path: ../nullain-sdk-search
 
       - name: Install uv
         uses: astral-sh/setup-uv@v3
