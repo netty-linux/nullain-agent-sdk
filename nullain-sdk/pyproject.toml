@@ -88,6 +88,14 @@ postgres = ["asyncpg>=0.29.0"]
 # without this; only the "otlp" exporter branch imports it, lazily. HTTP,
 # not gRPC — no native grpcio dependency to compile/ship.
 otlp = ["opentelemetry-exporter-otlp-proto-http>=1.24.0"]
+# Rust-backed local full-text search adapter (PLAN.md Fase 1,
+# nullain-sdk-search — tantivy BM25 core + PyO3 bindings, published as the
+# `nullain-search` wheel). Optional: SearchProvider itself
+# (nullain.ports.search) has zero dependency on it; only RustSearchAdapter
+# imports it, lazily, inside __init__ — the base SDK install and
+# WebSearchProvider (the always-available fallback) stay unaffected when
+# the wheel isn't installed.
+search-rust = ["nullain-search>=0.1.0,<0.2.0"]
 
 [project.urls]
 Homepage = "https://github.com/netty-linux/nullain-agent-sdk"

@@ -2,10 +2,10 @@
 
 Every `SearchProvider` adapter must pass this suite — parametrized over an
 `adapter_factory` fixture so the same behavioral assertions run against any
-implementation. Today that's just `WebSearchProvider`
-(`nullain_tools.web_search`); a future Rust-backed local-index adapter
-(PLAN.md Fase 1) plugs in by adding another `pytest.param` to
-`_ADAPTER_FACTORIES` below, with no changes to the test bodies themselves.
+implementation. Two adapters are covered: `WebSearchProvider`
+(`nullain_tools.web_search`, always runs) and `RustSearchAdapter`
+(`nullain.ports.search`, PLAN.md Fase 1 — skipped automatically when the
+`nullain-search` wheel isn't installed, since it's an optional extra).
 
 This is the first concrete implementation of the "contract test" pattern
 `tests/unit/test_events_port.py`'s docstring describes but doesn't actually
@@ -14,17 +14,26 @@ apply (it exercises one adapter behaviorally and the other via a single
 suites (e.g. `test_vision_provider_contract.py`) should follow this file's
 shape: a factory fixture, `SearchProvider`-typed test bodies, offline via
 respx (AGENTS.md rule 8: unit tests 100% offline).
+
+Each test seeds the provider via `index()` with content matching what it
+asserts on, rather than relying on a specific backend's search results —
+`WebSearchProvider.index` is a documented no-op, so this seed is a no-op
+for it and the DuckDuckGo mock below is what it actually searches; for
+`RustSearchAdapter`, the seed is what makes the query findable, since
+there's no web backend involved. Both paths converge on the same
+assertions without either adapter needing backend-specific test bodies.
 """
 
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import Callable
 
 import httpx
 import pytest
 import respx
 from nullain.errors import SearchError
-from nullain.ports.search import SearchProvider
+from nullain.ports.search import RustSearchAdapter, SearchProvider
 from nullain_tools.web_search import WebSearchProvider
 
 _DDG_URL = "https://html.duckduckgo.com/html/"
@@ -44,16 +53,29 @@ _SAMPLE_DDG_HTML = """
 </div>
 """
 
+_HAS_NULLAIN_SEARCH = importlib.util.find_spec("nullain_search") is not None
+
 
 def _web_search_provider_factory() -> SearchProvider:
     return WebSearchProvider()
 
 
+def _rust_search_adapter_factory() -> SearchProvider:
+    return RustSearchAdapter(web_fallback=WebSearchProvider())
+
+
 #: One entry per `SearchProvider` adapter this suite must validate. Add a
-#: new `pytest.param(factory, id="...")` here when a new adapter (e.g. the
-#: Rust local-index adapter, PLAN.md Fase 1) is ready for contract testing.
+#: new `pytest.param(factory, id="...")` here when a new adapter is ready
+#: for contract testing.
 _ADAPTER_FACTORIES: list[Callable[[], SearchProvider]] = [
     pytest.param(_web_search_provider_factory, id="web_search"),  # type: ignore[list-item]
+    pytest.param(  # type: ignore[list-item]
+        _rust_search_adapter_factory,
+        id="rust_search",
+        marks=pytest.mark.skipif(
+            not _HAS_NULLAIN_SEARCH, reason="nullain-search wheel not installed"
+        ),
+    ),
 ]
 
 
@@ -70,6 +92,9 @@ def test_satisfies_search_provider_protocol(provider: SearchProvider) -> None:
 @respx.mock
 async def test_query_returns_formatted_results(provider: SearchProvider) -> None:
     respx.get(_DDG_URL).mock(return_value=httpx.Response(200, text=_SAMPLE_DDG_HTML))
+    await provider.index(
+        "Python's asyncio: A Hands-On Walkthrough", source="https://realpython.com/async-io-python/"
+    )
     result = await provider.query("asyncio tutorial", limit=5)
     assert isinstance(result, str)
     assert "realpython.com" in result
@@ -78,7 +103,7 @@ async def test_query_returns_formatted_results(provider: SearchProvider) -> None
 @respx.mock
 async def test_query_reports_no_results_without_raising(provider: SearchProvider) -> None:
     respx.get(_DDG_URL).mock(return_value=httpx.Response(200, text="<html></html>"))
-    result = await provider.query("a query with no matches")
+    result = await provider.query("a query with absolutely no matches anywhere")
     assert isinstance(result, str)
     assert "No results found" in result
 
@@ -107,7 +132,7 @@ async def test_fetch_raises_on_http_error(provider: SearchProvider) -> None:
         await provider.fetch("https://example.com/missing")
 
 
-async def test_index_is_a_documented_no_op(provider: SearchProvider) -> None:
-    # Must not raise — every adapter accepts `index`, even ones (like
-    # web search) with no local store to ingest into.
+async def test_index_is_a_documented_no_op_or_real_ingestion(provider: SearchProvider) -> None:
+    # Must not raise either way — a web-only adapter treats this as a
+    # documented no-op, a local-index adapter performs real ingestion.
     await provider.index("some content", source="https://example.com/doc")
