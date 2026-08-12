@@ -9,6 +9,8 @@ covered by that guarantee at this pre-1.0 stage.
 
 ## [Unreleased]
 
+## [0.7.0] (nullain-sdk)
+
 ### Added
 - `SearchProvider` port (`nullain.ports.search`) — the contract the core
   owns for search capability (`index`/`query`/`fetch`), per PLAN.md's
@@ -22,9 +24,27 @@ covered by that guarantee at this pre-1.0 stage.
   `fetch` delegates to an injected `WebSearchProvider` instead, since the
   Rust index's own `fetch` only retrieves content it indexed itself.
   Installed via the new `nullain-sdk[search-rust]` extra.
-- `VisionProvider` port (`nullain.ports.vision`) — contract only
-  (`describe_image`/`ocr`/`analyze_screenshot`); no adapter ships in this
-  package yet (PLAN.md Fase 2, a separate `nullain-vision` package).
+- `VisionProvider` port (`nullain.ports.vision`) — contract
+  (`describe_image`/`ocr`/`analyze_screenshot`) plus its first adapter,
+  `ModelRouterVisionProvider`: routes an image + prompt through an
+  injected `ModelRouter` (model selection) and `LLMProvider` (request
+  execution) as a plain multimodal chat completion. PLAN.md Fase 2 was
+  rescoped for this (see PLAN.md's own note): the vision implementation
+  actually used in production (`nullain-agent`'s Groq VLM call) needs no
+  heavy OCR/CV dependency, so it ships as a module here instead of the
+  separate `nullain-vision` package originally planned. The three
+  Protocol methods share one code path and differ only in prompt.
+- `ChatMessage.content` (`nullain.llm.types`) now also accepts a list of
+  `TextPart`/`ImagePart` content blocks (new `ContentPart` union), needed
+  to carry an image alongside a prompt for `ModelRouterVisionProvider`.
+  The existing `str | None` path is unchanged — `to_api_dict()` emits the
+  exact same payload as before for every text-only message; a content-part
+  list serializes to the OpenAI-compatible `image_url`/base64
+  content-blocks array only when present.
+- `VisionError` (`nullain.errors`) — base exception for `VisionProvider`
+  adapter failures, mirroring `SearchError`'s shape. Any failure from the
+  underlying `LLMProvider` (including a model rejecting multimodal
+  content) surfaces as `VisionError`, never silently.
 - `SearchError` (`nullain.errors`) — base exception for `SearchProvider`
   adapter failures, raised by both `WebSearchProvider` and
   `RustSearchAdapter` (replacing the adapter-local `WebSearchQueryError`),
@@ -34,7 +54,9 @@ covered by that guarantee at this pre-1.0 stage.
   `test_vision_provider_contract.py`) — a shared, parametrized pytest
   suite any `SearchProvider`/`VisionProvider` adapter must pass, run
   against every registered adapter factory (skipped cleanly when an
-  optional adapter's dependency isn't installed).
+  optional adapter's dependency isn't installed). `test_vision_provider_
+  contract.py` now runs against `ModelRouterVisionProvider` via an offline
+  fake `LLMProvider` — no real network call, no API key needed.
 
 ## [0.6.0] (nullain-sdk)
 

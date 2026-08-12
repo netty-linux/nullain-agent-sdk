@@ -1,5 +1,6 @@
 """Nullain Agent SDK — LLM Data Types and Schemas."""
 
+import base64
 import json
 from typing import Any, Literal
 
@@ -48,14 +49,64 @@ class TokenUsage(BaseModel):
     total_tokens: int = 0
 
 
+class TextPart(BaseModel):
+    """A text segment within a multimodal message's `content` list."""
+
+    type: Literal["text"] = "text"
+    text: str
+
+
+class ImagePart(BaseModel):
+    """An image segment within a multimodal message's `content` list.
+
+    Carries raw bytes + MIME type rather than a pre-built data URL so
+    callers (e.g. a `VisionProvider` adapter) don't need to know the
+    OpenAI-compatible wire format — `to_api_dict()` builds the
+    ``data:<mime>;base64,...`` URL at serialization time.
+    """
+
+    type: Literal["image"] = "image"
+    data: bytes
+    mime_type: str
+
+
+ContentPart = TextPart | ImagePart
+
+
 class ChatMessage(BaseModel):
     """Represents a single message in the conversation history."""
 
     role: Role
-    content: str | None = None
+    content: str | list[ContentPart] | None = None
     name: str | None = None
     tool_calls: list[ToolCall] | None = None
     tool_call_id: str | None = None
+
+    def _content_value(self) -> str | list[dict[str, Any]] | None:
+        """Render `content` to the OpenAI-compatible wire shape.
+
+        A plain string (or ``None``) passes through unchanged — this is the
+        path every existing caller uses today, so it stays byte-for-byte
+        identical to before multimodal support existed. A list of
+        `ContentPart` becomes the multimodal content-blocks array
+        (``[{"type": "text", ...}, {"type": "image_url", ...}]``) that
+        OpenAI-compatible chat-completions endpoints expect.
+        """
+        if not isinstance(self.content, list):
+            return self.content
+        blocks: list[dict[str, Any]] = []
+        for part in self.content:
+            if isinstance(part, TextPart):
+                blocks.append({"type": "text", "text": part.text})
+            else:
+                b64 = base64.b64encode(part.data).decode("ascii")
+                blocks.append(
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:{part.mime_type};base64,{b64}"},
+                    }
+                )
+        return blocks
 
     def to_api_dict(self) -> dict[str, Any]:
         """Convert to dict matching standard API format.
@@ -82,7 +133,7 @@ class ChatMessage(BaseModel):
         """
         data: dict[str, Any] = {"role": self.role}
         if self.content is not None or self.role == "assistant":
-            data["content"] = self.content
+            data["content"] = self._content_value()
         if self.name is not None:
             data["name"] = self.name
         if self.tool_call_id is not None:
@@ -130,8 +181,11 @@ __all__ = [
     "ChatMessage",
     "CompletionChunk",
     "CompletionRequest",
+    "ContentPart",
     "FunctionSpec",
+    "ImagePart",
     "Role",
+    "TextPart",
     "TokenUsage",
     "ToolCall",
     "ToolSpec",
