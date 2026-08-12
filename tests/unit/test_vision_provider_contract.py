@@ -116,3 +116,35 @@ async def test_model_router_vision_provider_sends_image_as_content_part() -> Non
     assert isinstance(image_part, ImagePart)
     assert image_part.data == b"\x89PNG..."
     assert image_part.mime_type == "image/png"
+
+
+async def test_model_router_vision_provider_appends_hint_to_prompt_when_given() -> None:
+    """`hint` (optional, keyword-only) is folded into the text prompt sent
+    alongside the image — the Protocol's only lever for a caller to steer
+    what an adapter prioritizes describing/transcribing."""
+    router = ModelRouter(config=RouterConfig(tiers={"vision": TierConfig(models=["fake-vlm"])}))
+    llm = _FakeLLMProvider()
+    adapter = ModelRouterVisionProvider(router, llm)
+    await adapter.describe_image(
+        b"\x89PNG...", mime_type="image/png", hint="Focus on the error message."
+    )
+    assert llm.last_request is not None
+    content = llm.last_request.messages[0].content
+    assert isinstance(content, list)
+    text_part = content[0]
+    assert "Focus on the error message." in text_part.text  # type: ignore[union-attr]
+
+
+async def test_model_router_vision_provider_omits_hint_block_when_not_given() -> None:
+    """No `hint` (the default) leaves the prompt exactly as it was before
+    this parameter existed — a regression here would silently change every
+    existing caller's prompt."""
+    router = ModelRouter(config=RouterConfig(tiers={"vision": TierConfig(models=["fake-vlm"])}))
+    llm = _FakeLLMProvider()
+    adapter = ModelRouterVisionProvider(router, llm)
+    await adapter.describe_image(b"\x89PNG...", mime_type="image/png")
+    assert llm.last_request is not None
+    content = llm.last_request.messages[0].content
+    assert isinstance(content, list)
+    text_part = content[0]
+    assert "User context" not in text_part.text  # type: ignore[union-attr]

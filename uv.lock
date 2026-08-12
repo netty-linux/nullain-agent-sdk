@@ -1938,7 +1938,7 @@ dev = [
 
 [[package]]
 name = "nullain-sdk"
-version = "0.7.0"
+version = "0.7.1"
 source = { editable = "nullain-sdk" }
 dependencies = [
     { name = "aiosqlite" },

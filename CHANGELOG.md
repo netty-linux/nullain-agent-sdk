@@ -9,6 +9,25 @@ covered by that guarantee at this pre-1.0 stage.
 
 ## [Unreleased]
 
+## [0.7.1] (nullain-sdk)
+
+### Added
+- `VisionProvider` port methods (`describe_image`/`ocr`/`analyze_screenshot`)
+  gain an optional, keyword-only `hint: str | None = None` parameter —
+  free-text guidance a caller can use to steer what an adapter prioritizes
+  (e.g. the end user's own question about the image). Purely additive: no
+  existing call site is affected, `VisionProvider` is not part of the
+  top-level `nullain.__all__` public surface (docs/api-stability.md), and
+  an optional keyword-only parameter with a default changes no observable
+  behavior for any caller that omits it — PATCH, not MINOR.
+  `ModelRouterVisionProvider` folds `hint` into its internal prompt when
+  given; an adapter does not sanitize it, so a caller feeding
+  user-supplied text is responsible for sanitizing it first — the SDK has
+  no way to know what "untrusted" means for a given deployment. Driven by
+  `nullain-agent`'s Fase 3 vision-port migration: the prior Groq-direct
+  call passed the user's chat message as a hint to prioritize the image
+  description, and the Protocol had no equivalent lever.
+
 ## [0.7.0] (nullain-sdk)
 
 ### Added
