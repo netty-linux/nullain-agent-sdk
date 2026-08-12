@@ -32,24 +32,32 @@ from nullain.router.router import ModelRouter
 class VisionProvider(Protocol):
     """Port: a visual-understanding adapter (image description, OCR, screenshots)."""
 
-    async def describe_image(self, image: bytes, *, mime_type: str) -> str:
+    async def describe_image(self, image: bytes, *, mime_type: str, hint: str | None = None) -> str:
         """Return a natural-language description of `image`.
 
         Args:
             image: Raw image bytes.
             mime_type: The image's MIME type (e.g. ``"image/png"``).
+            hint: Optional free-text guidance to prioritize what the
+                description covers (e.g. the user's own question about the
+                image). Passed through to the underlying model as-is — an
+                adapter does not sanitize it, so a caller feeding
+                user-supplied text must sanitize it first (the SDK has no
+                way to know what "untrusted" means for a given deployment).
 
         Returns:
             A plain-text description of the image's visual content.
         """
         ...
 
-    async def ocr(self, image: bytes, *, mime_type: str) -> str:
+    async def ocr(self, image: bytes, *, mime_type: str, hint: str | None = None) -> str:
         """Return the text transcribed from `image`.
 
         Args:
             image: Raw image bytes.
             mime_type: The image's MIME type (e.g. ``"image/png"``).
+            hint: Optional free-text guidance (see `describe_image`). Not
+                sanitized by the adapter.
 
         Returns:
             The image's text content, verbatim, or an empty string when
@@ -57,12 +65,16 @@ class VisionProvider(Protocol):
         """
         ...
 
-    async def analyze_screenshot(self, image: bytes, *, mime_type: str) -> str:
+    async def analyze_screenshot(
+        self, image: bytes, *, mime_type: str, hint: str | None = None
+    ) -> str:
         """Return a UI-oriented analysis of a screenshot in `image`.
 
         Args:
             image: Raw screenshot bytes.
             mime_type: The image's MIME type (e.g. ``"image/png"``).
+            hint: Optional free-text guidance (see `describe_image`). Not
+                sanitized by the adapter.
 
         Returns:
             A plain-text description of the screenshot's UI state —
@@ -120,7 +132,11 @@ class ModelRouterVisionProvider:
         self._llm = llm
         self._tier = tier
 
-    async def _run(self, prompt: str, image: bytes, mime_type: str) -> str:
+    async def _run(self, prompt: str, image: bytes, mime_type: str, hint: str | None) -> str:
+        if hint and hint.strip():
+            prompt = (
+                f"{prompt}\n\nUser context (use it to prioritize relevant details):\n{hint.strip()}"
+            )
         model = self._router.select_model(self._tier)
         request = CompletionRequest(
             model=model,
@@ -144,14 +160,16 @@ class ModelRouterVisionProvider:
             ) from err
         return chunk.delta_text
 
-    async def describe_image(self, image: bytes, *, mime_type: str) -> str:
-        return await self._run(_DESCRIBE_PROMPT, image, mime_type)
+    async def describe_image(self, image: bytes, *, mime_type: str, hint: str | None = None) -> str:
+        return await self._run(_DESCRIBE_PROMPT, image, mime_type, hint)
 
-    async def ocr(self, image: bytes, *, mime_type: str) -> str:
-        return await self._run(_OCR_PROMPT, image, mime_type)
+    async def ocr(self, image: bytes, *, mime_type: str, hint: str | None = None) -> str:
+        return await self._run(_OCR_PROMPT, image, mime_type, hint)
 
-    async def analyze_screenshot(self, image: bytes, *, mime_type: str) -> str:
-        return await self._run(_ANALYZE_SCREENSHOT_PROMPT, image, mime_type)
+    async def analyze_screenshot(
+        self, image: bytes, *, mime_type: str, hint: str | None = None
+    ) -> str:
+        return await self._run(_ANALYZE_SCREENSHOT_PROMPT, image, mime_type, hint)
 
 
 __all__ = ["ModelRouterVisionProvider", "VisionProvider"]
